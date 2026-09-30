@@ -5,6 +5,7 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.types.StorageManager;
 import peruncs.cluster.errors.ReaderWriteRejectedException;
 import peruncs.cluster.storage.StorageGraphCoordinator;
+import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 
 /// Read-only facade for reader roles: it rejects durable application writes
 /// while keeping reads, maintenance, and restore working.
@@ -34,7 +35,15 @@ final class ReadOnlyStorageManager<T> extends GuardingStorageManager<T> {
     ReadOnlyStorageManager(final StorageManager delegate,
                            final NodeClose nodeClose,
                            final StorageGraphCoordinator graphCoordinator) {
-        super(delegate, StorageSizeValidation.notReached(), nodeClose, graphCoordinator);
+        this(delegate, nodeClose, graphCoordinator, null);
+    }
+
+    ReadOnlyStorageManager(final StorageManager delegate,
+                           final NodeClose nodeClose,
+                           final StorageGraphCoordinator graphCoordinator,
+                           final ReplicationMark replicationMark) {
+        super(delegate, () -> false, nodeClose, graphCoordinator,
+                replicationMark, ignored -> { }, ignored -> { });
     }
 
     @Override

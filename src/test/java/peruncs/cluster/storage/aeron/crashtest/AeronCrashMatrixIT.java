@@ -1,6 +1,5 @@
 package peruncs.cluster.storage.aeron.crashtest;
 
-
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.test.ChildJava;
 
@@ -8,6 +7,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -21,7 +21,7 @@ class AeronCrashMatrixIT {
         if (!Files.exists(root)) return;
         IOException failure = null;
         try (var paths = Files.walk(root)) {
-            for (final Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
+            for (final Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
                 try {
                     Files.deleteIfExists(path);
                 } catch (final IOException deleteFailure) {
@@ -33,23 +33,24 @@ class AeronCrashMatrixIT {
         if (failure != null) throw failure;
     }
 
-        /// Verifies kill during checkpoint temp write retains previous checkpoint.
+    /// Verifies a process kill during atomic replacement preserves the old value.
     @Test
-    void killDuringCheckpointTempWriteRetainsPreviousCheckpoint() throws Exception {
+    void killDuringAtomicReplacementPreservesPreviousValue() throws Exception {
         final Path base = Files.createTempDirectory("dg-crash-matrix-");
+        final Path state = base.resolve("state.bin");
         Process crashChild = null;
         try {
-            this.launch(base, "baseline", false);
+            this.launch(base, state, "baseline", false);
             Files.deleteIfExists(base.resolve("control/ready"));
             Files.deleteIfExists(base.resolve("control/after-temp-write"));
-            crashChild = this.launch(base, "crash-write", true);
+            crashChild = this.launch(base, state, "crash-write", true);
             final Path milestone = base.resolve("control/after-temp-write");
             this.await(milestone);
             crashChild.destroyForcibly();
             assertTrue(crashChild.waitFor(10, TimeUnit.SECONDS), "crash child did not exit");
-            assertEquals("baseline", Files.readString(base.resolve("checkpoint.bin"), StandardCharsets.UTF_8));
+            assertEquals("baseline", Files.readString(state, StandardCharsets.UTF_8));
 
-            this.launch(base, "recover", false);
+            this.launch(base, state, "recover", false);
             assertEquals("OUTCOME=baseline",
                     Files.readString(base.resolve("control/outcome"), StandardCharsets.UTF_8));
         } finally {
@@ -58,7 +59,7 @@ class AeronCrashMatrixIT {
         }
     }
 
-    private Process launch(final Path base, final String mode, final boolean wait)
+    private Process launch(final Path base, final Path state, final String mode, final boolean wait)
             throws IOException, InterruptedException {
         /* Crash-child output goes to files, not pipes: a pipe nobody drains
          * while the parent waits for a milestone fills up, the child blocks
@@ -69,7 +70,8 @@ class AeronCrashMatrixIT {
         final String javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         final Process process = new ProcessBuilder(javaExecutable, "--enable-preview", "--add-modules", "jdk.incubator.vector",
                 "-cp", ChildJava.classpath(),
-                "-Ddg.crash.base=%s".formatted(base), "-Ddg.crash.mode=%s".formatted(mode),
+                "-Ddg.crash.base=%s".formatted(base), "-Ddg.crash.state=%s".formatted(state),
+                "-Ddg.crash.mode=%s".formatted(mode),
                 AeronCrashChildMain.class.getName())
                 .redirectOutput(stdout.toFile())
                 .redirectError(stderr.toFile())

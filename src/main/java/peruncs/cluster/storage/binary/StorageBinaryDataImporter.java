@@ -1,11 +1,11 @@
 package peruncs.cluster.storage.binary;
 
 import org.eclipse.serializer.collections.types.XGettingEnum;
-import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.util.X;
 import org.eclipse.store.storage.types.StorageConnection;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -16,36 +16,6 @@ import static org.eclipse.serializer.util.X.notNull;
 public final class StorageBinaryDataImporter {
     private static final ByteBuffer EMPTY_BACKING = ByteBuffer.allocateDirect(0);
     private StorageBinaryDataImporter() {
-    }
-
-        /// Imports a snapshot of the source buffers and returns the native buffers that
-    /// remain owned by the caller for subsequent object-graph materialization.
-    /// Source positions are never changed.
-    ///
-    /// @param storage       destination Store connection
-    /// @param sourceBuffers source buffers
-    /// @return imported native buffers, owned by the caller
-    static ByteBuffer[] importOwned(
-            final StorageConnection storage,
-            final ByteBuffer[] sourceBuffers
-    ) {
-        notNull(storage);
-        notNull(sourceBuffers);
-        final ByteBuffer[] ownedBuffers = copyBuffers(sourceBuffers);
-        try {
-            return importAndReset(storage, ownedBuffers);
-        } catch (final RuntimeException | Error failure) {
-            releaseAfterFailure(ownedBuffers, failure);
-            throw failure;
-        }
-    }
-
-    private static ByteBuffer[] importAndReset(final StorageConnection storage, final ByteBuffer[] importedBuffers) {
-        /* The pinned Store import task reads buffer addresses and limits, and
-         * its file-copy path slices a duplicate. It does not change these
-         * owned views before the synchronous importData call returns. */
-        storage.importData(asBufferEnum(importedBuffers));
-        return importedBuffers;
     }
 
     private static XGettingEnum<ByteBuffer> asBufferEnum(final ByteBuffer[] buffers) {
@@ -61,14 +31,7 @@ public final class StorageBinaryDataImporter {
     /// @return distinctly owned native copies
     static ByteBuffer[] copyOwned(final ByteBuffer[] sourceBuffers, final NativeBufferPool pool) {
         notNull(sourceBuffers);
-        return copyBuffers(sourceBuffers, notNull(pool));
-    }
-
-    private static ByteBuffer[] copyBuffers(final ByteBuffer[] sourceBuffers) {
-        return copyBuffers(sourceBuffers, null);
-    }
-
-    private static ByteBuffer[] copyBuffers(final ByteBuffer[] sourceBuffers, final NativeBufferPool pool) {
+        notNull(pool);
         final ByteBuffer[] ownedBuffers = new ByteBuffer[sourceBuffers.length];
         try {
             for (int i = 0; i < sourceBuffers.length; i++) {
@@ -82,9 +45,7 @@ public final class StorageBinaryDataImporter {
                     ownedBuffers[i] = EMPTY_BACKING.duplicate();
                     continue;
                 }
-                final ByteBuffer owned = pool == null
-                        ? XMemory.allocateDirectNative(sourceLength)
-                        : pool.acquire(sourceLength);
+                final ByteBuffer owned = pool.acquire(sourceLength);
                 ownedBuffers[i] = owned;
                 owned.put(0, source, 0, sourceLength);
                 owned.limit(sourceLength);
@@ -154,42 +115,30 @@ public final class StorageBinaryDataImporter {
         try {
             storage.importData(asBufferEnum(imported));
         } finally {
-            if (imported == reusableViews) java.util.Arrays.fill(imported, null);
+            if (imported == reusableViews) Arrays.fill(imported, null);
         }
         return true;
-    }
-
-    private static void releaseAfterFailure(final ByteBuffer[] buffers, final Throwable failure) {
-        releaseAfterFailure(buffers, null, failure);
     }
 
     private static void releaseAfterFailure(
             final ByteBuffer[] buffers, final NativeBufferPool pool, final Throwable failure) {
         try {
-            if (pool == null) release(buffers);
-            else release(buffers, pool);
+            release(buffers, pool);
         } catch (final Throwable cleanupFailure) {
             if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
         }
     }
 
-        /// Releases native buffers returned by [#importOwned(StorageConnection, ByteBuffer\[\])].
-    ///
-    /// Every non-empty owned slot is deallocated. Empty views have no native
-    /// ownership; the shared backing remains available for later imports.
+    /// Returns owned buffers to their required reader pool.
     ///
     /// @param buffers buffers to release
-    static void release(final ByteBuffer[] buffers) {
-        if (buffers == null) return;
-        release(buffers, buffers.length);
-    }
-
+    /// @param pool pool that allocated the buffers
     static void release(final ByteBuffer[] buffers, final NativeBufferPool pool) {
         if (buffers == null) return;
-        release(buffers, buffers.length, notNull(pool));
+        release(buffers, buffers.length, pool);
     }
 
-        /// Releases the first `length` slots of a scratch array.
+    /// Releases the first `length` slots of a scratch array.
     ///
     /// Scratch arrays are usually larger than the batch they hold; only the
     /// populated prefix is owned. Slots past `length` are untouched and keep
@@ -197,12 +146,9 @@ public final class StorageBinaryDataImporter {
     ///
     /// @param buffers scratch array holding owned buffers in its prefix
     /// @param length  number of populated prefix slots
-    static void release(final ByteBuffer[] buffers, final int length) {
-        release(buffers, length, null);
-    }
-
     static void release(final ByteBuffer[] buffers, final int length, final NativeBufferPool pool) {
         if (buffers == null) return;
+        notNull(pool);
         if (length < 0 || length > buffers.length) {
             throw new IllegalArgumentException("release length out of range: %s".formatted(length));
         }
@@ -211,8 +157,7 @@ public final class StorageBinaryDataImporter {
             final ByteBuffer buffer = buffers[index];
             if (buffer != null && buffer.capacity() != 0) {
                 try {
-                    if (pool == null) XMemory.deallocateDirectByteBuffer(buffer);
-                    else pool.release(buffer);
+                    pool.release(buffer);
                 } catch (final RuntimeException cleanupFailure) {
                     if (failure == null) failure = cleanupFailure;
                     else failure.addSuppressed(cleanupFailure);

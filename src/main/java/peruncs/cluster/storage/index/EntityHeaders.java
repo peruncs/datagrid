@@ -1,101 +1,156 @@
 package peruncs.cluster.storage.index;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.binary.types.BinaryEntityDataReader;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import peruncs.cluster.errors.CorruptReplicationDataException;
 
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Objects;
 
 /// Reads Store entity headers with bounds checks before native materialization.
-public final class EntityHeaders {
-    /* Serializer reads these headers through XMemory's native-order accessors. */
-    private static final ValueLayout.OfLong LONG =
-            ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.nativeOrder());
+final class EntityHeaders {
     private static final int HEADER_BYTES = Binary.entityHeaderLength();
+    private static final VarHandle NATIVE_LONG =
+            MethodHandles.byteBufferViewVarHandle(long[].class, ByteOrder.nativeOrder());
 
     private EntityHeaders() {
     }
 
-    /// Validates all framing in a normalized direct buffer without copying it.
+    /// Validates framing with native-order reads without copying the buffer.
     ///
-    /// @param buffer direct buffer whose position is zero and limit is the logical data length
-    /// @throws IllegalArgumentException if the buffer is not direct or normalized
+    /// @param buffer buffer whose limit is the logical data length
     /// @throws CorruptReplicationDataException if its framing is malformed
-    public static void validateFraming(final ByteBuffer buffer) {
-        scan(buffer, null);
+    static void validateFraming(final ByteBuffer buffer) {
+        scan(buffer, buffer.limit(), null);
     }
 
     static void forEach(final ByteBuffer buffer, final EntityVisitor visitor) {
-        scan(buffer, Objects.requireNonNull(visitor, "visitor"));
+        scan(buffer, buffer.limit(), Objects.requireNonNull(visitor, "visitor"));
     }
 
-    /// Visits entity headers in Serializer's channel buffers without copying payload data.
+    /// Visits entity headers in Serializer's binary buffers without copying payload data.
     static void forEach(final Binary binary, final EntityVisitor visitor) {
         Objects.requireNonNull(binary, "binary");
         Objects.requireNonNull(visitor, "visitor");
+        forEach(binary, visitor, null);
+    }
+
+    /// Scans entity types and reads object ids only for the replication-mark type.
+    static void forEachWriterCommit(final Binary binary, final EntityVisitor visitor,
+                                    final long replicationMarkTypeId) {
+        Objects.requireNonNull(binary, "binary");
+        Objects.requireNonNull(visitor, "visitor");
         final boolean wrapped = binary instanceof ChunksWrapper;
-        binary.iterateChannelChunks(channel -> {
-            if (channel == null) throw invalid(0L, "null channel");
-            for (final ByteBuffer source : channel.buffers()) {
-                if (source == null) throw invalid(0L, "null channel buffer");
-                /* Serializer's ChunksWrapper uses position as its written
-                 * length; ordinary Binary channels use limit. In both cases
-                 * entity bytes start at the buffer's zero offset. */
-                final int logicalLength = wrapped ? source.position() : source.limit();
-                final ByteBuffer view = source.duplicate();
-                view.clear().limit(logicalLength);
-                scan(view, visitor);
-            }
+        binary.iterateEntityData(source -> {
+            if (source == null) throw invalid(0L, "null binary buffer");
+            final int logicalLength = wrapped ? source.position() : source.limit();
+            scan(source, logicalLength, visitor, true, replicationMarkTypeId);
         });
     }
 
-    private static void scan(final ByteBuffer buffer, final EntityVisitor visitor) {
+    /// Visits entity type ids for the writer's bounded index pre-filter.
+    static void forEachTypeId(final Binary binary, final TypeIdVisitor visitor) {
+        Objects.requireNonNull(binary, "binary");
+        Objects.requireNonNull(visitor, "visitor");
+        forEach(binary, null, visitor);
+    }
+
+    static void forEachTypeId(final ByteBuffer buffer, final TypeIdVisitor visitor) {
+        scanTypeIds(buffer, buffer.limit(), Objects.requireNonNull(visitor, "visitor"));
+    }
+
+    private static void forEach(final Binary binary, final EntityVisitor visitor,
+                                final TypeIdVisitor typeVisitor) {
+        final boolean wrapped = binary instanceof ChunksWrapper;
+        final BinaryEntityDataReader reader = source -> {
+            if (source == null) throw invalid(0L, "null binary buffer");
+            /* ChunksWrapper uses position as written length; Store chunks use
+             * limit. Both scanners read absolute offsets in Serializer's
+             * native byte order without changing the supplied view. */
+            final int logicalLength = wrapped ? source.position() : source.limit();
+            if (typeVisitor == null) {
+                scan(source, logicalLength, visitor);
+            } else {
+                scanTypeIds(source, logicalLength, typeVisitor);
+            }
+        };
+        binary.iterateEntityData(reader);
+    }
+
+    private static void scan(final ByteBuffer buffer, final int end, final EntityVisitor visitor) {
+        scan(buffer, end, visitor, false, 0L);
+    }
+
+    private static void scan(final ByteBuffer buffer, final int end, final EntityVisitor visitor,
+                             final boolean selectiveObjectIds, final long objectIdTypeId) {
         Objects.requireNonNull(buffer, "buffer");
-        if (!buffer.isDirect() || buffer.position() != 0) {
-            throw new IllegalArgumentException("entity headers require a normalized direct buffer");
+        if (end < 0 || end > buffer.limit()) {
+            throw new IllegalArgumentException("entity header scan length exceeds buffer bounds");
         }
-        final MemorySegment segment = MemorySegment.ofBuffer(buffer);
-        final long end = segment.byteSize();
-        long offset = 0L;
+        final boolean nativeOrder = buffer.order() == ByteOrder.nativeOrder();
+        int offset = 0;
         while (offset < end) {
-            if (end - offset < Long.BYTES) throw invalid(offset, "truncated item length");
-            final long itemLength;
-            try {
-                itemLength = segment.get(LONG, offset);
-            } catch (final IndexOutOfBoundsException failure) {
-                throw invalid(offset, "truncated item length");
-            }
-            if (itemLength == 0L || itemLength == Long.MIN_VALUE) {
-                throw invalid(offset, "invalid item length");
-            }
-            if (itemLength < 0L) {
+            final int remaining = end - offset;
+            if (remaining < Long.BYTES) throw invalid(offset, "truncated item length");
+            final long itemLength = nativeLong(buffer, offset, nativeOrder);
+            if (itemLength > 0L) {
+                if (itemLength < HEADER_BYTES || itemLength > remaining) {
+                    throw invalid(offset, "entity exceeds buffer or header");
+                }
+                if (visitor != null) {
+                    final long typeId = nativeLong(buffer, offset + Long.BYTES, nativeOrder);
+                    final long objectId = !selectiveObjectIds || typeId == objectIdTypeId
+                            ? nativeLong(buffer, offset + 2 * Long.BYTES, nativeOrder) : -1L;
+                    visitor.entity(typeId, objectId);
+                }
+                offset += (int) itemLength;
+            } else {
+                if (itemLength == Long.MIN_VALUE) throw invalid(offset, "invalid item length");
                 final long commentLength = -itemLength;
-                if (commentLength < Long.BYTES || commentLength > end - offset) {
+                if (commentLength < Long.BYTES || commentLength > remaining) {
                     throw invalid(offset, "comment exceeds buffer or length field");
                 }
-                offset += commentLength;
+                offset += (int) commentLength;
+            }
+        }
+    }
+
+    private static void scanTypeIds(final ByteBuffer buffer, final int end, final TypeIdVisitor visitor) {
+        Objects.requireNonNull(buffer, "buffer");
+        if (end < 0 || end > buffer.limit()) {
+            throw new IllegalArgumentException("entity header scan length exceeds buffer bounds");
+        }
+        final boolean nativeOrder = buffer.order() == ByteOrder.nativeOrder();
+        int offset = 0;
+        while (offset < end) {
+            final int remaining = end - offset;
+            if (remaining < Long.BYTES) throw invalid(offset, "truncated item length");
+            final long itemLength = nativeLong(buffer, offset, nativeOrder);
+            if (itemLength < 0L) {
+                if (itemLength == Long.MIN_VALUE) throw invalid(offset, "invalid item length");
+                final long commentLength = -itemLength;
+                if (commentLength < Long.BYTES || commentLength > remaining) {
+                    throw invalid(offset, "comment exceeds buffer or length field");
+                }
+                offset += (int) commentLength;
                 continue;
             }
-            if (itemLength < HEADER_BYTES || itemLength > end - offset) {
+            if (itemLength < HEADER_BYTES || itemLength > remaining) {
                 throw invalid(offset, "entity exceeds buffer or header");
             }
-            if (visitor != null) {
-                final long typeId;
-                final long objectId;
-                try {
-                    typeId = segment.get(LONG, offset + Long.BYTES);
-                    objectId = segment.get(LONG, offset + 2L * Long.BYTES);
-                } catch (final IndexOutOfBoundsException failure) {
-                    throw invalid(offset, "truncated entity header");
-                }
-                visitor.entity(typeId, objectId, offset, itemLength);
-            }
-            offset += itemLength;
+            visitor.typeId(nativeLong(buffer, offset + Long.BYTES, nativeOrder));
+            offset += (int) itemLength;
         }
+    }
+
+    private static long nativeLong(final ByteBuffer buffer, final int offset, final boolean bufferHasNativeOrder) {
+        return bufferHasNativeOrder
+                ? buffer.getLong(offset)
+                : (long) NATIVE_LONG.get(buffer, offset);
     }
 
     private static CorruptReplicationDataException invalid(final long offset, final String reason) {
@@ -105,6 +160,12 @@ public final class EntityHeaders {
 
     @FunctionalInterface
     interface EntityVisitor {
-        void entity(long typeId, long objectId, long offset, long length);
+        void entity(long typeId, long objectId);
+    }
+
+    @FunctionalInterface
+    interface TypeIdVisitor {
+        /// Examines one entity type id.
+        void typeId(long typeId);
     }
 }

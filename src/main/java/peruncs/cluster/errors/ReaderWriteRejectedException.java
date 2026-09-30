@@ -1,7 +1,7 @@
 package peruncs.cluster.errors;
 
 /// Reports a write attempted through a read-only cluster node.
-public class ReaderWriteRejectedException extends ReplicationException {
+public final class ReaderWriteRejectedException extends ReplicationException {
     /// Creates the exception with a message.
     ///
     /// @param message diagnostic message

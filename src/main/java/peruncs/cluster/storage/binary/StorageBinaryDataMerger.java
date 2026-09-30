@@ -10,7 +10,7 @@ import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryProvider;
 import org.eclipse.serializer.typing.Disposable;
 import org.eclipse.store.storage.types.StorageConnection;
-import peruncs.cluster.api.NodeSettingsSource;
+import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.errors.CorruptReplicationDataException;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.storage.ReplicationRetry;
@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static org.eclipse.serializer.util.X.notNull;
@@ -81,10 +82,11 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
     ///
     /// @param foundation                persistence foundation
     /// @param storage                   Store connection
-    /// @param objectGraphUpdateHandler  graph update handler
+    /// @param graphUpdater              runs updates inside the Store's graph write section
     /// @param cachingTimeoutMs          maximum wait for a cached batch
     /// @param cachedBytesLimit          queued payload bytes that trigger a backpressure wait
     /// @param maxCachedBytes            hard cap on queued payload bytes
+    /// @param bufferPoolRetainedBytes   maximum native buffer bytes retained after a batch
     /// @param applyTimeoutMs            maximum wait for one materialization batch
     /// @param disposeOrderlyTimeoutMs   orderly worker termination window during disposal
     /// @param disposeInterruptTimeoutMs interrupt-based worker termination window during disposal
@@ -93,10 +95,11 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
     public record Configuration(
             BinaryPersistenceFoundation<?> foundation,
             StorageConnection storage,
-            ObjectGraphUpdateHandler objectGraphUpdateHandler,
+            Consumer<Runnable> graphUpdater,
             long cachingTimeoutMs,
             long cachedBytesLimit,
             long maxCachedBytes,
+            long bufferPoolRetainedBytes,
             long applyTimeoutMs,
             long disposeOrderlyTimeoutMs,
             long disposeInterruptTimeoutMs,
@@ -107,10 +110,13 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
         public Configuration {
             Objects.requireNonNull(foundation, "foundation");
             Objects.requireNonNull(storage, "storage");
-            Objects.requireNonNull(objectGraphUpdateHandler, "objectGraphUpdateHandler");
+            Objects.requireNonNull(graphUpdater, "graphUpdater");
             if (cachingTimeoutMs < 0L) throw new IllegalArgumentException("cachingTimeoutMs must not be negative");
             if (cachedBytesLimit <= 0L) throw new IllegalArgumentException("cachedBytesLimit must be positive");
             if (maxCachedBytes <= 0L) throw new IllegalArgumentException("maxCachedBytes must be positive");
+            if (bufferPoolRetainedBytes < 0L) {
+                throw new IllegalArgumentException("bufferPoolRetainedBytes must not be negative");
+            }
             if (applyTimeoutMs <= 0L) throw new IllegalArgumentException("applyTimeoutMs must be positive");
             if (disposeOrderlyTimeoutMs <= 0L) {
                 throw new IllegalArgumentException("disposeOrderlyTimeoutMs must be positive");
@@ -127,21 +133,22 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
         ///
         /// @param foundation               persistence foundation
         /// @param storage                  Store connection
-        /// @param objectGraphUpdateHandler graph update handler
+        /// @param graphUpdater             runs updates inside the Store's graph write section
         /// @param graphCoordinator         per-Store graph coordinator, or `null`
         /// @return configuration using the default limits
         public static Configuration create(
                 final BinaryPersistenceFoundation<?> foundation,
                 final StorageConnection storage,
-                final ObjectGraphUpdateHandler objectGraphUpdateHandler,
+                final Consumer<Runnable> graphUpdater,
                 final StorageGraphCoordinator graphCoordinator) {
             return new Configuration(
                     foundation,
                     storage,
-                    objectGraphUpdateHandler,
+                    graphUpdater,
                     CACHING_TIMEOUT_MS,
                     CACHING_BYTES_LIMIT,
                     MAX_CACHED_BYTES,
+                    NodeConfig.Limits.DEFAULT_BUFFER_POOL_RETAINED_BYTES,
                     APPLY_TIMEOUT_MS,
                     DISPOSE_ORDERLY_TIMEOUT_MS,
                     DISPOSE_INTERRUPT_TIMEOUT_MS,
@@ -173,7 +180,7 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
     /// Default interrupt-based worker termination window during disposal, in milliseconds.
     static final long DISPOSE_INTERRUPT_TIMEOUT_MS = 5_000L;
     /// Default bound on index-relevant objects and collection entries visited by one root scan.
-    static final int MAX_VALIDATED_INDEX_OBJECTS = NodeSettingsSource.DEFAULT_INDEX_VALIDATION_MAX_OBJECTS;
+    static final int MAX_VALIDATED_INDEX_OBJECTS = NodeConfig.Limits.DEFAULT_MAX_VALIDATED_INDEX_OBJECTS;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
             .name("eclipse-datagrid-store-materializer", 0L)
             .factory());
@@ -188,7 +195,7 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
     private final LockedExecutor materialization = LockedExecutor.New();
     private final BinaryPersistenceFoundation<?> foundation;
     private final StorageConnection storage;
-    private final ObjectGraphUpdateHandler objectGraphUpdateHandler;
+    private final Consumer<Runnable> graphUpdater;
     private final StorageGraphCoordinator graphCoordinator;
     private final long maxCachedBytes;
     private final long applyTimeoutMs;
@@ -220,7 +227,7 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
 private StorageBinaryDataMerger(final Configuration configuration) {
         this.foundation = configuration.foundation();
         this.storage = configuration.storage();
-        this.objectGraphUpdateHandler = configuration.objectGraphUpdateHandler();
+        this.graphUpdater = configuration.graphUpdater();
         this.graphCoordinator = configuration.graphCoordinator();
         final long cachingTimeoutMs = configuration.cachingTimeoutMs();
         final long cacheBytesLimit = configuration.cachedBytesLimit();
@@ -235,7 +242,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
             throw new IllegalArgumentException("applyTimeoutMs is too large for the full materialization and index-refresh wait: %s"
                     .formatted(applyTimeoutMs), overflow);
         }
-        this.bufferPool = new NativeBufferPool(Math.min(NativeBufferPool.MAX_RETAINED_BYTES, this.maxCachedBytes));
+        this.bufferPool = new NativeBufferPool(Math.min(configuration.bufferPoolRetainedBytes(), this.maxCachedBytes));
         this.queue = new ApplyQueue(this, this.bufferPool, cacheBytesLimit, this.maxCachedBytes, this.applyTimeoutMs);
         this.worker = new ApplyWorker(
                 this,
@@ -245,7 +252,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
                 this.watchdog,
                 this.foundation,
                 this.storage,
-                this.objectGraphUpdateHandler,
+                this.graphUpdater,
                 cachingTimeoutMs,
                 configuration.maxValidatedIndexObjects(),
                 this.materializationBudgetMs);
@@ -265,6 +272,11 @@ private StorageBinaryDataMerger(final Configuration configuration) {
     @Override
     public boolean canReceiveDataOwned() {
         return true;
+    }
+
+    @Override
+    public boolean canAcceptOwnedData(final long payloadBytes) {
+        return this.failure.get() != null || this.disposed || this.queue.canAdmitWithoutWaiting(payloadBytes);
     }
 
     @Override
@@ -500,7 +512,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
              * side, so handler registration runs on the write side. Lock
              * order matches the worker — materialization lock outside,
              * coordinator inside — so the two paths cannot deadlock. */
-            this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
+            this.graphUpdater.accept(() ->
                     applyDictionaryMerge(pending));
         });
     }
@@ -697,7 +709,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
 
     /// Blocks until the received binary is materialized into the object graph.
     ///
-    /// This is the durability boundary behind replication cursors and
+    /// This is the durability boundary behind replication positions and
     /// acknowledgements: it bypasses the normal coalescing delay, which
     /// would otherwise add the full cache timeout to every commit, and
     /// drains under the worker's own lock. The worker is woken with a flag
@@ -720,7 +732,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         }
         /*
          * The normal merger deliberately delays materialization to coalesce updates.
-         * A replication cursor/ACK, however, is a durability boundary: waiting for
+         * A replication position/ACK, however, is a durability boundary: waiting for
          * the delayed task would add the full cache timeout to every Aeron commit.
          * Drain immediately under the same lock used by the worker. The delayed
          * worker is deliberately not interrupted: it may already be inside Store

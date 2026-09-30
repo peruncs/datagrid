@@ -1,7 +1,9 @@
 package peruncs.cluster.node.store;
 
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.cluster.api.NodeConfig;
 
+import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
@@ -19,7 +21,17 @@ public interface StorageTaskExecutor extends AutoCloseable {
     /// @param connection Store connection
     /// @return task executor
     static StorageTaskExecutor create(final StorageConnection connection) {
-        return new Default(Objects.requireNonNull(connection, "connection"));
+        return create(connection, NodeConfig.Operations.DEFAULT.storageCheckCloseTimeout());
+    }
+
+    /// Creates a storage task executor with a bounded close wait.
+    ///
+    /// @param connection Store connection
+    /// @param closeTimeout maximum wait for the executor to stop
+    /// @return task executor
+    static StorageTaskExecutor create(final StorageConnection connection, final Duration closeTimeout) {
+        return new Default(Objects.requireNonNull(connection, "connection"),
+                Objects.requireNonNull(closeTimeout, "closeTimeout"));
     }
 
         /// Starts a storage check task.
@@ -47,42 +59,50 @@ public interface StorageTaskExecutor extends AutoCloseable {
         /// Implements the single-flight storage-check state machine.
     final class Default implements StorageTaskExecutor {
         private static final System.Logger LOGGER = System.getLogger(StorageTaskExecutor.class.getName());
-        private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
+        private static final Future<?> SHUTDOWN = CompletableFuture.completedFuture(null);
         private final StorageConnection connection;
         private final ExecutorService executor;
+        private final Duration closeTimeout;
         private final AtomicReference<Throwable> failure = new AtomicReference<>();
-
         private final AtomicReference<Future<?>> checksTask = new AtomicReference<>();
-        private volatile boolean startingShutdown;
-        private volatile boolean closed;
 
                 /// Creates the shared executor state.
         ///
         /// @param connection Store connection
-        private Default(final StorageConnection connection) {
+        private Default(final StorageConnection connection, final Duration closeTimeout) {
+            if (closeTimeout.toMillis() <= 0L) {
+                throw new IllegalArgumentException("closeTimeout must be positive");
+            }
             this.connection = connection;
+            this.closeTimeout = closeTimeout;
             this.executor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
                     .name("EclipseStore-StorageChecks", 0L)
                     .factory());
         }
 
         @Override
-        public synchronized void runChecks() {
-            if (this.closed || this.startingShutdown) {
-                throw new IllegalStateException("Storage task executor is closed");
-            }
-            final Future<?> current = this.checksTask.get();
-            if (current != null && !current.isDone()) return;
-            LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage checks");
-            try {
-                this.checksTask.set(this.executor.submit(this::runChecksTask));
-            } catch (final RejectedExecutionException rejected) {
-                /* Close won the race after the state check above and shut the
-                 * executor down. Report closed instead of leaking the rejection. */
-                if (this.closed || this.startingShutdown) {
-                    throw new IllegalStateException("Storage task executor is closed", rejected);
+        public void runChecks() {
+            while (true) {
+                final Future<?> current = this.checksTask.get();
+                if (current == SHUTDOWN) {
+                    throw new IllegalStateException("Storage task executor is closed");
                 }
-                throw rejected;
+                if (current != null && !current.isDone()) return;
+                final FutureTask<Void> next = new FutureTask<>(this::runChecksTask, null);
+                if (!this.checksTask.compareAndSet(current, next)) continue;
+                LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage checks");
+                try {
+                    this.executor.execute(next);
+                    return;
+                } catch (final RejectedExecutionException rejected) {
+                    next.cancel(false);
+                    /* Close atomically replaced this task slot with SHUTDOWN
+                     * before shutting down the executor. */
+                    if (this.checksTask.get() == SHUTDOWN) {
+                        throw new IllegalStateException("Storage task executor is closed", rejected);
+                    }
+                    throw rejected;
+                }
             }
         }
 
@@ -98,19 +118,15 @@ public interface StorageTaskExecutor extends AutoCloseable {
         }
 
         @Override
-        public synchronized void close() {
-            if (this.closed) return;
-            if (!this.startingShutdown) {
-                this.startingShutdown = true;
-                final Future<?> task = this.checksTask.get();
-                if (task != null) task.cancel(true);
-                this.executor.shutdownNow();
-            }
+        public void close() {
+            final Future<?> task = this.checksTask.getAndSet(SHUTDOWN);
+            if (task != null && task != SHUTDOWN) task.cancel(true);
+            this.executor.shutdownNow();
             RuntimeException failure = null;
             try {
-                if (!this.executor.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                if (!this.executor.awaitTermination(this.closeTimeout.toMillis(), TimeUnit.MILLISECONDS)) {
                     failure = new IllegalStateException(
-                            "Storage checks did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
+                            "Storage checks did not stop within %s ms".formatted(this.closeTimeout.toMillis()));
                 }
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
@@ -122,7 +138,6 @@ public interface StorageTaskExecutor extends AutoCloseable {
             if (failure != null) {
                 throw failure;
             }
-            this.closed = true;
         }
 
         private void runChecksTask() {

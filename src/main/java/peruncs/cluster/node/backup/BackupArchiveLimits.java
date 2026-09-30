@@ -1,6 +1,6 @@
 package peruncs.cluster.node.backup;
 
-/// Budgets bounding backup restore, digest, and manifest reads.
+/// Budgets bounding backup restore, digest, and identity reads.
 ///
 /// The extraction byte budget is the absolute ceiling for one archive when
 /// its entries do not declare trustworthy sizes; the entry budget bounds how

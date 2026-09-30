@@ -13,6 +13,7 @@ import java.util.Arrays;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /// Runs the merger's single coalescing worker loop.
 ///
@@ -33,8 +34,8 @@ final class ApplyWorker {
     private final BinaryPersistenceFoundation<?> foundation;
     private final StorageConnection storage;
     private final StorageBinaryDataMaterializer dataMaterializer = new StorageBinaryDataMaterializer();
-    private final ClusterIndexMaintenance indexMaintenance = new ClusterIndexMaintenance();
-    private final ObjectGraphUpdateHandler objectGraphUpdateHandler;
+    private final ClusterIndexMaintenance indexMaintenance;
+    private final Consumer<Runnable> graphUpdater;
     private final long cachingTimeoutMs;
     private final int maxValidatedIndexObjects;
     /* The worker's own structured-scope deadline covers the caller's whole
@@ -53,7 +54,7 @@ final class ApplyWorker {
      * so no further synchronization is needed. The populated prefix holds
      * the batch; slots past it are always `null`. Grows to the largest
      * batch seen and stays there. */
-    private final Drain drain = new Drain();
+    private final Drain drain;
     /* Phase stamps for the batch budget. The materialization budget is
      * batch-proportional and stops at the materialization boundary; the
      * index refresh after it scans the whole store and gets a budget of its
@@ -64,6 +65,7 @@ final class ApplyWorker {
     private final Object budgetLock = new Object();
     private long materializedAtNanos;
     private long indexRefreshedAtNanos;
+    private ScheduledFuture<?> indexRefreshWatchdog;
 
     ApplyWorker(
             final MergerLifecycle owner,
@@ -73,18 +75,20 @@ final class ApplyWorker {
             final ScheduledExecutorService watchdog,
             final BinaryPersistenceFoundation<?> foundation,
             final StorageConnection storage,
-            final ObjectGraphUpdateHandler objectGraphUpdateHandler,
+            final Consumer<Runnable> graphUpdater,
             final long cachingTimeoutMs,
             final int maxValidatedIndexObjects,
             final long materializationBudgetMs) {
         this.owner = owner;
         this.queue = queue;
         this.bufferPool = bufferPool;
+        this.drain = new Drain(bufferPool.checked());
         this.materialization = materialization;
         this.watchdog = watchdog;
         this.foundation = foundation;
+        this.indexMaintenance = new ClusterIndexMaintenance(foundation.getTypeHandlerManager());
         this.storage = storage;
-        this.objectGraphUpdateHandler = objectGraphUpdateHandler;
+        this.graphUpdater = graphUpdater;
         this.cachingTimeoutMs = cachingTimeoutMs;
         this.maxValidatedIndexObjects = maxValidatedIndexObjects;
         this.materializationBudgetMs = materializationBudgetMs;
@@ -166,17 +170,18 @@ final class ApplyWorker {
                     this.materializationBudgetMs,
                     TimeUnit.MILLISECONDS);
             try {
-                this.objectGraphUpdateHandler.objectGraphUpdateAvailable(() ->
+                this.graphUpdater.accept(() ->
                         ClusterStoreIndexes.withRegistrationRead(() ->
                 {
                     /* One coordinator write section covers import,
-                     * materialization, validation, and index refresh. Application reads joining the read
+                     * materialization, validation, and graph invalidation. Application reads joining the read
                      * side observe either the pre-batch or the post-batch
                      * boundary — never a materialized graph with stale
                      * search views. */
                     int transactionOffset = 0;
                     for (int index = 0; index < pendingTransactions; index++) {
                         final int transactionLength = this.drain.transactionLengths[index];
+                        this.drain.checkOwnership(this.bufferPool, transactionOffset, transactionLength);
                         this.drain.ensureViews(transactionLength);
                         StorageBinaryDataImporter.importDirect(
                                 this.storage, this.drain.buffers, transactionOffset, transactionLength,
@@ -209,15 +214,15 @@ final class ApplyWorker {
                          * the same object. Index views are retired first so
                          * GigaMap's reloaded index state cannot retain a
                          * view over the pre-import files. */
+                        this.drain.checkOwnership(this.bufferPool, transactionOffset, transactionLength);
                         this.dataMaterializer.materialize(
                                 this.foundation, this.storage, this.drain.buffers,
                                 transactionOffset, transactionLength);
                         transactionOffset += transactionLength;
                     }
                     /* Materialization ends here: its batch-proportional budget
-                     * is spent, and the index refresh below — a whole-store
-                     * scan plus the vector rebuild — gets a separately bounded
-                     * phase so a large progressing rebuild is never charged
+                     * is spent, and index validation plus exclusive graph
+                     * warmup gets a separately bounded phase so a large rebuild is never charged
                      * against the materialization budget. Stamp and cancel
                      * under the budget lock so a concurrent expiry loses the
                      * race deterministically instead of latching a completed
@@ -226,30 +231,20 @@ final class ApplyWorker {
                         this.materializedAtNanos = System.nanoTime();
                         materializationWatchdog.cancel(false);
                     }
-                    final ScheduledFuture<?> refreshWatchdog = this.watchdog.schedule(
+                    this.indexRefreshWatchdog = this.watchdog.schedule(
                             () -> this.refreshBudgetExpired(startedNanos),
                             this.indexRefreshBudgetMs,
                             TimeUnit.MILLISECONDS);
-                    try {
-                        /* Reader-side index enforcement plus the vector
-                         * rebuild share one root-graph traversal: a writer that
-                         * smuggled an external Lucene directory or a
-                         * non-persisted vector index past registration fails
-                         * this reader closed instead of diverging it, and any
-                         * vector graph cleared above is rebuilt eagerly in the
-                         * same section. The scan visits index metadata only,
-                         * never entity payload, and the rebuild is skipped
-                         * entirely when the store has no vector indices. The
-                         * eager rebuild keeps the deadlock-avoidance invariant
-                         * documented on the maintenance entry point: a lazy
-                         * rebuild on the next query would race the following
-                         * batch's bulk materialization. */
-                        this.indexMaintenance.afterApply(this.storage, this.maxValidatedIndexObjects);
-                    } finally {
-                        synchronized (this.budgetLock) {
-                            this.indexRefreshedAtNanos = System.nanoTime();
-                            refreshWatchdog.cancel(false);
-                        }
+                    /* Reader-side index enforcement plus vector graph
+                     * invalidation share one root-graph traversal: an
+                     * unsupported index fails this reader closed. The scan
+                     * visits index metadata only, never entity payload. */
+                    if (this.indexMaintenance.afterApply(this.storage, this.maxValidatedIndexObjects)) {
+                        /* Keep graph creation inside this write boundary. Upstream JVector's lazy
+                         * first-use initialization is not safe when an application search can
+                         * enter at the same time as the post-import warmup. Once warm, concurrent
+                         * searches use its normal read path. */
+                        this.indexMaintenance.warmupVectorSearchGraphs();
                     }
                 }));
             } catch (final RuntimeException | Error failure) {
@@ -266,6 +261,13 @@ final class ApplyWorker {
                 throw failure;
             } finally {
                 materializationWatchdog.cancel(false);
+                synchronized (this.budgetLock) {
+                    if (this.indexRefreshWatchdog != null) {
+                        this.indexRefreshedAtNanos = System.nanoTime();
+                        this.indexRefreshWatchdog.cancel(false);
+                        this.indexRefreshWatchdog = null;
+                    }
+                }
                 try {
                     StorageBinaryDataImporter.release(this.drain.buffers, pending, this.bufferPool);
                 } finally {
@@ -350,17 +352,25 @@ final class ApplyWorker {
         ByteBuffer[] buffers = new ByteBuffer[16];
         ByteBuffer[] views = new ByteBuffer[0];
         int[] transactionLengths = new int[16];
+        long[] generations;
         int bufferCount;
         int transactionCount;
         long batchBytes;
         long startedNanos;
 
-        void ensureCapacity(final int buffersNeeded, final int transactionsNeeded) {
+        Drain(final boolean checked) {
+            this.generations = checked ? new long[16] : null;
+        }
+
+        void ensureCapacity(final int buffersNeeded, final int transactionsNeeded, final boolean checked) {
             if (buffersNeeded > this.buffers.length) {
                 this.buffers = new ByteBuffer[buffersNeeded];
             }
             if (transactionsNeeded > this.transactionLengths.length) {
                 this.transactionLengths = new int[transactionsNeeded];
+            }
+            if (checked && buffersNeeded > this.generations.length) {
+                this.generations = new long[buffersNeeded];
             }
         }
 
@@ -373,9 +383,17 @@ final class ApplyWorker {
             }
         }
 
+        void checkOwnership(final NativeBufferPool pool, final int offset, final int length) {
+            if (this.generations == null) return;
+            for (int index = offset; index < offset + length; index++) {
+                pool.checkGeneration(this.buffers[index], this.generations[index]);
+            }
+        }
+
         void clear() {
             Arrays.fill(this.buffers, 0, this.bufferCount, null);
             Arrays.fill(this.transactionLengths, 0, this.transactionCount, 0);
+            if (this.generations != null) Arrays.fill(this.generations, 0, this.bufferCount, 0L);
         }
     }
 }

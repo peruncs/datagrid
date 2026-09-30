@@ -7,6 +7,7 @@ import java.lang.reflect.Field;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import static org.eclipse.serializer.concurrency.LockedExecutor.New;
 import static org.junit.jupiter.api.Assertions.*;
@@ -17,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// be reported as a materialization timeout.
 class ApplyWorkerBudgetTest {
 
-    private static ApplyWorker worker(final MergerLifecycle owner, final ObjectGraphUpdateHandler handler, final long budgetMs) {
+    private static ApplyWorker worker(final MergerLifecycle owner, final Consumer<Runnable> handler, final long budgetMs) {
         final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor();
         final NativeBufferPool pool = new NativeBufferPool(0L);
         return new ApplyWorker(owner, new ApplyQueue(owner, pool, 1L, 1L << 20, 60_000L), pool, New(), watchdog,

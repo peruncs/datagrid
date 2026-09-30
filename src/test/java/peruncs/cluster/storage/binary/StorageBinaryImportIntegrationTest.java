@@ -13,11 +13,11 @@ import org.junit.jupiter.api.Test;
 import peruncs.cluster.node.store.DistributedStorage;
 import peruncs.cluster.storage.StorageGraphCoordinator;
 
+import java.lang.foreign.Arena;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -60,10 +60,24 @@ class StorageBinaryImportIntegrationTest {
         return copy;
     }
 
+    private static List<ByteBuffer> copy(final List<ByteBuffer> source, final Arena arena) {
+        final List<ByteBuffer> copy = new ArrayList<>(source.size());
+        for (final ByteBuffer value : source) {
+            final ByteBuffer duplicate = value.duplicate();
+            final int length = duplicate.remaining();
+            final ByteBuffer direct = length == 0
+                    ? ByteBuffer.allocateDirect(0)
+                    : arena.allocate(length, 64).asByteBuffer();
+            direct.put(duplicate).flip();
+            copy.add(direct);
+        }
+        return copy;
+    }
+
     private static void delete(final Path path) throws Exception {
         if (Files.exists(path)) {
             try (var paths = Files.walk(path)) {
-                paths.sorted(java.util.Comparator.reverseOrder()).forEach(value ->
+                paths.sorted(Comparator.reverseOrder()).forEach(value ->
                 {
                     try {
                         Files.deleteIfExists(value);
@@ -127,11 +141,16 @@ class StorageBinaryImportIntegrationTest {
 
             final EmbeddedStorageManager reader = foundation(readerPath).start();
             final StorageConnection connection = reader.createConnection();
-            for (final List<ByteBuffer> transaction : capture.transactions) {
-                connection.importData(X.Enum(copy(transaction)));
-                connection.importData(X.Enum(copy(transaction)));
+            try (Arena arena = Arena.ofShared()) {
+                for (final List<ByteBuffer> transaction : capture.transactions) {
+                    connection.importData(X.Enum(copy(transaction)));
+                    connection.importData(X.Enum(copy(transaction, arena)));
+                }
+                /* Store's import must have copied every caller buffer before its
+                 * shutdown. Closing the arena second proves Store retained no
+                 * native ownership or cleaner responsibility. */
+                reader.shutdown();
             }
-            reader.shutdown();
 
             final EmbeddedStorageManager restarted = foundation(readerPath).start();
             final Root importedRoot = restarted.root();
@@ -177,7 +196,7 @@ class StorageBinaryImportIntegrationTest {
             assertTrue(valuesObjectId > 0L, "loaded values collection must have a persistent object id");
             assertTrue(delegate.persistenceManager().objectRegistry().containsLiveObject(valuesObjectId),
                     "loaded values collection must be live in the object registry");
-            final java.util.Set<Long> importedObjectIds = new java.util.HashSet<>();
+            final Set<Long> importedObjectIds = new HashSet<>();
             final BinaryEntityRawDataIterator rawIterator = BinaryEntityRawDataIterator.New();
             for (final List<ByteBuffer> transaction : capture.transactions) {
                 for (final ByteBuffer buffer : transaction) {
@@ -206,12 +225,19 @@ class StorageBinaryImportIntegrationTest {
             final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(
                     StorageBinaryDataMergerTestSupport.configuration(
                             readerFoundation.getConnectionFoundation(), counting,
-                            ObjectGraphUpdateHandler.PerStore(coordinator),
+                            coordinator::write,
                             0L, 1L << 30, 60_000L, coordinator));
             try {
                 for (final List<ByteBuffer> transaction : capture.transactions) {
-                    final ByteBuffer[] owned = copy(transaction).toArray(ByteBuffer[]::new);
-                    for (final ByteBuffer buffer : owned) buffer.position(buffer.limit());
+                    final ByteBuffer[] owned = new ByteBuffer[transaction.size()];
+                    for (int index = 0; index < owned.length; index++) {
+                        final ByteBuffer source = transaction.get(index).duplicate();
+                        final ByteBuffer buffer = source.hasRemaining()
+                                ? merger.allocateNativeBuffer(source.remaining())
+                                : ByteBuffer.allocateDirect(0);
+                        buffer.put(source);
+                        owned[index] = buffer;
+                    }
                     merger.receiveDataOwned(org.eclipse.serializer.persistence.binary.types.ChunksWrapper.New(owned));
                 }
                 merger.awaitApplied();

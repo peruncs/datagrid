@@ -14,13 +14,10 @@ import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
-import java.util.function.LongSupplier;
 
 /// Reads committed Store transactions from an Archive and then from the live
 /// publication.
@@ -29,14 +26,6 @@ import java.util.function.LongSupplier;
 /// only after replay catches up, so a restart needs no separate snapshot path.
 /// The subscription belongs to this reader; the caller remains responsible for
 /// the shared Aeron and Archive clients.
-///
-/// Live delivery runs ahead of the Archive recording: the writer offers a
-/// COMMIT before it could have been recorded. This reader therefore withholds
-/// every live-sourced terminal marker until the configured recorded-position
-/// supplier proves the marker durable; a stall longer than the reader stop
-/// timeout fails the reader closed instead of applying a transaction the
-/// durable history may never contain. Replay-sourced frames are recorded by
-/// definition and need no gating.
 ///
 /// A lost Archive control channel (writer restart of its embedded Archive) is
 /// treated as recoverable. An escaping [ArchiveException] swaps the
@@ -71,12 +60,6 @@ public final class AeronArchiveReader implements Disposable {
     /// @param initialPosition          last resolved Archive position
     /// @param receiver                 destination for complete Store binaries
     /// @param transactionResolved      callback after a transaction is delivered
-    /// @param deliveryListener         callback around Store materialization
-    /// @param recordedPosition         current recorded position of the Archive recording;
-    ///                                 terminal markers observed on the live publication are
-    ///                                 withheld until it covers them. Queried by the
-    ///                                 reader's background refresher, never from the
-    ///                                 polling thread.
     public record Configuration(
             Aeron aeron,
             AeronArchive.Context archiveContext,
@@ -93,9 +76,7 @@ public final class AeronArchiveReader implements Disposable {
             long initialSequence,
             long initialPosition,
             StorageBinaryDataReceiver receiver,
-            Consumer<CursorSnapshot> transactionResolved,
-            ReaderDeliveryListener deliveryListener,
-            LongSupplier recordedPosition
+            Consumer<CursorSnapshot> transactionResolved
     ) {
         /// Validates required reader collaborators and recovered cursor bounds.
     public Configuration {
@@ -106,7 +87,6 @@ public final class AeronArchiveReader implements Disposable {
             if (wireNonce == 0L) throw new IllegalArgumentException("wireNonce must not be zero");
             Objects.requireNonNull(receiver, "receiver");
             Objects.requireNonNull(transactionResolved, "transactionResolved");
-            Objects.requireNonNull(recordedPosition, "recordedPosition");
             if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1) {
                 throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
             }
@@ -139,8 +119,6 @@ public final class AeronArchiveReader implements Disposable {
             private StorageBinaryDataReceiver receiver;
             private Consumer<CursorSnapshot> transactionResolved = ignored -> {
             };
-            private ReaderDeliveryListener deliveryListener;
-            private LongSupplier recordedPosition;
 
             /// Creates an empty reader configuration builder.
             public Builder() {
@@ -196,11 +174,11 @@ public final class AeronArchiveReader implements Disposable {
             /// @param value cluster identity
             /// @return this builder
             public Builder clusterId(final UUID value) { this.clusterId = value; return this; }
-            /// Sets the accidental-cross-wiring nonce shared with the writer.
+            /// Sets the public cluster-id-derived framing value expected from the writer.
             ///
-            /// Every reader must receive a deployment-chosen nonzero value.
+            /// This redundant value is not secret and provides no authentication.
             ///
-            /// @param value shared deployment nonce
+            /// @param value redundant framing value; this is not a credential
             /// @return this builder
             public Builder wireNonce(final long value) {
                 this.wireNonce = value;
@@ -232,20 +210,6 @@ public final class AeronArchiveReader implements Disposable {
             /// @param value post-transaction callback
             /// @return this builder
             public Builder transactionResolved(final Consumer<CursorSnapshot> value) { this.transactionResolved = value; return this; }
-            /// Sets the Store materialization callback, or `null`.
-            ///
-            /// @param value Store materialization callback, or `null`
-            /// @return this builder
-            public Builder deliveryListener(final ReaderDeliveryListener value) { this.deliveryListener = value; return this; }
-            /// Sets the supplier of the recording's current recorded position.
-            ///
-            /// Live-sourced terminal markers are withheld until this supplier
-            /// reports a recorded position covering them, so a reader never
-            /// applies a transaction the Archive has not durably stored.
-            ///
-            /// @param value recorded-position supplier over the configured recording
-            /// @return this builder
-            public Builder recordedPosition(final LongSupplier value) { this.recordedPosition = value; return this; }
 
             /// Builds the immutable reader configuration.
             ///
@@ -256,8 +220,7 @@ public final class AeronArchiveReader implements Disposable {
                 }
                 return new Configuration(aeron, archiveContext, recordingId, startPosition, liveChannel,
                         liveStreamId, replayChannel, replayStreamId, replicationConfiguration, clusterId,
-                        this.wireNonce, epoch, initialSequence, initialPosition, receiver, transactionResolved,
-                        deliveryListener, this.recordedPosition);
+                        this.wireNonce, epoch, initialSequence, initialPosition, receiver, transactionResolved);
             }
         }
     }
@@ -329,20 +292,7 @@ public final class AeronArchiveReader implements Disposable {
      * value means the Archive client signalled a control-channel problem.
      * Shared with every replacement subscription created on reconnect. */
     private final AtomicReference<Exception> archiveIncidentSignal;
-    /* The durability gate reads only this cache; a daemon refresher performs
-     * the Archive control round trips, so live delivery never parks the
-     * polling thread on a synchronous (possibly cross-host) RPC. Sampling
-     * can only lag the recording — never lead it — so a stale cache may
-     * delay a covered commit but can never admit an unrecorded one. Seeded
-     * with the replay resume position, which is recorded by definition. */
-    private final AtomicLong recordedPositionCache;
-    private final AtomicBoolean positionRefreshActive = new AtomicBoolean();
-    /* Cadence of the background recorded-position refresh while the reader
-     * runs. */
-    private static final long RECORDED_POSITION_REFRESH_MILLIS = 25L;
     private static final int MAX_RECONNECT_SUPPRESSED_FAILURES = 4;
-    private volatile Thread positionRefresher;
-    private final AtomicReference<RuntimeException> positionRefreshFailure = new AtomicReference<>();
 
 
     AeronArchiveReader(
@@ -360,30 +310,12 @@ public final class AeronArchiveReader implements Disposable {
             this.fragmentsPerPoll = requiredConfiguration.readerFragmentsPerPoll();
             this.barrierIdleFlushNanos = requiredConfiguration.readerBarrierIdleFlushNanos();
             this.idleStrategy = requiredConfiguration.retryPolicy().idleStrategy();
-            this.recordedPositionCache = new AtomicLong(required.initialPosition());
-            this.assembler = new TransactionAssembler(
+            this.assembler = new TransactionAssembler(new TransactionAssembler.Configuration(
                     requiredConfiguration, required.clusterId(), required.epoch(), required.initialSequence(),
                     required.initialPosition(), required.receiver(), required.transactionResolved(),
-                    required.deliveryListener(), required.wireNonce(),
-                    requiredPosition -> this.recordedPositionCache.get() >= requiredPosition
-            );
+                    required.wireNonce()));
             this.fragmentHandler = (buffer, offset, length, header) -> {
-                final PersistentSubscription source = this.subscription;
-                /* Live fragments may run ahead of the recording; replay and
-                 * catch-up fragments are recorded by definition. */
-                final boolean liveSource = source != null && source.isLive();
-                /* An ArchiveException escaping the recorded-position query
-                 * below propagates through controlledPoll into the reader's
-                 * reconnect path, exactly like a lost control channel: replay
-                 * resumes at the last resolved position, and a withheld
-                 * (unrecorded, undelivered) marker is simply replayed once it
-                 * has been recorded. */
-                if (this.assembler.onFragment(buffer, offset, length, header, liveSource)) {
-                    /* Withheld terminal marker: the recording has not durably
-                     * covered it yet. ABORT keeps the fragment for redelivery
-                     * on the next poll; the buffered data chunks stay staged. */
-                    return ControlledFragmentHandler.Action.ABORT;
-                }
+                this.assembler.onFragment(buffer, offset, length, header);
                 return this.assembler.deliveryBarrierFull()
                         ? ControlledFragmentHandler.Action.BREAK
                         : ControlledFragmentHandler.Action.CONTINUE;
@@ -502,7 +434,7 @@ public final class AeronArchiveReader implements Disposable {
         }
         if (this.assembler.failure() != null) {
             throw new IllegalStateException(
-                    "cannot start a failed Aeron Archive reader; create a new reader from its durable cursor",
+                    "cannot start a failed Aeron Archive reader; create a new reader from its Store mark",
                     this.assembler.failure());
         }
         final Thread existing = this.thread;
@@ -536,60 +468,6 @@ public final class AeronArchiveReader implements Disposable {
          * thread must also bridge blockingly to the Store importer. */
         this.thread = Thread.ofPlatform().daemon().name("datagrid-aeron-archive-reader").unstarted(this::run);
         this.thread.start();
-        this.startPositionRefresher();
-    }
-
-    /// Starts the background recorded-position refresher exactly once.
-    ///
-    /// The gate's Archive query runs here instead of on the polling thread:
-    /// a synchronous control RTT per live terminal marker would serialize
-    /// delivery on cross-host latency and hammer a stalled control channel at
-    /// poll rate. A refresh failure is not a durability verdict — the stale
-    /// cache simply keeps withholding, and the assembler's stall budget
-    /// bounds how long.
-    private void startPositionRefresher() {
-        if (!this.positionRefreshActive.compareAndSet(false, true)) {
-            return;
-        }
-        this.positionRefresher = Thread.ofPlatform().daemon()
-                .name("datagrid-aeron-recorded-position")
-                .start(this::refreshRecordedPositions);
-    }
-
-    private void refreshRecordedPositions() {
-        final LongSupplier recordedPosition = this.configuration.recordedPosition();
-        while (this.positionRefreshActive.get() && !this.disposeRequested) {
-            if (this.assembler.isWithholdingTerminalMarker()) {
-                try {
-                    this.recordedPositionCache.set(recordedPosition.getAsLong());
-                    this.positionRefreshFailure.set(null);
-                } catch (final RuntimeException failure) {
-                    /* A stale position is safe; retain only the latest cause so
-                     * a terminal reader failure can explain why the gate stalled. */
-                    this.positionRefreshFailure.set(failure);
-                }
-            }
-            /* Query only during a real withheld marker and keep stalled Archive
-             * control traffic below 40 requests per second. */
-            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(RECORDED_POSITION_REFRESH_MILLIS));
-            if (Thread.currentThread().isInterrupted()) {
-                return;
-            }
-        }
-    }
-
-    private void stopPositionRefresher() {
-        this.positionRefreshActive.set(false);
-        final Thread refresher = this.positionRefresher;
-        if (refresher != null) {
-            refresher.interrupt();
-        }
-    }
-
-    private RuntimeException includePositionRefreshFailure(final RuntimeException failure) {
-        final RuntimeException refreshFailure = this.positionRefreshFailure.getAndSet(null);
-        if (refreshFailure != null && refreshFailure != failure) failure.addSuppressed(refreshFailure);
-        return failure;
     }
 
     private void run() {
@@ -608,8 +486,8 @@ public final class AeronArchiveReader implements Disposable {
                     () ->
                     {
                         this.updateOutcome(ReplicationApplier.StopOutcome.TIMED_OUT);
-                        this.assembler.failure(this.includePositionRefreshFailure(new IllegalStateException(
-                                "Timed out waiting for Aeron Archive replay to reach the live tail")));
+                        this.assembler.failure(new IllegalStateException(
+                                "Timed out waiting for Aeron Archive replay to reach the live tail"));
                     },
                     this.idleStrategy
             );
@@ -618,10 +496,9 @@ public final class AeronArchiveReader implements Disposable {
             this.assembler.flushDeliveries();
             this.completeRun();
         } catch (final RuntimeException e) {
-            this.assembler.failure(this.includePositionRefreshFailure(e));
+            this.assembler.failure(e);
         } catch (final Error e) {
-            this.assembler.failure(this.includePositionRefreshFailure(
-                    new IllegalStateException("Aeron Archive reader polling failed", e)));
+            this.assembler.failure(new IllegalStateException("Aeron Archive reader polling failed", e));
             throw e;
         } finally {
             this.finishRun(lifecycleStopped);
@@ -805,7 +682,7 @@ public final class AeronArchiveReader implements Disposable {
     ///
     /// A replay that can no longer start because the recording no longer covers
     /// the reader's position — or no longer exists at all — is unrecoverable
-    /// from this node's local state: the durable cursor points into deleted
+    /// from this node's local state: the Store mark points into deleted
     /// history. Surface it as a typed reseed signal instead of a generic
     /// failure so the node health view reports RESEED_REQUIRED.
     private RuntimeException classifySubscriptionFailure(final PersistentSubscription current) {
@@ -814,7 +691,7 @@ public final class AeronArchiveReader implements Disposable {
             (subscriptionFailure.reason() == PersistentSubscriptionException.Reason.INVALID_START_POSITION ||
              subscriptionFailure.reason() == PersistentSubscriptionException.Reason.RECORDING_NOT_FOUND)) {
             return new ReseedRequiredException(
-                    ("Aeron recording %d no longer covers this reader's durable cursor (position %d, " +
+                    ("Aeron recording %d no longer covers this reader's Store mark (position %d, " +
                      "sequence %d); reseed required: %s").formatted(
                             this.configuration.recordingId(), this.assembler.lastResolvedPosition(),
                             this.assembler.lastResolvedSequence(), subscriptionFailure.getMessage()),
@@ -843,7 +720,6 @@ public final class AeronArchiveReader implements Disposable {
     }
 
     private synchronized void finishRun(final CountDownLatch lifecycleStopped) {
-        this.stopPositionRefresher();
         if (this.assembler.failure() != null) {
             this.updateOutcome(ReplicationApplier.StopOutcome.FAILED);
         }
@@ -853,13 +729,13 @@ public final class AeronArchiveReader implements Disposable {
     }
 
         /// Restarts a reader stopped at the live tail. A replay or validation failure
-    /// is terminal; create a new reader from the durable cursor instead of
+    /// is terminal; create a new reader from the Store mark instead of
     /// reusing incomplete transaction state.
     public synchronized void resume() {
         final RuntimeException failure = this.failure();
         if (failure != null) {
             throw new IllegalStateException(
-                    "cannot resume a failed Aeron Archive reader; create a new reader from its durable cursor", failure);
+                    "cannot resume a failed Aeron Archive reader; create a new reader from its Store mark", failure);
         }
         this.stopAtLatest = false;
         this.start();
@@ -983,14 +859,14 @@ public final class AeronArchiveReader implements Disposable {
         return this.assembler.cursorSnapshot();
     }
 
-        /// Seeds the assembler's stale-token floor from the durable cursor.
+    /// Seeds the assembler's stale-token floor from the Store mark.
     ///
     /// Call before [#start()] only. The floor must be fixed before the reader
     /// accepts any frame, so a restart never re-accepts history from a writer
     /// its cursor already moved past; seeding after start would silently move
     /// the floor under live validation and is rejected.
     ///
-    /// @param fencingToken greatest token the persisted cursor accepted, or `0` for a new reader
+    /// @param fencingToken greatest token the Store mark accepted, or `0` for a new reader
     /// @throws IllegalStateException when the reader is already started
     public synchronized void seedFencingToken(final long fencingToken) {
         if (this.seedingClosed) {
@@ -1032,10 +908,9 @@ public final class AeronArchiveReader implements Disposable {
     ///
     /// @param failure terminal failure
     public synchronized void fail(final RuntimeException failure) {
-        this.assembler.failure(this.includePositionRefreshFailure(Objects.requireNonNull(failure, "failure")));
+        this.assembler.failure(Objects.requireNonNull(failure, "failure"));
         this.active.set(false);
         this.live = false;
-        this.stopPositionRefresher();
         this.updateOutcome(ReplicationApplier.StopOutcome.FAILED);
     }
 
@@ -1063,11 +938,9 @@ public final class AeronArchiveReader implements Disposable {
                     final PersistentSubscription current = this.subscription;
                     if (current != null) current.close();
                 }, this.stopTimeoutNanos);
-        this.stopPositionRefresher();
         synchronized (this) {
             this.assembler.dispose();
             this.thread = null;
-            this.positionRefresher = null;
             this.disposed = true;
             /* A failed or timed-out reader must not be reported as a clean close. */
             this.updateOutcome(ReplicationApplier.StopOutcome.CLOSED);

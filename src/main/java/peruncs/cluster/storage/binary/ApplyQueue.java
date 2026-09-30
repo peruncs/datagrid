@@ -42,6 +42,7 @@ final class ApplyQueue {
      * per-node allocation a concurrent queue pays on every offer. */
     private final ArrayDeque<ByteBuffer> cachedData = new ArrayDeque<>();
     private final ArrayDeque<Integer> cachedTransactionLengths = new ArrayDeque<>();
+    private final ArrayDeque<Long> cachedGenerations;
     private final MergerLifecycle owner;
     private final NativeBufferPool bufferPool;
     private final long cacheBytesLimit;
@@ -57,6 +58,9 @@ final class ApplyQueue {
      * Guarded by queueLock with cachedBytes so the configured hard cap is
      * a cap on all merger-owned memory, not just the visible queue. */
     private long inFlightBytes;
+    /* Used by the poll thread's non-blocking admission check. The single
+     * delivery producer is the only writer that can increase this value. */
+    private volatile long residentBytes;
     /* Set when the worker enters a batch drain and cleared when the batch
      * completes: backpressure waits against an over-limit queue must
      * keep the previous fail-fast semantics of the completed-future wait,
@@ -73,6 +77,7 @@ final class ApplyQueue {
             final long applyTimeoutMs) {
         this.owner = owner;
         this.bufferPool = bufferPool;
+        this.cachedGenerations = bufferPool.checked() ? new ArrayDeque<>() : null;
         this.cacheBytesLimit = cacheBytesLimit;
         this.maxCachedBytes = maxCachedBytes;
         this.applyTimeoutMs = applyTimeoutMs;
@@ -112,7 +117,7 @@ final class ApplyQueue {
     /// @param incomingBytes total payload bytes of `ownedBuffers`
     /// @param workerSubmission schedules the worker when none is running
     /// @return resident bytes (queued plus in-flight) after this admission
-    long admit(
+        long admit(
             final ByteBuffer[] ownedBuffers,
             final long incomingBytes,
             final Supplier<Future<?>> workerSubmission) {
@@ -134,12 +139,25 @@ final class ApplyQueue {
                         "Storage binary materialization cache is full: %s queued plus %s in-flight bytes with a %s byte limit"
                                 .formatted(this.cachedBytes, this.inFlightBytes, this.maxCachedBytes));
             }
+            final long[] generations;
+            if (this.cachedGenerations == null) {
+                generations = null;
+            } else {
+                generations = new long[ownedBuffers.length];
+                for (int index = 0; index < ownedBuffers.length; index++) {
+                    generations[index] = this.bufferPool.generation(ownedBuffers[index]);
+                }
+            }
             /* Bulk add without a wrapper allocation: Collections.addAll
              * passes the array straight through to per-element add. */
             Collections.addAll(this.cachedData, ownedBuffers);
+            if (generations != null) {
+                for (final long generation : generations) this.cachedGenerations.addLast(generation);
+            }
             this.cachedTransactionLengths.addLast(ownedBuffers.length);
             this.cachedBufferCount += ownedBuffers.length;
             this.cachedBytes = queuedAfterAdmission;
+            this.residentBytes = residentAfterAdmission;
             if (!this.workerScheduled) {
                 try {
                     this.workerScheduled = true;
@@ -152,9 +170,15 @@ final class ApplyQueue {
                     for (final ByteBuffer buffer : ownedBuffers) {
                         removeIdentical(this.cachedData, buffer);
                     }
+                    if (this.cachedGenerations != null) {
+                        for (int index = 0; index < ownedBuffers.length; index++) {
+                            this.cachedGenerations.removeLast();
+                        }
+                    }
                     this.cachedTransactionLengths.removeLast();
                     this.cachedBytes = Math.subtractExact(this.cachedBytes, incomingBytes);
                     this.cachedBufferCount -= ownedBuffers.length;
+                    this.residentBytes = Math.addExact(this.cachedBytes, this.inFlightBytes);
                     /* A shutdown racing this admission must surface as the
                      * documented disposal refusal, not a raw executor
                      * rejection. */
@@ -180,6 +204,12 @@ final class ApplyQueue {
     /// @return `true` when the producer must wait for the queue to drain
     boolean exceedsSoftLimit(final long residentBytes) {
         return residentBytes > this.cacheBytesLimit;
+    }
+
+    /// Fast poll-thread check that avoids entering a blocking backpressure wait.
+    boolean canAdmitWithoutWaiting(final long incomingBytes) {
+        if (incomingBytes < 0L || incomingBytes > this.cacheBytesLimit) return false;
+        return this.residentBytes <= this.cacheBytesLimit - incomingBytes;
     }
 
     /// Wakes a worker parked in its coalescing delay unless nothing is left.
@@ -266,7 +296,7 @@ final class ApplyQueue {
             final int pending = (int) count;
             if (pending == 0) return 0;
             final int pendingTransactions = this.cachedTransactionLengths.size();
-            drain.ensureCapacity(pending, pendingTransactions);
+            drain.ensureCapacity(pending, pendingTransactions, this.cachedGenerations != null);
             drain.bufferCount = pending;
             drain.transactionCount = pendingTransactions;
             drain.batchBytes = 0L;
@@ -292,6 +322,9 @@ final class ApplyQueue {
                     drainedBytes = Math.addExact(drainedBytes, next.remaining());
                     drain.batchBytes = Math.addExact(drain.batchBytes, next.remaining());
                     drain.buffers[index] = next;
+                    if (this.cachedGenerations != null) {
+                        drain.generations[index] = this.cachedGenerations.removeFirst();
+                    }
                     drained++;
                 }
             } catch (final RuntimeException | Error failure) {
@@ -337,6 +370,7 @@ final class ApplyQueue {
         this.queueLock.lock();
         try {
             this.inFlightBytes = Math.subtractExact(this.inFlightBytes, batchBytes);
+            this.residentBytes = Math.addExact(this.cachedBytes, this.inFlightBytes);
             this.batchActiveSinceNanos = 0L;
             this.drainedCondition.signalAll();
         } finally {
@@ -409,10 +443,13 @@ final class ApplyQueue {
             while ((buffer = this.cachedData.poll()) != null) {
                 this.cachedBufferCount--;
                 pending.add(buffer);
+                if (this.cachedGenerations != null) this.cachedGenerations.removeFirst();
             }
             this.cachedBufferCount = 0L;
             this.cachedTransactionLengths.clear();
+            if (this.cachedGenerations != null) this.cachedGenerations.clear();
             this.cachedBytes = 0L;
+            this.residentBytes = this.inFlightBytes;
             /* Failure- and shutdown-path cleanup only: every queued buffer
              * is distinctly owned, so the unconditional release frees
              * exactly what the queue holds. */

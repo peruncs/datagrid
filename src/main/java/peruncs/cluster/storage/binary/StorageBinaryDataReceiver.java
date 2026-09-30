@@ -1,7 +1,5 @@
 package peruncs.cluster.storage.binary;
 
-
-import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 
 import java.nio.ByteBuffer;
@@ -20,24 +18,24 @@ public interface StorageBinaryDataReceiver {
     /// @param minimumCapacity required capacity in bytes
     /// @return writable native buffer with at least the requested capacity
     default ByteBuffer allocateNativeBuffer(final int minimumCapacity) {
-        return XMemory.allocateDirectNative(minimumCapacity);
+        return NativeMemory.allocateDirect(minimumCapacity);
     }
 
     /// Releases native storage acquired for a transaction for this receiver.
     ///
     /// @param buffer native buffer to release
     default void releaseNativeBuffer(final ByteBuffer buffer) {
-        XMemory.deallocateDirectByteBuffer(buffer);
+        NativeMemory.releaseDirect(buffer);
     }
 
-        /// Returns a terminal receiver failure, or `null` while healthy.
+    /// Returns a terminal receiver failure, or `null` while healthy.
     ///
     /// @return terminal failure, or `null`
     default RuntimeException failure() {
         return null;
     }
 
-        /// Reports whether [#receiveDataOwned(Binary)] takes ownership before
+    /// Reports whether [#receiveDataOwned(Binary)] takes ownership before
     /// invoking the implementation.
     ///
     /// `true` is reserved for receivers that release the supplied direct
@@ -49,14 +47,26 @@ public interface StorageBinaryDataReceiver {
         return false;
     }
 
-        /// Receives a complete binary. The callback must consume the supplied binary
+    /// Reports whether owned data can be admitted without waiting for backpressure.
+    ///
+    /// A `false` result leaves the binary with the caller, which should stop polling,
+    /// then retry delivery outside the transport callback. The default keeps simple
+    /// synchronous receivers on their existing path.
+    ///
+    /// @param payloadBytes size of the Store binary
+    /// @return whether delivery can proceed without waiting
+    default boolean canAcceptOwnedData(final long payloadBytes) {
+        return true;
+    }
+
+    /// Receives a complete binary. The callback must consume the supplied binary
     /// synchronously; transports may release its native buffers immediately after
     /// this method returns to avoid retaining off-heap memory.
     ///
     /// @param data complete binary to receive
     void receiveData(Binary data);
 
-        /// Delivers a complete binary while allowing an implementation to take
+    /// Delivers a complete binary while allowing an implementation to take
     /// ownership of its direct buffers. The default uses the borrowed callback
     /// contract and therefore returns `false`; the caller then
     /// releases its buffers after this method returns. An override takes ownership
@@ -69,7 +79,7 @@ public interface StorageBinaryDataReceiver {
         return false;
     }
 
-        /// Completes the durable application of the most recently accepted binary.
+    /// Completes the durable application of the most recently accepted binary.
     /// Implementations that only consume the binary synchronously may leave this
     /// method as a no-op.  A transport adapter uses it to wait for deferred Store
     /// materialization after ownership has already transferred, which prevents a
@@ -78,7 +88,7 @@ public interface StorageBinaryDataReceiver {
     default void awaitApplied() {
     }
 
-        /// Receives a type dictionary before data that depends on it.
+    /// Receives a type dictionary before data that depends on it.
     ///
     /// Replicated imports never execute the local Store operation that would
     /// normally flush the exporting dictionary manager, so implementations

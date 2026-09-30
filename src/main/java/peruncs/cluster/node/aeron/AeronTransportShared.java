@@ -18,8 +18,6 @@ final class AeronTransportShared {
     private static final ScopedValue<Boolean> DELIVERY_CALLBACK = ScopedValue.newInstance();
 
     private final AeronArchiveCapacity archiveCapacity;
-    /// Logical stream claimed on first use; one transport owns exactly one stream.
-    private String distributorStream;
     /* Reader-watermark channel and its fan-in state, shared between the reader
      * and retention owners. Installed by the facade after the owners exist. */
     private volatile WatermarkCollector watermarks;
@@ -49,33 +47,6 @@ final class AeronTransportShared {
     /// @return archive capacity
     AeronArchiveCapacity capacity() {
         return this.archiveCapacity;
-    }
-
-    /// Claims the transport's single configured replication stream.
-    ///
-    /// @param streamName logical stream name, claimed on first use
-    void claimStream(final String streamName) {
-        if (streamName == null || streamName.isBlank()) {
-            throw new IllegalArgumentException("Aeron replication stream name must not be blank");
-        }
-        if (this.distributorStream == null) {
-            this.distributorStream = streamName;
-        } else if (!this.distributorStream.equals(streamName)) {
-            throw new IllegalArgumentException(
-                    "Aeron transport is configured for stream %s, not %s".formatted(this.distributorStream, streamName));
-        }
-    }
-
-    /// Releases the claimed stream during full teardown.
-    void clearStreamClaim() {
-        this.distributorStream = null;
-    }
-
-    /// Returns the claimed stream name, or `null` before the first claim.
-    ///
-    /// @return claimed stream name, or `null`
-    String claimedStream() {
-        return this.distributorStream;
     }
 
     boolean closed() {

@@ -77,15 +77,15 @@ class StorageBinaryDataMergerAllocationTest {
 
             final EmbeddedStorageManager reader = foundation(root).start();
             try {
-                final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), reader.createConnection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1_000_000L, 60_000L));
+                final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), reader.createConnection(), (new StorageGraphCoordinator())::write, 0L, 1_000_000L, 60_000L));
                 try {
                     for (int i = 0; i < WARMUP_TRANSACTIONS; i++) {
-                        merger.receiveDataOwned(transactionBinary(transaction));
+                        merger.receiveDataOwned(transactionBinary(transaction, merger));
                         merger.awaitApplied();
                     }
                     final AllocationSnapshot before = AllocationSnapshot.capture();
                     for (int i = 0; i < MEASURED_TRANSACTIONS; i++) {
-                        merger.receiveDataOwned(transactionBinary(transaction));
+                        merger.receiveDataOwned(transactionBinary(transaction, merger));
                         merger.awaitApplied();
                     }
                     final long total = before.bytesSinceCapture();
@@ -100,7 +100,7 @@ class StorageBinaryDataMergerAllocationTest {
                      * must not grow across one more measured batch. */
                     final long nativeBefore = directMemoryUsed();
                     for (int i = 0; i < MEASURED_TRANSACTIONS; i++) {
-                        merger.receiveDataOwned(transactionBinary(transaction));
+                        merger.receiveDataOwned(transactionBinary(transaction, merger));
                         merger.awaitApplied();
                     }
                     merger.awaitApplied();
@@ -119,10 +119,16 @@ class StorageBinaryDataMergerAllocationTest {
         }
     }
 
-    private static Binary transactionBinary(final List<BufferSnapshot> transaction) {
+    private static Binary transactionBinary(
+            final List<BufferSnapshot> transaction, final StorageBinaryDataMerger merger) {
         final ByteBuffer[] buffers = new ByteBuffer[transaction.size()];
         for (int i = 0; i < transaction.size(); i++) {
-            buffers[i] = transaction.get(i).restore();
+            final BufferSnapshot snapshot = transaction.get(i);
+            final ByteBuffer buffer = merger.allocateNativeBuffer(snapshot.capacity());
+            buffer.put(snapshot.content());
+            buffer.position(snapshot.position());
+            buffer.limit(snapshot.limit());
+            buffers[i] = buffer;
         }
         return ChunksWrapper.New(buffers);
     }
@@ -150,13 +156,6 @@ class StorageBinaryDataMergerAllocationTest {
     }
 
     private record BufferSnapshot(int capacity, int position, int limit, byte[] content) {
-        ByteBuffer restore() {
-            final ByteBuffer buffer = ByteBuffer.allocateDirect(this.capacity);
-            buffer.put(this.content);
-            buffer.position(this.position);
-            buffer.limit(this.limit);
-            return buffer;
-        }
     }
 
     private static final class CapturingDistributor implements ReplicationPublisher {

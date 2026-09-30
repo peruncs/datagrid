@@ -1,7 +1,6 @@
 package peruncs.cluster.node.aeron;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
-import peruncs.cluster.api.NodeSettingsSource;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
 
 import java.util.Objects;
@@ -10,21 +9,25 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
+import java.util.function.Supplier;
 
 /// Guards the Aeron distribution state shared with the Store integration.
 /// Direct data publication is intentionally rejected here. Aeron Store writes must use
 /// the provider's persistence-target factory so local acceptance, Archive
-/// publication, and checkpoint fencing share one transaction owner.
+/// publication, and Store-mark fencing share one transaction owner.
 final class AeronDistributionGate implements ReplicationPublisher {
     private final BooleanSupplier writer;
     private final LongConsumer sequenceSynchronizer;
+    private final Supplier<RuntimeException> failure;
     private final AtomicLong index = new AtomicLong(-1L);
     private final AtomicBoolean ignored = new AtomicBoolean();
     private final AtomicReference<String> dictionary = new AtomicReference<>();
 
-    AeronDistributionGate(final BooleanSupplier writer, final LongConsumer sequenceSynchronizer) {
-        this.writer = Objects.requireNonNull(writer, NodeSettingsSource.WRITER_ROLE);
+    AeronDistributionGate(final BooleanSupplier writer, final LongConsumer sequenceSynchronizer,
+                          final Supplier<RuntimeException> failure) {
+        this.writer = Objects.requireNonNull(writer, "writer");
         this.sequenceSynchronizer = Objects.requireNonNull(sequenceSynchronizer, "sequenceSynchronizer");
+        this.failure = Objects.requireNonNull(failure, "failure");
     }
 
     /// Records the Store message index for the writer.
@@ -65,6 +68,11 @@ final class AeronDistributionGate implements ReplicationPublisher {
         return this.ignored.get();
     }
 
+    @Override
+    public RuntimeException failure() {
+        return this.failure.get();
+    }
+
     /// Stores the newest type dictionary for the next consumer.
     ///
     /// @param value exported type dictionary
@@ -84,7 +92,7 @@ final class AeronDistributionGate implements ReplicationPublisher {
     /// Rejects direct Store data publication.
     ///
     /// Aeron writes flow through the provider's persistence target so local
-    /// acceptance and checkpoint fencing stay one operation.
+    /// acceptance and Store-mark fencing stay one operation.
     ///
     /// @param data committed binary data
     @Override

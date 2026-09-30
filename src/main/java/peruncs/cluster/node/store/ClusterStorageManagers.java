@@ -4,8 +4,11 @@ import org.eclipse.store.storage.types.StorageManager;
 import peruncs.cluster.api.ClusterStorageManager;
 import peruncs.cluster.errors.GraphDrainTimeoutException;
 import peruncs.cluster.storage.StorageGraphCoordinator;
+import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 
 import java.time.Duration;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -23,18 +26,54 @@ public final class ClusterStorageManagers {
     ///
     /// @param <T>                   root type
     /// @param delegate              started delegate Store manager
-    /// @param storageSizeValidation storage limit gate
+    /// @param storageLimitReached reports whether a writer limit is reached
     /// @param nodeClose             complete node teardown
     /// @param graphCoordinator      coordinator shared with replication
+    /// @param replicationMark       mark to include in each write, or `null` for Store-only nodes
+    /// @param prepareReplicationCommit updates the mark before serializer commit
     /// @return guarded manager
     public static <T> ClusterStorageManager<T> guarding(
             final StorageManager delegate,
-            final StorageSizeValidation storageSizeValidation,
+            final BooleanSupplier storageLimitReached,
+            final NodeClose nodeClose,
+            final StorageGraphCoordinator graphCoordinator,
+            final ReplicationMark replicationMark,
+            final Consumer<ReplicationMark> prepareReplicationCommit) {
+        return guarding(delegate, storageLimitReached, nodeClose, graphCoordinator,
+                replicationMark, prepareReplicationCommit, ignored -> {
+                });
+    }
+
+    /// Creates a writer facade whose Store commits own a cancelable replication sequence.
+    public static <T> ClusterStorageManager<T> guarding(
+            final StorageManager delegate,
+            final BooleanSupplier storageLimitReached,
+            final NodeClose nodeClose,
+            final StorageGraphCoordinator graphCoordinator,
+            final ReplicationMark replicationMark,
+            final Consumer<ReplicationMark> prepareReplicationCommit,
+            final Consumer<ReplicationMark> cancelReplicationCommit) {
+        return new GuardingStorageManager<>(
+                notNull(delegate), notNull(storageLimitReached),
+                notNull(nodeClose), notNull(graphCoordinator), replicationMark,
+                notNull(prepareReplicationCommit), notNull(cancelReplicationCommit));
+    }
+
+    /// Creates a Store-only guarded manager.
+    ///
+    /// @param <T> root type
+    /// @param delegate started delegate Store manager
+    /// @param storageLimitReached reports whether a writer limit is reached
+    /// @param nodeClose complete node teardown
+    /// @param graphCoordinator shared graph coordinator
+    /// @return guarded manager
+    public static <T> ClusterStorageManager<T> guarding(
+            final StorageManager delegate,
+            final BooleanSupplier storageLimitReached,
             final NodeClose nodeClose,
             final StorageGraphCoordinator graphCoordinator) {
-        return new GuardingStorageManager<>(
-                notNull(delegate), notNull(storageSizeValidation),
-                notNull(nodeClose), notNull(graphCoordinator));
+        return guarding(delegate, storageLimitReached, nodeClose, graphCoordinator, null, ignored -> {
+        });
     }
 
     /// Creates a read-only manager for reader and backup-reader nodes.
@@ -48,8 +87,17 @@ public final class ClusterStorageManagers {
             final StorageManager delegate,
             final NodeClose nodeClose,
             final StorageGraphCoordinator graphCoordinator) {
+        return readOnly(delegate, nodeClose, graphCoordinator, null);
+    }
+
+    /// Creates a read-only facade that hides the transport's reserved root.
+    public static <T> ClusterStorageManager<T> readOnly(
+            final StorageManager delegate,
+            final NodeClose nodeClose,
+            final StorageGraphCoordinator graphCoordinator,
+            final ReplicationMark replicationMark) {
         return new ReadOnlyStorageManager<>(
-                notNull(delegate), notNull(nodeClose), notNull(graphCoordinator));
+                notNull(delegate), notNull(nodeClose), notNull(graphCoordinator), replicationMark);
     }
 
     /// Waits for application calls to leave the facade before its Store closes.

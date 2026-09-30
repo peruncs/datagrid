@@ -4,93 +4,88 @@ import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
+import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
+import org.eclipse.store.storage.types.Storage;
+import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.cluster.api.NodeSettingsSource;
+import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.api.ReplicationState;
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.errors.ReplicationPositionUnavailableException;
+import peruncs.cluster.errors.WriteRejectedException;
+import peruncs.cluster.errors.internal.ReplicationPositionUnavailableException;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.cluster.node.replication.ReplicationHealth;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
-import peruncs.cluster.storage.ReplicationCursor;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
+import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
-/// Verifies provider health reflects writer readiness and checkpoint state.
+/// Verifies provider health reflects writer readiness and replication state.
 class AeronReplicationMonitoringTest {
     @TempDir
     Path temporaryDirectory;
 
-    @Test
-    void productionLeaseRequiresPreProvisionedSharedFilesystem() throws Exception {
-        final Path absent = temporaryDirectory.resolve("absent");
-        final IllegalArgumentException missing = assertThrows(IllegalArgumentException.class,
-                () -> AeronTransport.validateSharedLeaseFilesystem(absent));
-        assertTrue(missing.getMessage().contains("pre-provisioned"));
-
-        assumeFalse("nfs4".equalsIgnoreCase(Files.getFileStore(temporaryDirectory).type()));
-        final IllegalArgumentException local = assertThrows(IllegalArgumentException.class,
-                () -> AeronTransport.validateSharedLeaseFilesystem(temporaryDirectory));
-        assertTrue(local.getMessage().contains("supported shared filesystem"));
-    }
-
     /// Builds properties whose directories live under the test's own temporary
     /// directory, so every validation and runtime start is cleaned up by JUnit
     /// instead of accumulating in the system temporary directory.
-    private NodeSettingsSource properties(final String role) {
+    private NodeConfig properties(final String role) {
         return propertiesWith(role, null, null);
     }
 
-    private NodeSettingsSource propertiesWith(
-            final String role, final String overrideName, final String overrideValue) {
+    private NodeConfig propertiesWith(final String role, final String overrideName, final String overrideValue) {
         return propertiesWith(role, overrideName, overrideValue, false);
     }
 
-    private NodeSettingsSource propertiesWith(
+    private NodeConfig propertiesWith(
             final String role, final String overrideName, final String overrideValue, final boolean production) {
-        final String clusterId = UUID.randomUUID().toString();
         final Path root = temporaryDirectory.resolve("monitoring-%s".formatted(UUID.randomUUID()));
-        return new TestNodeProperties() {
-            @Override
-            public String replicationRole() {
-                return role;
-            }
-
-            @Override
-            public boolean isProdMode() {
-                return production;
-            }
-
-            @Override
-            public String replicationProperty(final String name) {
-                if ("ECLIPSE_DATAGRID_AERON_CLUSTER_ID".equals(name)) return clusterId;
-                if ("ECLIPSE_DATAGRID_AERON_NODE_ID".equals(name)) return UUID.randomUUID().toString();
-                if ("ECLIPSE_DATAGRID_AERON_STORE_GENERATION".equals(name)) return UUID.randomUUID().toString();
-                if ("ECLIPSE_DATAGRID_AERON_DIRECTORY".equals(name)) return root.resolve("driver").toString();
-                if ("ECLIPSE_DATAGRID_AERON_ARCHIVE_DIRECTORY".equals(name)) return root.resolve("archive").toString();
-                if ("ECLIPSE_DATAGRID_AERON_CHECKPOINT_PATH".equals(name)) {
-                    return root.resolve("checkpoint/writer.checkpoint").toString();
-                }
-                if ("ECLIPSE_DATAGRID_BACKUP_PATH".equals(name)) return root.resolve("backups").toString();
-                return overrideName != null && overrideName.equals(name) ? overrideValue : null;
-            }
-        };
+        final Map<String, String> overrides = overrideName == null ? Map.of() : Map.of(overrideName, overrideValue);
+        return TestNodeConfig.aeron(root, role, production, overrides);
     }
 
     /// Verifies the provider creates a transport that identifies itself as aeron.
     @Test
     void aeronProviderCreatesAeronTransport() {
         try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
-            assertEquals("aeron", transport.id());
+            assertNotNull(transport.replicationMark());
+        }
+    }
+
+    @Test
+    void registersOneStableReplicationMarkRootBeforeStoreStart() {
+        final Path storePath = temporaryDirectory.resolve("mark-store");
+        final EmbeddedStorageFoundation<?> foundation = EmbeddedStorage.Foundation(
+                StorageConfiguration.Builder().setStorageFileProvider(Storage.FileProvider(storePath))
+                        .createConfiguration());
+        try (final AeronTransport transport = new AeronTransport(properties("reader"))) {
+            transport.registerPersistentRoots(foundation);
+            try (final var storage = foundation.start()) {
+                final Object[] registered = new Object[1];
+                storage.viewRoots().iterateEntries((identifier, root) -> {
+                    if (ReplicationMark.ROOT_ID.equals(identifier)) registered[0] = root;
+                });
+                final ReplicationMark mark = assertInstanceOf(ReplicationMark.class, registered[0]);
+                assertEquals(transport.settings().topology().clusterId(), mark.clusterId);
+                assertEquals(transport.settings().topology().identity().storeGeneration(),
+                        mark.storeGeneration);
+            }
+
+            final EmbeddedStorageFoundation<?> conflicting = EmbeddedStorage.Foundation(
+                    StorageConfiguration.Builder().setStorageFileProvider(
+                                    Storage.FileProvider(temporaryDirectory.resolve("conflicting-mark-store")))
+                            .createConfiguration());
+            conflicting.getConnectionFoundation().getRootResolverProvider()
+                    .registerRoot(ReplicationMark.ROOT_ID, new Object());
+            assertThrows(NodeException.class, () -> transport.registerPersistentRoots(conflicting));
         }
     }
 
@@ -100,12 +95,12 @@ class AeronReplicationMonitoringTest {
         try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
             /* Health inspection must not start the runtime. Start it through the
              * explicit position-provider lifecycle first. */
-            final ReplicationPositionProvider positionProvider = transport.positionProvider("stream");
+            final ReplicationPositionProvider positionProvider = transport.positionProvider();
             positionProvider.init();
             positionProvider.latest();
-            final ReplicationApplier client = transport.client(null, "stream", null, null);
+            final ReplicationApplier client = ReplicationApplier.noOp();
             final ReplicationHealth health = transport.health(() -> true, client);
-            assertEquals("aeron", transport.id());
+            assertNotNull(transport.replicationMark());
             assertTrue(health.isReady());
             assertTrue(health.isHealthy());
             assertEquals(ReplicationState.LIVE, health.state());
@@ -117,24 +112,28 @@ class AeronReplicationMonitoringTest {
     @Test
     void positionProviderUsesSelfDescribingRecordingPosition() {
         try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
-            final ReplicationPositionProvider positionProvider = transport.positionProvider("stream");
+            final ReplicationPositionProvider positionProvider = transport.positionProvider();
             assertThrows(ReplicationPositionUnavailableException.class, positionProvider::latest);
             positionProvider.init();
-            final ReplicationCursor cursor = positionProvider.latest();
-            assertEquals("aeron", cursor.transport());
-            final AeronReplicationCursor aeronCursor = AeronReplicationCursor.decode(cursor.providerPositionBytes());
-            assertEquals(cursor.logicalSequence(), aeronCursor.sequence());
-            assertEquals(cursor.storeGeneration(), aeronCursor.storeGeneration());
+            final ReplicationPosition cursor = positionProvider.latest();
+            assertNotNull(cursor.clusterId());
+            assertNotNull(cursor.storeGeneration());
+            assertEquals(cursor.sequence(), positionProvider.latest().sequence());
         }
     }
 
-        /// The embedded writer commits through its local Archive spy with no remote reader.
+    /// The writer rejects a Store transaction that omits its reserved mark.
     @Test
-    void writerCommitsWithoutRemoteReader() {
+    void writerRejectsCommitWithoutStoreMark() {
         try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
-            transport.positionProvider("stream").init();
-            final ReplicationPublisher distributor = transport.distributor("stream");
-            final PersistenceTarget<Binary> target = transport.persistenceTargetFactory("stream", distributor)
+            final EmbeddedStorageFoundation<?> foundation = EmbeddedStorage.Foundation(
+                    StorageConfiguration.Builder()
+                            .setStorageFileProvider(Storage.FileProvider(temporaryDirectory.resolve("unmarked-store")))
+                            .createConfiguration());
+            transport.registerPersistentRoots(foundation);
+            transport.positionProvider().init();
+            final ReplicationPublisher distributor = transport.distributor();
+            final PersistenceTarget<Binary> target = transport.persistenceTargetFactory( distributor)
                     .apply(new PersistenceTarget<>() {
                         public void write(final Binary ignored) {
                         }
@@ -143,8 +142,9 @@ class AeronReplicationMonitoringTest {
                             return true;
                         }
                     });
-            target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1, 2, 3})));
-            assertEquals(0L, transport.positionProvider("stream").latest().logicalSequence());
+            final WriteRejectedException failure = assertThrows(WriteRejectedException.class,
+                    () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1, 2, 3}))));
+            assertTrue(failure.getMessage().contains("does not contain its replication mark"));
         }
     }
 
@@ -152,7 +152,7 @@ class AeronReplicationMonitoringTest {
     @Test
     void distributorRejectsDataWithoutAStoreTarget() {
         try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
-            final ReplicationPublisher distributor = transport.distributor("stream");
+            final ReplicationPublisher distributor = transport.distributor();
             assertThrows(IllegalStateException.class,
                     () -> distributor.distributeData(ChunksWrapper.New(
                             XMemory.toDirectByteBuffer(new byte[]{3, 2, 1}))));
@@ -165,7 +165,7 @@ class AeronReplicationMonitoringTest {
         final AeronDistributionGate distributor = new AeronDistributionGate(() -> false,
                 ignored -> {
                     throw new AssertionError("reader must not synchronize a writer sequence");
-                });
+                }, () -> null);
         assertThrows(IllegalStateException.class, () -> distributor.messageIndex(0L));
         assertEquals(-1L, distributor.messageIndex());
     }
@@ -175,7 +175,7 @@ class AeronReplicationMonitoringTest {
     void retentionRejectsDeletionUntilWatermarksAreConfigured() {
         try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
             assertThrows(UnsupportedOperationException.class,
-                    () -> transport.retention().deleteThrough(new ReplicationCursor("aeron", null, -1, "")));
+                    () -> transport.retention().deleteThrough(ReplicationPosition.NONE));
         }
     }
 
@@ -195,7 +195,7 @@ class AeronReplicationMonitoringTest {
             assertFalse(failedHealth.isHealthy());
             assertEquals(ReplicationState.FAILED, failedHealth.state());
             assertThrows(ReplicationPositionUnavailableException.class,
-                    () -> transport.positionProvider("stream").latest(),
+                    () -> transport.positionProvider().latest(),
                     "a reader cannot substitute its applied cursor for the writer's durable boundary");
             health.close();
             failedHealth.close();
@@ -205,22 +205,22 @@ class AeronReplicationMonitoringTest {
         /// Verifies rejection of invalid aeron epoch and stream settings.
     @Test
     void rejectsInvalidAeronEpochAndStreamSettings() {
-        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_EPOCH", "-1")));
-        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_STREAM_ID", "-1")));
+        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_EPOCH", "-1")));
+        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_STREAM_ID", "-1")));
     }
 
         /// Rejects an invalid Archive free-space admission threshold.
     @Test
     void rejectsNegativeArchiveCapacityThreshold() {
-        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES", "-1")));
+        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_MIN_ARCHIVE_FREE_BYTES", "-1")));
     }
 
         /// The writer admission gate and health state fail closed when usable space is below the threshold.
     @Test
     void reportsArchiveCapacityDegradationBeforeAcceptingWrites() {
-        try (final ClusterReplicationTransport transport = new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_MIN_ARCHIVE_FREE_BYTES",
+        try (final ClusterReplicationTransport transport = new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_MIN_ARCHIVE_FREE_BYTES",
                         Long.toString(Long.MAX_VALUE)))) {
-            final ReplicationApplier client = transport.client(null, "stream", null, null);
+            final ReplicationApplier client = ReplicationApplier.noOp();
             final ReplicationHealth health = transport.health(() -> true, client);
             assertFalse(health.isReady());
             assertFalse(health.isHealthy());
@@ -232,110 +232,37 @@ class AeronReplicationMonitoringTest {
         /// Rejects channel framing overrides that disagree with the shared configuration.
     @Test
     void rejectsConflictingChannelFraming() {
-        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
+        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_LIVE_CHANNEL",
                         "aeron:udp?control=localhost:40123|control-mode=dynamic|fc=max|term-length=1m")));
-        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_REPLAY_CHANNEL",
+        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_REPLAY_CHANNEL",
                         "aeron:udp?endpoint=localhost:0|mtu=1024k")));
     }
 
         /// Writer topology validation is semantic, not a substring match.
     @Test
     void rejectsNonDynamicWriterTopology() {
-        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
+        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_LIVE_CHANNEL",
                         "aeron:udp?control=localhost:40123|control-mode=manual|fc=max")));
-        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
+        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_LIVE_CHANNEL",
                         "aeron:udp?control=localhost:40123|control-mode=dynamic|fc=min")));
     }
 
-        /// A lease stored inside the Aeron driver tree is deleted by the next
-    /// driver start, so the wiring is rejected instead of silently losing it.
+    /// Verifies rejection of malformed numeric and production temporary directory settings.
     @Test
-    void rejectsLeaseDirectoryInsideAeronDirectory() {
-        final Path root = temporaryDirectory.resolve("lease-overlap");
-        final NodeSettingsSource properties = new TestNodeProperties() {
-            @Override
-            public String replicationRole() {
-                return "writer";
-            }
-
-            @Override
-            public String replicationProperty(final String name) {
-                return switch (name) {
-                    case "ECLIPSE_DATAGRID_AERON_CLUSTER_ID", "ECLIPSE_DATAGRID_AERON_NODE_ID",
-                            "ECLIPSE_DATAGRID_AERON_STORE_GENERATION" -> UUID.randomUUID().toString();
-                    case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> root.resolve("driver").toString();
-                    case "ECLIPSE_DATAGRID_BACKUP_PATH" -> root.resolve("driver/backups").toString();
-                    default -> null;
-                };
-            }
-        };
-
-        final IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
-                () -> new AeronTransport(properties));
-        assertTrue(failure.getMessage().contains("must not overlap"), failure.getMessage());
-    }
-
-        /// A writer without a shared lease directory cannot fence, so writer
-    /// startup fails with an actionable error instead of publishing unfenced.
-    @Test
-    void writerWithoutSharedLeaseDirectoryFailsAtStartup() {
-        final Path root = temporaryDirectory.resolve("lease-absent");
-        final NodeSettingsSource properties = new TestNodeProperties() {
-            @Override
-            public String replicationRole() {
-                return "writer";
-            }
-
-            @Override
-            public String replicationProperty(final String name) {
-                return switch (name) {
-                    case "ECLIPSE_DATAGRID_AERON_CLUSTER_ID", "ECLIPSE_DATAGRID_AERON_NODE_ID",
-                            "ECLIPSE_DATAGRID_AERON_STORE_GENERATION" -> UUID.randomUUID().toString();
-                    case "ECLIPSE_DATAGRID_AERON_DIRECTORY" -> root.resolve("driver").toString();
-                    default -> null;
-                };
-            }
-        };
-        try (ClusterReplicationTransport transport = new AeronTransport(properties)) {
-            final ReplicationPublisher distributor = transport.distributor("stream");
-
-            final NodeException failure = assertThrows(NodeException.class,
-                    () -> transport.persistenceTargetFactory("stream", distributor));
-            assertTrue(failure.getMessage().contains("shared lease directory"), failure.getMessage());
-        }
-    }
-
-        /// Verifies rejection of malformed numeric and production temporary directory settings.
-    @Test
-    void rejectsMalformedNumericAndProductionTemporaryDirectorySettings() {        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_EPOCH", "not-a-number")));
-        final NodeSettingsSource production = new TestNodeProperties() {
-            @Override
-            public String replicationRole() {
-                return "writer";
-            }
-
-            @Override
-            public boolean isProdMode() {
-                return true;
-            }
-
-            @Override
-            public String replicationProperty(final String name) {
-                if ("ECLIPSE_DATAGRID_AERON_CLUSTER_ID".equals(name)) return UUID.randomUUID().toString();
-                if ("ECLIPSE_DATAGRID_AERON_DIRECTORY".equals(name)) {
-                    return temporaryDirectory.resolve("production").toString();
-                }
-                return null;
-            }
-        };
+    void rejectsMalformedNumericAndProductionTemporaryDirectorySettings() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_EPOCH", "not-a-number")));
+        final NodeConfig production = TestNodeConfig.aeron(temporaryDirectory.resolve("production"),
+                "writer", true, Map.of(NodeConfig.Setting.AERON_DIRECTORY.key(),
+                        temporaryDirectory.resolve("production").toString()));
         assertThrows(IllegalArgumentException.class, () -> new AeronTransport(production));
     }
 
         /// Production mode rejects the two common configuration forms that weaken network/durability guarantees.
     @Test
     void rejectsProductionSyncLevelZeroAndIpv6Wildcard() {
-        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_FILE_SYNC_LEVEL", "0", true)));
-        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "ECLIPSE_DATAGRID_AERON_LIVE_CHANNEL",
+        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_FILE_SYNC_LEVEL", "0", true)));
+        assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_LIVE_CHANNEL",
                         "aeron:udp?control=[::]:40123|control-mode=dynamic|fc=max", true)));
     }
 
@@ -349,8 +276,8 @@ class AeronReplicationMonitoringTest {
         }
 
         @Override
-        public ReplicationCursor cursor() {
-            return new ReplicationCursor("aeron", null, -1, "");
+        public ReplicationPosition position() {
+            return ReplicationPosition.NONE;
         }
 
         @Override

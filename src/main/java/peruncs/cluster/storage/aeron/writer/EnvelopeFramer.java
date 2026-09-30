@@ -3,23 +3,30 @@ package peruncs.cluster.storage.aeron.writer;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
+import peruncs.cluster.storage.io.FaultInjection;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.LongSupplier;
-import java.util.function.Supplier;
 import java.util.zip.CRC32C;
 
 /// Encodes one transaction's frames in the publisher's reusable staging buffer.
 ///
 /// The publisher admits only one prepared transaction at a time, so the buffer
-/// stays owned by this framer until its transaction becomes terminal. Retry,
-/// deadline, and lease-gate policy stays in the retryer and the gate; this type
-/// only encodes, accumulates CRCs, and offers frames.
+/// stays owned by this framer until its transaction becomes terminal. This type
+/// encodes, accumulates CRCs, and offers frames.
 final class EnvelopeFramer implements AutoCloseable {
     private static final LazyConstant<UnsafeBuffer> EMPTY_BUFFER = LazyConstant.of(UnsafeBuffer::new);
+
+    /// Immutable publisher-wide framing state; transaction-specific values stay primitive.
+    record Configuration(UUID clusterId, long epoch, long wireNonce, int chunkSize, ByteBuffer storage) {
+        Configuration {
+            Objects.requireNonNull(clusterId, "clusterId");
+            Objects.requireNonNull(storage, "storage");
+            if (wireNonce == 0L || chunkSize <= 0) throw new IllegalArgumentException("invalid framing configuration");
+        }
+    }
 
     private final long sequence;
     private final UUID clusterId;
@@ -27,18 +34,12 @@ final class EnvelopeFramer implements AutoCloseable {
     private final long wireNonce;
     private final int chunkSize;
     private final int maxMessageLength;
-    private final long offerTimeoutNanos;
     private final AeronOfferRetryer offerer;
-    /* Captured once at framer construction: every frame of one transaction
-     * carries exactly one fencing token by construction. Production claims the
-     * lease (and its token) before the coordinator — and therefore before any
-     * framer — exists, and the coordinator re-asserts that the captured token
-     * still matches the reserved write, so a mid-transaction steal can never
-     * produce a mixed-token frame series. */
+    /* Captured once so every frame of one transaction carries one token. */
     private final long fencingToken;
-    private final Supplier<WriterLeaseGate> leaseGate;
     private final ByteBuffer storage;
     private final UnsafeBuffer buffer;
+    private long lastOfferPosition;
     private final AeronReplicationEnvelope.ChecksumContext checksum =
             new AeronReplicationEnvelope.ChecksumContext();
     private final CRC32C dataCrc = new CRC32C();
@@ -46,22 +47,18 @@ final class EnvelopeFramer implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
 
     /// Creates a framer over the publisher's reusable direct staging buffer.
-    EnvelopeFramer(final long sequence, final UUID clusterId, final long epoch, final long wireNonce,
-                   final int chunkSize, final int maxMessageLength, final long offerTimeoutNanos,
-                   final AeronOfferRetryer offerer, final LongSupplier fencingToken,
-                   final Supplier<WriterLeaseGate> leaseGate, final ByteBuffer storage) {
+    EnvelopeFramer(final long sequence, final Configuration configuration, final long fencingToken,
+                   final int maxMessageLength, final AeronOfferRetryer offerer) {
+        Objects.requireNonNull(configuration, "configuration");
         this.sequence = sequence;
-        this.clusterId = Objects.requireNonNull(clusterId, "clusterId");
-        this.epoch = epoch;
-        this.wireNonce = wireNonce;
-        this.chunkSize = chunkSize;
+        this.clusterId = configuration.clusterId();
+        this.epoch = configuration.epoch();
+        this.wireNonce = configuration.wireNonce();
+        this.chunkSize = configuration.chunkSize();
         this.maxMessageLength = maxMessageLength;
-        this.offerTimeoutNanos = offerTimeoutNanos;
         this.offerer = Objects.requireNonNull(offerer, "offerer");
-        Objects.requireNonNull(fencingToken, "fencingToken");
-        this.fencingToken = fencingToken.getAsLong();
-        this.leaseGate = Objects.requireNonNull(leaseGate, "leaseGate");
-        this.storage = Objects.requireNonNull(storage, "storage");
+        this.fencingToken = fencingToken;
+        this.storage = configuration.storage();
         this.buffer = new UnsafeBuffer(this.storage);
     }
 
@@ -127,7 +124,7 @@ final class EnvelopeFramer implements AutoCloseable {
             /* Intra-transaction seam for forked crash tests: a chunk budget
              * kills the child between two milestones of one large
              * transaction. Unbound cost is one ScopedValue check. */
-            CrashHook.invoke("DATA_CHUNK", this.sequence);
+            FaultInjection.invoke("DATA_CHUNK", this.sequence);
             logicalOffset += chunkLength;
         }
         return (int) crc.getValue();
@@ -140,6 +137,11 @@ final class EnvelopeFramer implements AutoCloseable {
                      final int payloadLength, final int chunkCount, final int commitCrc32c) {
         return this.offerEncoded(kind, payloadLength, 0, Math.max(1, chunkCount), 0,
                 commitCrc32c, EMPTY_BUFFER.get(), 0, 0);
+    }
+
+    /// Returns the last successfully offered frame position.
+    long lastOfferPosition() {
+        return this.lastOfferPosition;
     }
 
     /// Computes the CRC32C of the populated prefix of a reusable buffer array
@@ -200,11 +202,7 @@ final class EnvelopeFramer implements AutoCloseable {
         if (encodedLength > this.maxMessageLength) {
             throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
         }
-        final WriterLeaseGate gate = this.leaseGate.get();
-        final long budget = kind == AeronReplicationEnvelope.Kind.COMMIT ||
-                kind == AeronReplicationEnvelope.Kind.ABORT
-                ? gate.terminalOfferBudgetNanos() : this.offerTimeoutNanos;
-        return this.offerer.offerGated(this.buffer, encodedLength, gate, budget);
+        return this.lastOfferPosition = this.offerer.offer(this.buffer, encodedLength);
     }
 
     private void offerDataChunk(final int payloadLength, final int chunkIndex,
@@ -219,7 +217,7 @@ final class EnvelopeFramer implements AutoCloseable {
         if (encodedLength > this.maxMessageLength) {
             throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
         }
-        this.offerer.offerGated(this.buffer, encodedLength, this.leaseGate.get(), this.offerTimeoutNanos);
+        this.lastOfferPosition = this.offerer.offer(this.buffer, encodedLength);
     }
 
     /// Marks this transaction framer complete; the publisher owns and reuses the buffer.

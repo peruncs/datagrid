@@ -8,11 +8,14 @@ import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.cluster.errors.GraphInvalidatedException;
 import peruncs.cluster.storage.StorageGraphCoordinator;
 
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.util.Collection;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -67,12 +70,12 @@ class StorageBinaryDataMergerReadSideTest {
                     });
 
             final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), connection, ObjectGraphUpdateHandler.PerStore(coordinator), 0L, 1_000_000L, 60_000L, coordinator));
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), connection, coordinator::write, 0L, 1_000_000L, 60_000L, coordinator));
             try {
                 assertSame(coordinator, merger.graphCoordinator(),
                         "the merger must expose the coordinator node read paths join through");
 
-                final Binary empty = ChunksWrapper.New(ByteBuffer.allocateDirect(8));
+                final Binary empty = ChunksWrapper.New(merger.allocateNativeBuffer(8));
                 assertTrue(merger.receiveDataOwned(empty), "the empty batch must be accepted");
                 assertTrue(validationEntered.await(TIMEOUT_MS, TimeUnit.MILLISECONDS),
                         "the worker never reached the validation scan");
@@ -147,20 +150,20 @@ class StorageBinaryDataMergerReadSideTest {
                     });
 
             final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), connection, ObjectGraphUpdateHandler.PerStore(coordinator), 0L, 1_000_000L, 60_000L, coordinator));
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), connection, coordinator::write, 0L, 1_000_000L, 60_000L, coordinator));
             try {
-                final Binary empty = ChunksWrapper.New(ByteBuffer.allocateDirect(8));
+                final Binary empty = ChunksWrapper.New(merger.allocateNativeBuffer(8));
                 assertTrue(merger.receiveDataOwned(empty), "the batch must be admitted");
 
                 final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TIMEOUT_MS);
                 while (coordinator.graphFailure() == null && System.nanoTime() < deadline) {
                     Thread.sleep(10L);
                 }
-                assertInstanceOf(peruncs.cluster.errors.GraphInvalidatedException.class, coordinator.graphFailure(),
+                assertInstanceOf(GraphInvalidatedException.class, coordinator.graphFailure(),
                         "a failed batch must latch graph invalidity before the write lock releases");
                 assertSame(scanBoom, coordinator.graphFailure().getCause(),
                         "the latched invalidity must name the failed section");
-                assertThrows(peruncs.cluster.errors.GraphInvalidatedException.class,
+                assertThrows(GraphInvalidatedException.class,
                         () -> coordinator.read(() -> {
                         }), "coordinated reads must fail closed on a torn graph");
                 assertNotNull(merger.failure(), "the failed batch must also latch the merger failure");
@@ -168,7 +171,8 @@ class StorageBinaryDataMergerReadSideTest {
                 assertNotNull(latched);
                 assertSame(scanBoom, lastCause(latched),
                         "the merger failure must name the failing update section");
-                assertThrows(RuntimeException.class, () -> merger.receiveDataOwned(ChunksWrapper.New(ByteBuffer.allocateDirect(8))),
+                assertThrows(RuntimeException.class, () -> merger.receiveDataOwned(
+                                ChunksWrapper.New(merger.allocateNativeBuffer(8))),
                         "a failed merger must refuse further batches with its latched failure");
                 /* A failed batch must not keep half-planned index scratch
                  * pinned behind the terminal failure. */
@@ -194,8 +198,8 @@ class StorageBinaryDataMergerReadSideTest {
                 "vectorProbes", "vectorIndexes", "dirtyVectorIndexes", "groups", "maps"}) {
             final Object value = field(scratch, name);
             switch (value) {
-                case java.util.Map<?, ?> map -> assertTrue(map.isEmpty(), name + " must be cleared after a failed batch");
-                case java.util.Collection<?> list -> assertTrue(list.isEmpty(), name + " must be cleared after a failed batch");
+                case Map<?, ?> map -> assertTrue(map.isEmpty(), name + " must be cleared after a failed batch");
+                case Collection<?> list -> assertTrue(list.isEmpty(), name + " must be cleared after a failed batch");
                 default -> throw new AssertionError("unexpected scratch field type: " + name);
             }
         }
@@ -212,7 +216,7 @@ class StorageBinaryDataMergerReadSideTest {
     /// Verifies a merger built without a coordinator reports none so callers run scans directly.
     @Test
     void unwiredMergerExposesNoCoordinator() {
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), StorageBinaryDataMergerTestSupport.connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(StorageBinaryDataMergerTestSupport.foundation(), StorageBinaryDataMergerTestSupport.connection(), (new StorageGraphCoordinator())::write, 0L, 1L, 60_000L));
         try {
             assertNull(merger.graphCoordinator(),
                     "a merger built without a coordinator must report none so callers run scans directly");

@@ -8,6 +8,7 @@ import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.WriteRejectedException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
+import peruncs.cluster.storage.io.FaultInjection;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -113,7 +114,7 @@ class AeronReplicationPublisherTest {
         };
         final ReplicationUnavailableException failure = assertThrows(ReplicationUnavailableException.class,
                 () -> new AeronOfferRetryer(offerer, configuration).offer(
-                        new UnsafeBuffer(new byte[]{1}), 1, () -> true));
+                        new UnsafeBuffer(new byte[]{1}), 1));
         assertTrue(failure.getMessage().contains("NOT_CONNECTED"));
         assertTrue(failure.getMessage().contains("connected=false"));
     }
@@ -290,6 +291,36 @@ class AeronReplicationPublisherTest {
         }
     }
 
+    @Test
+    void lowLevelPrepareWrapsAnyFailureAfterRecordedAbort() {
+        final AtomicBoolean rejectData = new AtomicBoolean(true);
+        final IllegalStateException cause = new IllegalStateException("simulated offer failure");
+        final AeronReplicationConfiguration configuration = configuration(5_000_000L);
+        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                (buffer, offset, length) -> {
+                    final var envelope = AeronReplicationEnvelope.decode(buffer, offset, length);
+                    if (envelope.kind() == AeronReplicationEnvelope.Kind.STORE_BINARY && rejectData.get()) {
+                        throw cause;
+                    }
+                    if (envelope.kind() == AeronReplicationEnvelope.Kind.ABORT) rejectData.set(false);
+                    return length;
+                }, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
+            final WriteRejectedException rejected = assertThrows(WriteRejectedException.class,
+                    () -> publisher.prepareTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})}));
+            assertSame(cause, rejected.getCause());
+            assertTrue(rejected.hasRecordedAbort());
+            assertTrue(rejected.recordedAbortPosition() >= 0L);
+            assertFalse(publisher.isFailed());
+            assertEquals(1L, publisher.nextSequence());
+
+            try (final var next = publisher.prepareTransaction(
+                    null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{2})})) {
+                assertEquals(1L, next.sequence());
+                publisher.commit(next);
+            }
+        }
+    }
+
         /// Verifies publisher shutdown aborts an outstanding token and invokes its abort callback.
     @Test
     void publisherShutdownInvokesPendingAbortCallback() {
@@ -375,10 +406,10 @@ class AeronReplicationPublisherTest {
                     kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
                     return length;
                 }, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
-            CrashHook.runWithHook((name, ignored) ->
+            FaultInjection.runWithHook((name, sequence, path) ->
             {
                 if ("AFTER_PREPARE".equals(name)) throw new IllegalStateException("after prepare");
-            }, () -> assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
+            }, () -> assertThrows(WriteRejectedException.class, () -> publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})})));
             publisher.close();
             assertEquals(List.of(
@@ -671,9 +702,9 @@ class AeronReplicationPublisherTest {
             publisher.claimFencingToken(7L);
             final var failure = assertThrows(IllegalStateException.class,
                     () -> publisher.claimFencingToken(9L));
-            assertTrue(failure.getMessage().contains("lease was lost"),
-                    "re-claim must name the lost lease, was: %s".formatted(failure.getMessage()));
-            assertTrue(publisher.isFailed(), "a publisher that outlived its lease must fail closed");
+            assertTrue(failure.getMessage().contains("cannot replace it"),
+                    "re-claim must explain that the Store-mark token is immutable, was: %s".formatted(failure.getMessage()));
+            assertTrue(publisher.isFailed(), "a publisher with a changed Store-mark token must fail closed");
             assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})}));
             assertThrows(IllegalArgumentException.class, () -> publisher.claimFencingToken(0L));

@@ -2,7 +2,7 @@ package peruncs.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -25,8 +25,6 @@ import static org.eclipse.serializer.math.XMath.notNegative;
 public interface StorageBackupBackend {
         /// Name of the storage directory inside an archive.
     String STORAGE_ENTRY = "storage";
-        /// Name of the replication manifest inside an archive.
-    String MANIFEST_ENTRY = "manifest";
         /// Name of the completed-backup marker inside an archive.
     String READY_ENTRY = "ready";
         /// File name reserved for user-uploaded storage.
@@ -52,16 +50,16 @@ public interface StorageBackupBackend {
         return List.of();
     }
 
-        /// Reads the replication cursor stored with one selected backup.
+        /// Reads the retention boundary stored with one selected backup.
     ///
-    /// The cursor is read for a backup that was already selected for
-    /// compatibility, so restores never mix a cursor from an unrelated
+    /// The boundary is read for a backup that was already selected for
+    /// compatibility, so restores never mix progress from an unrelated
     /// generation with the installed image.
     ///
     /// @param backup selected backup
-    /// @return stored replication cursor
+    /// @return stored replication position
     /// @throws NodeException if reading fails
-    ReplicationCursor getCursorForBackup(BackupMetadata backup) throws NodeException;
+    ReplicationPosition retentionBoundary(BackupMetadata backup) throws NodeException;
 
         /// Selects the newest backup compatible with the given node identity.
     ///
@@ -119,11 +117,9 @@ public interface StorageBackupBackend {
         /// Creates one backup.
     ///
     /// @param connection storage connection
-    /// @param cursor     replication cursor to store
     /// @param backup     backup metadata
     /// @throws NodeException if creation fails
-    void createBackup(StorageConnection connection, final ReplicationCursor cursor, BackupMetadata backup)
-            throws NodeException;
+    void createBackup(StorageConnection connection, BackupMetadata backup) throws NodeException;
 
         /// Restores one backup.
     ///

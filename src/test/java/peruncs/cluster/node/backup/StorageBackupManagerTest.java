@@ -6,8 +6,7 @@ import peruncs.cluster.api.BackupInfo;
 import peruncs.cluster.api.BackupSlot;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.node.replication.ReplicationLogRetention;
-import peruncs.cluster.storage.ReplicationCursor;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 
 import java.nio.file.Path;
@@ -19,8 +18,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies the backup manager's stop, durability, retention, and resume protocol.
 class StorageBackupManagerTest {
-    private static final ReplicationCursor CURSOR =
-            new ReplicationCursor("test", null, 7L, "010203");
+    private static final ReplicationPosition CURSOR =
+            new ReplicationPosition(UUID.randomUUID(), UUID.randomUUID(), 1L, 1L, 7L, 1L, 1L, UUID.randomUUID());
 
     private static StorageBackupManager manager(
             final FakeBackend backend,
@@ -44,28 +43,26 @@ class StorageBackupManagerTest {
             final FakeClient client,
             final FakeRetention retention,
             final int maxBackupCount,
-            final Supplier<ReplicationCursor> cursor
+            final Supplier<ReplicationPosition> cursor
     ) {
         return StorageBackupManager.create(
                 storageConnection(), maxBackupCount, backend, cursor, client, retention);
     }
 
     private static BackupMetadata backup(final long timestamp, final boolean manualSlot) {
-        return new BackupMetadata(timestamp, manualSlot, null, null,
-                BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN,
-                null, UUID.randomUUID(), BackupMetadata.UNKNOWN);
+        return generationBackup(timestamp, manualSlot, CURSOR.clusterId(), CURSOR.storeGeneration(),
+                CURSOR.epoch(), CURSOR.recordingId());
     }
 
-    private static ReplicationCursor aeronCursor(
+    private static ReplicationPosition aeronCursor(
             final UUID clusterId,
             final UUID generation,
             final long epoch,
             final long recordingId,
             final long sequence
     ) {
-        return ReplicationCursor.of("aeron", generation, sequence,
-                new AeronReplicationCursor(
-                        clusterId, UUID.randomUUID(), generation, epoch, 1L, recordingId, 0L, sequence).encode());
+        return new ReplicationPosition(clusterId, generation, epoch, recordingId, sequence,
+                0L, 1L, UUID.randomUUID());
     }
 
     private static BackupMetadata generationBackup(
@@ -77,7 +74,8 @@ class StorageBackupManagerTest {
             final long recordingId
     ) {
         return new BackupMetadata(timestamp, manualSlot, clusterId, generation,
-                epoch, recordingId, BackupMetadata.UNKNOWN, null, UUID.randomUUID(), BackupMetadata.UNKNOWN);
+                epoch, recordingId, BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN,
+                null, UUID.randomUUID(), BackupMetadata.UNKNOWN);
     }
 
     /// A typed stub keeps this orchestration test independent of Store implementation details.
@@ -226,7 +224,7 @@ class StorageBackupManagerTest {
     void pruningSparesForeignGenerations() {
         final UUID cluster = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        final ReplicationCursor local = aeronCursor(cluster, generation, 5L, 42L, 7L);
+        final ReplicationPosition local = aeronCursor(cluster, generation, 5L, 42L, 7L);
         final FakeClient client = new FakeClient();
         final FakeBackend backend = new FakeBackend();
         /* The foreign backup is the oldest, so unfiltered pruning would delete
@@ -250,7 +248,7 @@ class StorageBackupManagerTest {
     void manualPruningSparesForeignManualSlots() {
         final UUID cluster = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        final ReplicationCursor local = aeronCursor(cluster, generation, 5L, 42L, 7L);
+        final ReplicationPosition local = aeronCursor(cluster, generation, 5L, 42L, 7L);
         final FakeBackend backend = new FakeBackend();
         backend.backups.addAll(List.of(
                 generationBackup(5L, true, UUID.randomUUID(), UUID.randomUUID(), 9L, 77L),
@@ -269,9 +267,9 @@ class StorageBackupManagerTest {
     void retentionUsesTheNewestCompatibleCursor() {
         final UUID cluster = UUID.randomUUID();
         final UUID generation = UUID.randomUUID();
-        final ReplicationCursor local = aeronCursor(cluster, generation, 5L, 42L, 7L);
-        final ReplicationCursor compatibleCursor = aeronCursor(cluster, generation, 5L, 42L, 6L);
-        final ReplicationCursor foreignCursor = aeronCursor(UUID.randomUUID(), UUID.randomUUID(), 9L, 77L, 11L);
+        final ReplicationPosition local = aeronCursor(cluster, generation, 5L, 42L, 7L);
+        final ReplicationPosition compatibleCursor = aeronCursor(cluster, generation, 5L, 42L, 6L);
+        final ReplicationPosition foreignCursor = aeronCursor(UUID.randomUUID(), UUID.randomUUID(), 9L, 77L, 11L);
         final FakeBackend backend = new FakeBackend();
         final BackupMetadata compatible = generationBackup(1L, false, cluster, generation, 5L, 42L);
         final BackupMetadata foreign = generationBackup(9L, false, UUID.randomUUID(), UUID.randomUUID(), 9L, 77L);
@@ -286,16 +284,18 @@ class StorageBackupManagerTest {
 
         /* The retention cursor must come from the compatibility-selected
          * backup, never from the newest backup overall: exactly one
-         * getCursorForBackup call for the compatible candidate. */
+         * retentionBoundary call for the compatible candidate. */
         assertEquals(1, backend.previousCalls, "retention reads the cursor of its selected backup exactly once");
         assertEquals(List.of(compatibleCursor), retention.cursors);
     }
 
-    /// Verifies the stored manifest captures the cursor read after the reader-stop boundary, not the pre-stop position.
+    /// Verifies backup identity captures the position read after the reader-stop boundary.
     @Test
-    void manifestCursorIsCapturedAfterTheStopBoundary() {
-        final ReplicationCursor before = new ReplicationCursor("test", null, 7L, "010203");
-        final ReplicationCursor stopped = new ReplicationCursor("test", null, 99L, "040506");
+    void backupBoundaryIsCapturedAfterTheStopBoundary() {
+        final UUID cluster = UUID.randomUUID();
+        final UUID generation = UUID.randomUUID();
+        final ReplicationPosition before = aeronCursor(cluster, generation, 4L, 9L, 7L);
+        final ReplicationPosition stopped = aeronCursor(cluster, generation, 4L, 9L, 99L);
         final FakeClient client = new FakeClient();
         client.running = true;
         final FakeBackend backend = new FakeBackend();
@@ -304,8 +304,8 @@ class StorageBackupManagerTest {
         manager(backend, client, retention, 1, () -> client.stopCalls == 0 ? before : stopped)
                 .createStorageBackup(BackupSlot.SCHEDULED);
 
-        assertEquals(List.of(stopped), backend.createdCursors,
-                "the stored manifest must describe the stopped boundary, not the pre-stop position");
+        assertEquals(stopped, backend.created.getFirst().retentionBoundary(),
+                "backup metadata must describe the stopped boundary, not the pre-stop position");
     }
 
     /// Verifies the maintenance path reports unreadable archives without failing the backup.
@@ -419,7 +419,7 @@ class StorageBackupManagerTest {
         }
 
         @Override
-        public ReplicationCursor cursor() {
+        public ReplicationPosition position() {
             return CURSOR;
         }
 
@@ -435,7 +435,7 @@ class StorageBackupManagerTest {
 
         @Override
         public StopResult stopResult() {
-            return new StopResult(this.stopOutcome, CURSOR.logicalSequence(), 42L);
+            return new StopResult(this.stopOutcome, CURSOR.sequence(), 42L);
         }
 
         @Override
@@ -454,10 +454,9 @@ class StorageBackupManagerTest {
     private static final class FakeBackend implements StorageBackupBackend {
         private final List<BackupMetadata> backups = new ArrayList<>();
         private final List<BackupMetadata> created = new ArrayList<>();
-        private final List<ReplicationCursor> createdCursors = new ArrayList<>();
         private final List<BackupMetadata> deleted = new ArrayList<>();
-        private ReplicationCursor previousCursor;
-        private Function<BackupMetadata, ReplicationCursor> cursorForBackup;
+        private ReplicationPosition previousCursor;
+        private Function<BackupMetadata, ReplicationPosition> cursorForBackup;
         private int previousCalls;
         private RuntimeException createFailure;
         private RuntimeException deleteFailure;
@@ -476,7 +475,7 @@ class StorageBackupManagerTest {
         }
 
         @Override
-        public ReplicationCursor getCursorForBackup(final BackupMetadata backup) {
+        public ReplicationPosition retentionBoundary(final BackupMetadata backup) {
             this.previousCalls++;
             return this.cursorForBackup == null ? this.previousCursor : this.cursorForBackup.apply(backup);
         }
@@ -491,12 +490,10 @@ class StorageBackupManagerTest {
         @Override
         public void createBackup(
                 final StorageConnection connection,
-                final ReplicationCursor cursor,
                 final BackupMetadata backup
         ) {
             if (this.createFailure != null) throw this.createFailure;
             this.created.add(backup);
-            this.createdCursors.add(cursor);
             this.backups.add(backup);
         }
 
@@ -520,12 +517,12 @@ class StorageBackupManagerTest {
 
     private static final class FakeRetention implements ReplicationLogRetention {
         private final Queue<MaintenanceResult> results = new ArrayDeque<>();
-        private final List<ReplicationCursor> cursors = new ArrayList<>();
+        private final List<ReplicationPosition> cursors = new ArrayList<>();
         private RuntimeException failure;
         private int calls;
 
         @Override
-        public MaintenanceResult deleteThrough(final ReplicationCursor cursor) {
+        public MaintenanceResult deleteThrough(final ReplicationPosition cursor) {
             if (this.failure != null) throw this.failure;
             this.calls++;
             this.cursors.add(cursor);

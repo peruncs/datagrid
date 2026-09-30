@@ -11,13 +11,14 @@ import io.aeron.archive.status.RecordingPos;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.status.CountersReader;
 import peruncs.cluster.storage.ReplicationRetry;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongConsumer;
 import java.util.function.LongPredicate;
 
 /// Publishes the replication stream and waits for the Archive to record it.
@@ -278,6 +279,26 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         return recordingId[0];
     }
 
+    /// Finds the newest Archive recording for a stream when an empty Store mark
+    /// has not yet recorded its first recording id.
+    public static long latestRecordingId(final AeronArchive archive, final int streamId) {
+        final long[] found = {Aeron.NULL_VALUE};
+        long from = 0L;
+        final int pageSize = 128;
+        while (true) {
+            final long[] last = {from - 1L};
+            final int count = archive.listRecordings(from, pageSize, (controlSessionId, correlationId, id,
+                    startTimestamp, stopTimestamp, startPosition, stopPosition, initialTermId,
+                    segmentFileLength, termLength, mtuLength, sessionId, stream, strippedChannel,
+                    originalChannel, sourceIdentity) -> {
+                last[0] = id;
+                if (stream == streamId) found[0] = id;
+            });
+            if (count < pageSize || last[0] < from || last[0] == Long.MAX_VALUE) return found[0];
+            from = last[0] + 1L;
+        }
+    }
+
         /// Builds the archive-await idle strategy from the configured retry policy.
     ///
     /// Recording and offer waits use the same configured retry policy.
@@ -301,7 +322,6 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         long lastRecordedPosition = Aeron.NULL_VALUE;
         boolean lastActive = false;
         int counterId = -1;
-        long nextArchiveProbe = 0L;
         long nextErrorProbe = 0L;
         while (true) {
             checkInterrupted("waiting for Aeron Archive recording");
@@ -326,23 +346,10 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
                     throw new IllegalStateException("Aeron archive recording stopped before commit position %s".formatted(commitPosition));
                 }
             }
-            if (counterId < 0 && recordingIdHint >= 0 && System.nanoTime() >= nextArchiveProbe) {
-                /* A local RecordingPos counter is authoritative. Only ask the Archive
-                 * control session when the counter is not visible (the remote/fallback
-                 * path); otherwise every back-pressured offer would issue a synchronous
-                 * control round-trip. */
-                final long archivePosition = getRecordingPosition(archive, recordingIdHint);
-                if (archivePosition >= commitPosition) {
-                    return archivePosition;
-                }
-                nextArchiveProbe = System.nanoTime() + configuration.retryPolicy().archiveProbeDelayNanos();
-            }
             /* The local counter is checked first, so an ordinary successful commit
-             * returns without touching the control subscription. While the recording
-             * is behind, the counter can remain allocated after an external Archive
-             * dies, so the control session is probed on the configured cadence: a
-             * disconnected Archive fails promptly instead of masquerading as a slow
-             * recording until the complete commit deadline expires. */
+             * returns without touching the control subscription. Poll the embedded
+             * Archive's error response while it catches up so terminal failures
+             * surface before the commit deadline. */
             final long errorNow = System.nanoTime();
             if (errorNow >= nextErrorProbe) {
                 final String archiveError = pollForErrorResponse(archive);
@@ -571,6 +578,11 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         return findRecordingId(this.archive, this.publication);
     }
 
+    /// Reads the publication boundary while the write coordinator excludes maintenance.
+    public long currentPosition() {
+        return this.publication.position();
+    }
+
     private int recordingCounterId(final CountersReader counters) {
         final int cached = this.recordingCounterId.get();
         if (cached >= 0 && cached <= counters.maxCounterId()) {
@@ -702,20 +714,17 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         return this.publication;
     }
 
-    /// Creates a coordinator whose terminal markers run under lease ownership.
+    /// Creates a coordinator for this single writer publication.
     ///
-    /// @param writer         receiver for checkpoint transitions
+    /// @param terminalRecorded updates the in-memory writer boundary after a terminal marker
     /// @param writeAdmission predicate receiving payload plus dictionary bytes before local acceptance
-    /// @param leaseGate      gate serializing marker offers with lease takeovers
     /// @return a coordinator backed by this publisher
     public AeronReplicationWriteCoordinator newWriteCoordinator(
-            final CheckpointWriter writer,
-            final LongPredicate writeAdmission,
-            final WriterLeaseGate leaseGate) {
-        Objects.requireNonNull(writer, "writer");
-        Objects.requireNonNull(leaseGate, "leaseGate");
-        return new AeronReplicationWriteCoordinator(this.publisher, writer,
-                writeAdmission, leaseGate);
+            final LongConsumer terminalRecorded,
+            final LongPredicate writeAdmission) {
+        Objects.requireNonNull(terminalRecorded, "terminalRecorded");
+        return new AeronReplicationWriteCoordinator(this.publisher, terminalRecorded,
+                writeAdmission);
     }
 
         /// Aligns the next transaction with a sequence recovered from the Store.
@@ -725,12 +734,20 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
         this.publisher.synchronizeNextSequence(nextSequence);
     }
 
-        /// Claims the fencing token acquired with the writer lease.
+    /// Completes a terminal decision found while replaying the Store-mark tail.
+    public long appendRecoveryMarker(final long sequence, final AeronReplicationEnvelope.Kind kind,
+                                     final int payloadLength, final int dataChunkCount,
+                                     final int dataCrc32c, final long markToken) {
+        return this.publisher.appendRecoveryMarker(sequence, kind, payloadLength,
+                dataChunkCount, dataCrc32c, markToken);
+    }
+
+    /// Claims the fencing token persisted in the writer's Store mark.
     ///
     /// Every envelope offered afterwards carries this token; readers reject
     /// frames from a deposed writer whose token is lower.
     ///
-    /// @param fencingToken positive lease token
+    /// @param fencingToken positive Store-mark token
     public void claimFencingToken(final long fencingToken) {
         this.publisher.claimFencingToken(fencingToken);
     }
@@ -850,24 +867,6 @@ public final class AeronArchiveReplicationPublisher implements AutoCloseable {
     /// has a confirmed stop position
     public synchronized boolean isClosed() {
         return this.closed;
-    }
-
-        /// Persists the writer checkpoint after an Archive position is known.
-    @FunctionalInterface
-    public interface CheckpointWriter {
-                /// Receives a writer transition and the metadata needed for restart.
-        /// Non-terminal states are deliberately useful for diagnosis only; restart
-        /// must not treat them as committed data.
-        ///
-        /// @param state          state reached by the writer
-        /// @param sequence       transaction sequence
-        /// @param dataLength     Store binary length
-        /// @param dataChunkCount Store binary chunk count
-        /// @param dataCrc32c     Store binary checksum
-        /// @param position       Archive position of the terminal marker, or `-1`
-        void onState(AeronReplicationCheckpoint.State state, long sequence, int dataLength,
-                     int dataChunkCount, int dataCrc32c, long position);
-
     }
 
 }

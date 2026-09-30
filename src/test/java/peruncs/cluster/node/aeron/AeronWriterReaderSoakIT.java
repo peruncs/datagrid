@@ -12,15 +12,10 @@ import peruncs.cluster.node.aeron.AeronStoreIntegrationIT.IndexRoot;
 import peruncs.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticle;
 import peruncs.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.cluster.node.replication.DurableCursorFile;
 import peruncs.cluster.node.replication.ReplicationLogRetention;
-import peruncs.cluster.storage.ReplicationCursor;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCheckpoint;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCheckpointStore;
+import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
-import peruncs.cluster.storage.io.FileStoreCrashHooks;
 
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
@@ -50,8 +45,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// tuned with `-Dsoak.seconds=`, `-Dsoak.seed=`, `-Dsoak.readers=`,
 /// `-Dsoak.writer.threads=`, `-Dsoak.query.threads=`, `-Dsoak.payloadBytes=`,
 /// `-Dsoak.restarts=`, `-Dsoak.lagSlots=`, `-Dsoak.miniCensus=`,
-/// `-Dsoak.pollDelayMs=`, `-Dsoak.pollStallMs=`,
-/// `-Dsoak.fsyncDelayMs=`, `-Dsoak.maxTornReads=`, `-Dsoak.corrupt=`,
+/// `-Dsoak.maxTornReads=`, `-Dsoak.corrupt=`,
 /// `-Dsoak.gc=`, `-Dsoak.writerRestart=`, `-Dsoak.reseed=`,
 /// `-Dsoak.retention=`, `-Dsoak.events=`, and
 /// `-Dsoak.jfr.fail=`. The seed drives the
@@ -80,12 +74,11 @@ import static org.junit.jupiter.api.Assertions.*;
 ///    the writer's baseline replication sequence.
 /// 2. Run concurrent writer, reader-query, audit, and chaos workers. Writers
 ///    add, update, and remove articles under the one-writer lock. Query workers
-///    verify ghost-title absence, cursor-gated graph state, Lucene visibility,
+///    verify ghost-title absence, Store-mark-gated graph state, Lucene visibility,
 ///    JVector visibility, and title/body checksums. The audit worker samples
 ///    lag, performs mini-censuses, and enforces the bounded-lag SLO.
 /// 3. Dispatch a seeded, fixed rotation of single restart, dual restart,
-///    slow-reader, CPU/GC, forced-GC burst, cursor-corruption,
-///    rollback-cursor, live Archive-tail-corruption, writer-restart,
+///    CPU/GC, forced-GC burst, Store-mark rollback, live Archive-tail-corruption, writer-restart,
 ///    reseed-and-rejoin, and watermark-retention operations. There is no
 ///    privileged first operation: heavy ops (including writer-restart) are
 ///    schedulable from the first draw, and transport interruption stays
@@ -106,7 +99,7 @@ import static org.junit.jupiter.api.Assertions.*;
 ///    planned fate.
 ///
 /// The transaction model is the oracle, not the live writer Store. Reader
-/// assertions are cursor-gated so lag is not mistaken for loss; positive index
+/// assertions are Store-mark-gated so lag is not mistaken for loss; positive index
 /// checks allow a short refresh window. A reseed-required or corruption-parked
 /// reader is a valid outcome only when its exact fate is logged. Silent reader
 /// disappearance, unexpected exceptions, failed logging, phantom hits, stale
@@ -118,7 +111,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// JSONL event log as the authoritative schedule. The test deliberately does
 /// not claim to simulate UDP loss/duplication, disk-full ENOSPC, SIGSTOP, or
 /// epoch regression. Reseed-and-rejoin is executed as the documented manual
-/// procedure (copy the writer Store plus a valid cursor into the parked
+/// procedure (copy the writer Store, including its mark, into the parked
 /// reader's home, restart) driven by the chaos thread — the production library
 /// has no automatic reseed, and the soak does not pretend otherwise.
 ///
@@ -148,15 +141,14 @@ class AeronWriterReaderSoakIT {
     private final AtomicLong servedQueries = new AtomicLong();
     private final AtomicLong verifiedQueries = new AtomicLong();
     private final AtomicLong tornReads = new AtomicLong();
-    /// Completed per-reader observability cross-checks (live vs durable cursor).
+    /// Completed per-reader observability cross-checks (live transport vs Store mark).
     private long metricsCrossChecks;
     private final AtomicLong completedRestarts = new AtomicLong();
     private final AtomicLong abruptRestarts = new AtomicLong();
     private final AtomicLong chaosOps = new AtomicLong();
-    private final AtomicLong slowBursts = new AtomicLong();
-    private final AtomicLong fsyncStalls = new AtomicLong();
+    private final AtomicLong writerStalls = new AtomicLong();
     private final AtomicLong corruptionFired = new AtomicLong();
-    private final AtomicLong corruptionTimeouts = new AtomicLong();
+    private final AtomicLong injectionTimeouts = new AtomicLong();
     private final AtomicLong liveFlips = new AtomicLong();
     private final AtomicLong reseedsDemanded = new AtomicLong();
     /// Manual reseeds actually executed by the reseed chaos op (parked reader
@@ -205,21 +197,19 @@ class AeronWriterReaderSoakIT {
     private int lagSlots = 100;
     private int miniCensus = 20;
     private long baselineSeq;
-    private long pollDelayMs = 2L;
-    private long pollStallMs = 800L;
-    private long fsyncDelayMs = 3L;
     private long maxTornReads = 64L;
     private boolean corruptEnabled = true;
     private boolean gcEnabled = true;
     private boolean writerRestartEnabled = true;
+    private boolean archiveTailCorrupted;
     private boolean reseedEnabled = true;
     private boolean retentionEnabled = true;
     private int payloadBytes = 0;
     private volatile long eventStartNanos;
 
     /// Exercises one writer against `-Dsoak.readers` readers under seeded
-    /// threaded load with query traffic, slow-reader/fsync/CPU chaos, transport
-    /// restarts, and cursor/Archive corruption, then requires every reader to
+    /// threaded load with query traffic, CPU/GC chaos, transport restarts, and
+    /// Store-mark/Archive corruption, then requires every reader to
     /// converge or park fail-closed with a fully verified Store and index state.
     @Test
     @Timeout(value = 8, unit = TimeUnit.MINUTES)
@@ -233,9 +223,6 @@ class AeronWriterReaderSoakIT {
         final int restarts = Integer.getInteger("soak.restarts", 10);
         this.lagSlots = Integer.getInteger("soak.lagSlots", 100);
         this.miniCensus = Integer.getInteger("soak.miniCensus", 20);
-        this.pollDelayMs = Long.getLong("soak.pollDelayMs", 2L);
-        this.pollStallMs = Long.getLong("soak.pollStallMs", 800L);
-        this.fsyncDelayMs = Long.getLong("soak.fsyncDelayMs", 3L);
         this.maxTornReads = Long.getLong("soak.maxTornReads", 64L);
         this.payloadBytes = Integer.getInteger("soak.payloadBytes", 0);
         if (readerCount < 1) throw new IllegalArgumentException("soak.readers must be at least 1");
@@ -279,26 +266,25 @@ class AeronWriterReaderSoakIT {
                         AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
                                 controlPort, livePort, watermarkPort, retentionReaders)), retentionReaders)) {
             final ClusterReplicationTransport writerTransport = writerHandle.transport();
-            writerTransport.positionProvider("store").init();
-            final ReplicationPublisher distributor = writerTransport.distributor("store");
+            writerTransport.positionProvider().init();
+            final ReplicationPublisher distributor = writerTransport.distributor();
             final Random seedRandom = new Random(seed);
             final IndexRoot initial = new IndexRoot();
             initial.articles = GigaMap.New();
             AeronStoreIntegrationIT.configureIndexes(initial.articles);
             for (int i = 0; i < SEED_ARTICLES; i++) seedArticle(initial, seedRandom);
             seedSentinels(initial);
-            final EmbeddedStorageManager seeded = AeronStoreIntegrationIT.startIndex(writerStore, initial, distributor,
-                    writerTransport.persistenceTargetFactory("store", distributor));
-            seeded.storeRoot();
+            final EmbeddedStorageManager seeded = AeronStoreIntegrationIT.startIndex(
+                    writerStore, initial, distributor, writerTransport);
             seeded.shutdown();
             audit(startNanos, "seeded articles=%d".formatted(SEED_ARTICLES + SENTINELS.length));
 
-            final ReplicationCursor baseline = writerHandle.latest();
-            this.baselineSeq = baseline.logicalSequence();
+            final ReplicationPosition baseline = writerHandle.latest();
+            this.baselineSeq = baseline.sequence();
             this.lastWriterSeq = this.baselineSeq;
             for (final Path readerStore : readerStores) AeronStoreIntegrationIT.copyDirectory(writerStore, readerStore);
-            final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(writerStore, distributor,
-                    writerTransport.persistenceTargetFactory("store", distributor));
+            final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(
+                    writerStore, distributor, writerTransport);
             writerHandle.install(writer, writer.root());
             final IndexRoot writerRoot = writerHandle.root();
             try {
@@ -306,7 +292,7 @@ class AeronWriterReaderSoakIT {
                 final ReadWriteLock[] gates = new ReadWriteLock[readerStores.length];
                 for (int i = 0; i < holders.length; i++) {
                     holders[i] = ReaderNode.open(readerNodes[i], readerStores[i], "reader", readerIds[i],
-                            clusterId, generation, baseline, controlPort, livePort, watermarkPort);
+                            clusterId, generation, controlPort, livePort, watermarkPort);
                     holders[i].start();
                     gates[i] = new ReentrantReadWriteLock();
                 }
@@ -359,11 +345,11 @@ class AeronWriterReaderSoakIT {
                 audit(startNanos, "soak-start pid=%d threads=%d".formatted(ProcessHandle.current().pid(), workers.size()));
                 for (final Thread worker : workers) worker.join();
                 assertNoWorkerFailures();
-                audit(startNanos, "soak-end tx=%d queries=%d verified=%d torn=%d restarts=%d abrupt=%d chaosOps=%d slow=%d fsyncStalls=%d corrupt=%d liveFlips=%d"
+                audit(startNanos, "soak-end tx=%d queries=%d verified=%d torn=%d restarts=%d abrupt=%d chaosOps=%d writerStalls=%d corrupt=%d liveFlips=%d"
                         .formatted(this.publishedTransactions.get(), this.servedQueries.get(),
                                 this.verifiedQueries.get(), this.tornReads.get(), this.completedRestarts.get(),
-                                this.abruptRestarts.get(), this.chaosOps.get(), this.slowBursts.get(),
-                                this.fsyncStalls.get(), this.corruptionFired.get(), this.liveFlips.get()));
+                                this.abruptRestarts.get(), this.chaosOps.get(), this.writerStalls.get(),
+                                this.corruptionFired.get(), this.liveFlips.get()));
                 if (!this.tornSamples.isEmpty()) {
                     System.out.println("SOAK torn-read samples (queries retried while replication landed):");
                     this.tornSamples.stream().limit(5).forEach(sample -> System.out.println("SOAK   " + sample));
@@ -430,11 +416,11 @@ class AeronWriterReaderSoakIT {
                 /* Resolve the writer pair through the handle, never through
                  * the setup-time local: the writer-restart chaos op swaps the
                  * transport underfoot. */
-                final ReplicationCursor target;
+                final ReplicationPosition target;
                 synchronized (this.writeLock) {
                     target = writerHandle.latest();
                 }
-                audit(startNanos, "converge-start target=%d".formatted(target.logicalSequence()));
+                audit(startNanos, "converge-start target=%d".formatted(target.sequence()));
                 int converged = 0;
                 int parked = 0;
                 for (int r = 0; r < holders.length; r++) {
@@ -453,7 +439,7 @@ class AeronWriterReaderSoakIT {
                                 .formatted(r, fate, readerReseeds[r].get(), readerCorruptionParks[r].get()));
                         continue;
                     }
-                    audit(startNanos, "converge-await reader=%d target=%d".formatted(r, target.logicalSequence()));
+                    audit(startNanos, "converge-await reader=%d target=%d".formatted(r, target.sequence()));
                     gates[r].readLock().lock();
                     try {
                         holders[r].await(target);
@@ -519,8 +505,8 @@ class AeronWriterReaderSoakIT {
                 if (!strictProblems.isEmpty()) {
                     throw new AssertionError("soak strict verification failed: " + strictProblems);
                 }
-                if (this.corruptionTimeouts.get() > 0) {
-                    audit(startNanos, "corruption-timeouts=%d (parked, see events)".formatted(this.corruptionTimeouts.get()));
+                if (this.injectionTimeouts.get() > 0) {
+                    audit(startNanos, "injection-timeouts=%d (parked, see events)".formatted(this.injectionTimeouts.get()));
                 }
                 /* A blind run is a failed run: every logging failure so far
                  * lands in the worker-failure queue, so the outer finally
@@ -625,9 +611,9 @@ class AeronWriterReaderSoakIT {
     /// -1 when the boundary is unknown (reader parked or unreadable).
     private long readerDepth(final ReaderNode node) {
         try {
-            final ReplicationCursor cursor = node.persistedCursor();
+            final ReplicationPosition cursor = node.persistedPosition();
             if (cursor == null) return -1L;
-            return Math.max(0L, cursor.logicalSequence() - this.baselineSeq);
+            return Math.max(0L, cursor.sequence() - this.baselineSeq);
         } catch (final RuntimeException unreadable) {
             return -1L;
         }
@@ -644,42 +630,24 @@ class AeronWriterReaderSoakIT {
                  * writer-restart chaos op swaps both under this same lock, so
                  * one iteration can never publish through a disposed pair. */
                 final IndexRoot writerRoot = writer.root();
-                final ClusterReplicationTransport writerTransport = writer.transport();
                 if (op < 55) addBatch(writerRoot, random, 1 + random.nextInt(4));
                 else if (op < 80) updateOne(writerRoot, random);
                 else removeOne(writerRoot, random);
-                /* Fsync-delay chaos rides the real AtomicFileWriter hook when
-                 * the checkpoint path fires synchronously on this thread;
-                 * when it does not fire the occasional writer stall below
-                 * still widens the backlog window deterministically. Kept
-                 * mild: the lag SLO must observe backlog, not drown in it. */
+                /* A rare bounded writer stall widens the backlog window so
+                 * lag accounting sees realistic scheduling variation. */
                 final long stallMs = random.nextInt(100) < 2 ? 20L + random.nextInt(40) : 0L;
-                if (stallMs > 0) this.fsyncStalls.incrementAndGet();
-                FileStoreCrashHooks.runWithHook(
-                        (phase, path) -> {
-                            if (this.fsyncDelayMs > 0) sleepUnchecked(this.fsyncDelayMs);
-                            if (stallMs > 0) sleepUnchecked(stallMs);
-                        },
-                        () -> writerRoot.articles.store());
+                if (stallMs > 0) this.writerStalls.incrementAndGet();
+                if (stallMs > 0) Thread.sleep(stallMs);
+                writer.store(writerRoot.articles);
                 this.publishedTransactions.incrementAndGet();
             }
             /* Publish the writer boundary at each transaction. Keep the
              * position read outside the mutation lock: the boundary is a
              * writer-side snapshot, and the guard only needs a current upper
              * bound rather than lock-coupled sequencing. */
-            this.lastWriterSeq = writer.latest().logicalSequence();
-            /* Occasional writer-side stall widens the backlog even when the
-             * fsync hook has nothing to delay on this thread. */
+            this.lastWriterSeq = writer.latest().sequence();
+            /* Spread writes enough to let reader lag vary under load. */
             sleepJitter(random, 5);
-        }
-    }
-
-    private static void sleepUnchecked(final long millis) {
-        try {
-            Thread.sleep(millis);
-        } catch (final InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("soak delay interrupted", interrupted);
         }
     }
 
@@ -820,8 +788,8 @@ class AeronWriterReaderSoakIT {
         final long writerSeq = this.lastWriterSeq;
         if (writerSeq < 0) return false;
         try {
-            final ReplicationCursor cursor = node.persistedCursor();
-            return cursor != null && writerSeq - cursor.logicalSequence() > 2L * this.lagSlots;
+            final ReplicationPosition cursor = node.persistedPosition();
+            return cursor != null && writerSeq - cursor.sequence() > 2L * this.lagSlots;
         } catch (final RuntimeException unreadable) {
             /* An unreadable cursor cannot prove that the boundary is safe.
              * Skip the graceful stop rather than reintroducing the moving-tail
@@ -831,9 +799,9 @@ class AeronWriterReaderSoakIT {
     }
 
     /// Mid-soak verification checks ghost titles immediately and checks a
-    /// cursor-gated entity against the graph and both indexes. Index refresh
+    /// Store-mark-gated entity against the graph and both indexes. Index refresh
     /// can trail materialization, so positive index checks use a short bounded
-    /// retry; a cursor-gated miss that remains after that window is a failure.
+    /// retry; a Store-mark-gated miss that remains after that window is a failure.
     /// The bounded window is only a meaningful divergence signal for near-live
     /// readers: a reader replaying a deep backlog bundles index maintenance
     /// into batches far larger than the window, so positive checks there are
@@ -935,19 +903,19 @@ class AeronWriterReaderSoakIT {
     /// type regularly while victims, timings, and payloads stay seeded-random.
     /// Per-type dealt/effective/skipped counters prove what actually landed.
     private static final List<String> CHAOS_ROTATION =
-            List.of("single", "dual", "slow", "cpu", "gc", "cursor", "rollback", "segment",
+            List.of("single", "dual", "cpu", "gc", "rollback", "segment",
                     "writer-restart", "reseed", "retention");
 
     private void chaosLoop(final long startNanos, final Path root, final Topology topology,
                            final WriterHandle writer,
                            final ReaderNode[] holders, final ReadWriteLock[] gates,
-                           final ReaderSpec[] readers, final ReplicationCursor baseline,
+                           final ReaderSpec[] readers, final ReplicationPosition baseline,
                            final long soakEndNanos, final int restarts,
                            final AtomicLong[] readerRestarts, final AtomicLong[] readerReseeds,
                            final AtomicLong[] readerCorruptionParks, final Random random) throws Exception {
         final List<String> rotation = new ArrayList<>(CHAOS_ROTATION);
         if (!this.corruptEnabled) {
-            rotation.removeIf(op -> op.equals("cursor") || op.equals("rollback") || op.equals("segment"));
+            rotation.removeIf(op -> op.equals("rollback") || op.equals("segment"));
             rotation.add("single");
         }
         if (!this.gcEnabled) rotation.remove("gc");
@@ -991,6 +959,11 @@ class AeronWriterReaderSoakIT {
             }
             final String selected = rotation.get(rotationPos % rotation.size());
             rotationPos++;
+            if (selected.equals("segment") && this.writerRestartEnabled && this.writerRestarts.get() == 0L) {
+                audit(startNanos, "segment-corrupt-deferred (writer restart must precede Archive mutation)");
+                event(startNanos, "op-deferred", "op=segment reason=writer-restart-first");
+                continue;
+            }
             this.chaosIterations.incrementAndGet();
             dealt(selected);
             event(startNanos, "op-selected", "op=%s pos=%d".formatted(selected, rotationPos));
@@ -999,18 +972,15 @@ class AeronWriterReaderSoakIT {
                         readerRestarts, readerReseeds, random);
                 case "dual" -> () -> restartDual(startNanos, holders, gates, baseline,
                         readerRestarts, readerReseeds, random);
-                case "slow" -> () -> slowReaderBurst(startNanos, holders, random);
                 case "cpu" -> () -> cpuGarbageBurst(startNanos, random);
                 case "gc" -> () -> gcBurst(startNanos, random);
-                case "cursor" -> () -> corruptCursorFile(startNanos, holders, gates,
-                        readerCorruptionParks, random);
-                case "rollback" -> () -> rollbackCursor(startNanos, holders, gates, baseline,
-                        readerReseeds, readerRestarts, random);
-                case "segment" -> () -> corruptLiveSegment(startNanos, root, writer.root(), writer.transport(),
+                case "rollback" -> () -> rollbackStoreMark(startNanos, holders, gates, baseline,
+                        readerReseeds, random);
+                case "segment" -> () -> corruptLiveSegment(startNanos, root, writer,
                         holders, gates, readerCorruptionParks, random);
                 case "writer-restart" -> () -> writerRestart(startNanos, root, writer, holders, gates, random);
                 case "reseed" -> () -> reseedAndRejoin(startNanos, writer, holders, gates, readers, topology, random);
-                case "retention" -> () -> retentionPurge(startNanos, writer, holders, gates, readers, random);
+                case "retention" -> () -> retentionPurge(startNanos, writer, holders, gates, random);
                 default -> throw new IllegalStateException("unknown chaos op " + selected);
             };
             accountOp(startNanos, selected, runOp(run));
@@ -1115,7 +1085,7 @@ class AeronWriterReaderSoakIT {
     }
 
     private OpOutcome restartSingle(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates,
-                                        final ReplicationCursor baseline, final AtomicLong[] readerRestarts,
+                                        final ReplicationPosition baseline, final AtomicLong[] readerRestarts,
                                         final AtomicLong[] readerReseeds, final Random random) {
         final int readerIndex = random.nextInt(holders.length);
         final boolean abrupt = drawAbrupt(random);
@@ -1132,7 +1102,7 @@ class AeronWriterReaderSoakIT {
     }
 
     private OpOutcome restartSingleAt(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates,
-                                          final ReplicationCursor baseline, final int readerIndex, final boolean abrupt,
+                                          final ReplicationPosition baseline, final int readerIndex, final boolean abrupt,
                                           final AtomicLong[] readerRestarts, final AtomicLong[] readerReseeds) {
         if (holders[readerIndex] == null) {
             audit(startNanos, "reader-restart-skipped reader=%d (awaiting reseed)".formatted(readerIndex));
@@ -1141,10 +1111,10 @@ class AeronWriterReaderSoakIT {
         gates[readerIndex].writeLock().lock();
         try {
             final ReaderNode node = holders[readerIndex];
-            ReplicationCursor resume = node.persistedCursor() != null
-                    ? node.persistedCursor() : baseline;
+            ReplicationPosition resume = node.persistedPosition() != null
+                    ? node.persistedPosition() : baseline;
             audit(startNanos, "reader-restart-start reader=%d abrupt=%s resume=%d"
-                    .formatted(readerIndex, abrupt, resume.logicalSequence()));
+                    .formatted(readerIndex, abrupt, resume.sequence()));
             if (!abrupt) {
                 audit(startNanos, "reader-stopping reader=%d".formatted(readerIndex));
                 node.stopAtLatest();
@@ -1152,7 +1122,7 @@ class AeronWriterReaderSoakIT {
                 /* Use the boundary reached by the graceful stop. Replaying
                  * from the older cursor against the same live Store would
                  * apply already materialised transactions a second time. */
-                final ReplicationCursor stopped = node.persistedCursor();
+                final ReplicationPosition stopped = node.persistedPosition();
                 if (stopped != null) resume = stopped;
             }
             audit(startNanos, "reader-transport-restarting reader=%d".formatted(readerIndex));
@@ -1162,14 +1132,14 @@ class AeronWriterReaderSoakIT {
              * stop must always resume; an abrupt interruption may demand a
              * reseed and park the reader by design. */
             try {
-                node.restartTransport(resume);
+                node.restartTransport();
                 audit(startNanos, "reader-awaiting-live reader=%d".formatted(readerIndex));
                 node.awaitLive();
                 node.assertHealthy();
                 this.completedRestarts.incrementAndGet();
                 readerRestarts[readerIndex].incrementAndGet();
                 event(startNanos, "reader-restart", "reader=%d abrupt=%s resume=%d".formatted(
-                        readerIndex, abrupt, resume.logicalSequence()));
+                        readerIndex, abrupt, resume.sequence()));
             } catch (final ReseedRequiredException reseed) {
                 /* Close the retained Store only when this reader is parked;
                  * no subsequent same-JVM reopen is attempted. */
@@ -1178,7 +1148,7 @@ class AeronWriterReaderSoakIT {
                 this.reseedsDemanded.incrementAndGet();
                 readerReseeds[readerIndex].incrementAndGet();
                 audit(startNanos, "reader-reseed-demanded reader=%d resume=%d (%s)"
-                        .formatted(readerIndex, resume.logicalSequence(), reseed.getMessage()));
+                        .formatted(readerIndex, resume.sequence(), reseed.getMessage()));
                 event(startNanos, "reader-reseed", "reader=%d abrupt=%s".formatted(readerIndex, abrupt));
                 recordFate(readerIndex, "restart:reseed-demanded abrupt=%s".formatted(abrupt));
                 if (!abrupt) throw reseed;
@@ -1193,7 +1163,7 @@ class AeronWriterReaderSoakIT {
     /// Overlapping restart storm: two readers restart at once so a reseed and
     /// a live tail overlap. Locks are always taken in index order.
     private OpOutcome restartDual(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates,
-                                      final ReplicationCursor baseline, final AtomicLong[] readerRestarts,
+                                      final ReplicationPosition baseline, final AtomicLong[] readerRestarts,
                                       final AtomicLong[] readerReseeds, final Random random) {
         int first = random.nextInt(holders.length);
         int second = random.nextInt(holders.length);
@@ -1221,15 +1191,15 @@ class AeronWriterReaderSoakIT {
             for (final int readerIndex : new int[]{low, high}) {
                 if (holders[readerIndex] == null) continue;
                 final ReaderNode node = holders[readerIndex];
-                ReplicationCursor resume = node.persistedCursor() != null
-                        ? node.persistedCursor() : baseline;
+                ReplicationPosition resume = node.persistedPosition() != null
+                        ? node.persistedPosition() : baseline;
                 if (!abrupt) {
                     node.stopAtLatest();
-                    final ReplicationCursor stopped = node.persistedCursor();
+                    final ReplicationPosition stopped = node.persistedPosition();
                     if (stopped != null) resume = stopped;
                 }
                 try {
-                    node.restartTransport(resume);
+                    node.restartTransport();
                     node.awaitLive();
                     node.assertHealthy();
                     this.completedRestarts.incrementAndGet();
@@ -1254,39 +1224,6 @@ class AeronWriterReaderSoakIT {
         return OpOutcome.effectiveHeavy();
     }
 
-    /// Slow-reader chaos: the victim's applied path stalls, so its durable
-    /// cursor lags while the writer advances. This is the original flake
-    /// shape — a slow-but-advancing reader under load — induced on purpose so
-    /// the lag SLO and the sliding stop deadline are exercised, not waited for.
-    private OpOutcome slowReaderBurst(final long startNanos, final ReaderNode[] holders, final Random random)
-            throws InterruptedException {
-        final int victim = random.nextInt(holders.length);
-        if (holders[victim] == null) {
-            audit(startNanos, "slow-burst-skipped (victim parked)");
-            return OpOutcome.skipped("parked-victim");
-        }
-        final long delayMs = Math.max(1L, this.pollDelayMs * 8L);
-        holders[victim].setApplyDelayMs(delayMs);
-        this.slowBursts.incrementAndGet();
-        audit(startNanos, "slow-burst-start reader=%d delayMs=%d".formatted(victim, delayMs));
-        event(startNanos, "slow-burst", "reader=%d delayMs=%d".formatted(victim, delayMs));
-        Thread.sleep(2_000L + random.nextInt(2_000));
-        if (holders[victim] != null) holders[victim].setApplyDelayMs(0L);
-        /* An occasional sub-timeout stall widens the backlog and exercises lag
-         * accounting under a stalled applied path. It only probes the sliding
-         * stop deadline itself when soak.pollStallMs is set near the
-         * configured reader stop timeout; at the small default it is purely a
-         * backlog widener. */
-        if (random.nextInt(100) < 25) {
-            holders[victim].setApplyDelayMs(this.pollStallMs);
-            Thread.sleep(Math.min(this.pollStallMs, 1_500L));
-            if (holders[victim] != null) holders[victim].setApplyDelayMs(0L);
-        }
-        audit(startNanos, "slow-burst-end reader=%d".formatted(victim));
-        markActivity();
-        return OpOutcome.effective();
-    }
-
     /// Bounded CPU starvation plus heap-garbage churn to force GC pauses
     /// mid-replay. Seeded, short, and counted — never an unbounded spin. The
     /// block count (not wall-clock time) bounds the work so the op consumes a
@@ -1308,7 +1245,7 @@ class AeronWriterReaderSoakIT {
     }
 
     /// Forced-GC chaos: churns a seeded 32-256 MB through the young generation
-    /// in 1 MB blocks, then issues System.gc(), so checkpoints, watermark
+    /// in 1 MB blocks, then issues System.gc(), so Store marks, watermark
     /// publication, and reader apply paths all ride through a genuine GC pause.
     /// No data assertions here — the pause evidence lands in the JFR recording,
     /// while correctness is covered by the surrounding convergence, lag-SLO,
@@ -1336,7 +1273,7 @@ class AeronWriterReaderSoakIT {
     /// then restarts both with the same cluster, node, and generation
     /// identities. The restarted writer must mint a strictly greater fencing
     /// token, and one post-restart transaction must reach every live reader
-    /// from its unchanged durable cursor.
+    /// from its unchanged Store mark.
     ///
     /// Writer-mutating chaos can never overlap this op: every op is dispatched
     /// by the single chaos thread, so a "writer-busy" skip is unreachable by
@@ -1345,19 +1282,22 @@ class AeronWriterReaderSoakIT {
     private OpOutcome writerRestart(final long startNanos, final Path root, final WriterHandle writer,
                                     final ReaderNode[] holders, final ReadWriteLock[] gates,
                                     final Random random) {
-        final Path checkpointFile = root.resolve("writer/checkpoint/writer.checkpoint");
-        final ReplicationCursor target;
+        if (this.archiveTailCorrupted) {
+            audit(startNanos, "writer-restart-skipped (Archive tail was deliberately corrupted)");
+            return OpOutcome.skipped("archive-tail-corrupted");
+        }
+        final ReplicationPosition target;
         synchronized (this.writeLock) {
-            final long tokenBefore = currentFencingToken(checkpointFile);
+            final long tokenBefore = currentFencingToken(writer.latest());
             final boolean abrupt = drawAbrupt(random);
             audit(startNanos, "writer-restart-start abrupt=%s token=%d".formatted(abrupt, tokenBefore));
             try {
                 writer.restart(abrupt);
                 /* Land one transaction on the restarted writer: durable proof
                  * of the new fencing token and the boundary readers must
-                 * reach from their unchanged cursors. */
+                 * reach from their unchanged Store marks. */
                 addBatch(writer.root(), random, 1);
-                writer.root().articles.store();
+                writer.store(writer.root().articles);
                 this.publishedTransactions.incrementAndGet();
                 recalibrateTransactions(writer);
             } catch (final Exception failure) {
@@ -1365,8 +1305,8 @@ class AeronWriterReaderSoakIT {
                 throw new AssertionError("writer restart failed", failure);
             }
             target = writer.latest();
-            this.lastWriterSeq = target.logicalSequence();
-            final long tokenAfter = currentFencingToken(checkpointFile);
+            this.lastWriterSeq = target.sequence();
+            final long tokenAfter = currentFencingToken(target);
             assertTrue(tokenAfter > 0, "restarted writer published no fencing token");
             assertTrue(tokenBefore < 0 || tokenAfter > tokenBefore,
                     "writer fencing token did not advance across restart: %d -> %d"
@@ -1375,27 +1315,27 @@ class AeronWriterReaderSoakIT {
             this.completedRestarts.incrementAndGet();
             if (abrupt) this.abruptRestarts.incrementAndGet();
             event(startNanos, "writer-restart", "abrupt=%s token=%d->%d target=%d".formatted(
-                    abrupt, tokenBefore, tokenAfter, target.logicalSequence()));
+                    abrupt, tokenBefore, tokenAfter, target.sequence()));
             audit(startNanos, "writer-restarted abrupt=%s token=%d->%d target=%d"
-                    .formatted(abrupt, tokenBefore, tokenAfter, target.logicalSequence()));
+                    .formatted(abrupt, tokenBefore, tokenAfter, target.sequence()));
         }
         /* The convergence wait runs OUTSIDE the write lock: holding it freezes
          * the writers, which starves the catching-up readers it is waiting on.
          * Reattach after a writer restart rides a full replay+live handover;
          * under load that takes tens of seconds, so the wait gets its own
          * generous bound rather than sharing the corruption-ops budget. */
-        if (!awaitCursorsBeyond(holders, gates, -1, target.logicalSequence(),
+        if (!awaitCursorsBeyond(holders, gates, -1, target.sequence(),
                 TimeUnit.SECONDS.toNanos(60L))) {
             throw new AssertionError("post-restart transaction %d did not reach all live readers"
-                    .formatted(target.logicalSequence()));
+                    .formatted(target.sequence()));
         }
-        audit(startNanos, "writer-restart-readers-caught-up target=%d".formatted(target.logicalSequence()));
+        audit(startNanos, "writer-restart-readers-caught-up target=%d".formatted(target.sequence()));
         return OpOutcome.effective();
     }
 
     /// Reseed-and-rejoin chaos: executes the documented manual reseed — stop
-    /// the victim, wipe its Store and any torn cursor, copy the writer's Store
-    /// at a frozen boundary, persist that cursor, and restart. The rejoined
+    /// the victim, wipe its Store, copy the writer's Store at a frozen boundary,
+    /// and restart. The rejoined
     /// reader is re-inserted into the holder slot, so it re-enters the chaos
     /// victim pool and the final convergence census like any live reader. With
     /// a parked victim this is the recovery path collectors demanded earlier;
@@ -1433,25 +1373,21 @@ class AeronWriterReaderSoakIT {
              * file writes trail the committed transaction, so a running
              * writer's files lag its cursor and those deltas would never be
              * replayed by the rejoined reader. */
-            final ReplicationCursor seedTarget;
+            final ReplicationPosition seedTarget;
             synchronized (this.writeLock) {
-                writer.root().articles.store();
+                writer.store(writer.root().articles);
                 seedTarget = writer.snapshotCopy(storeDir);
                 recalibrateTransactions(writer);
             }
-            /* The node home is wiped wholesale, not just its cursor file: a
-             * parked victim can carry stale recovery evidence (a torn cursor
-             * or an uncertain-import reader-inflight checkpoint), and a reseed
-             * must never trust any of it. The documented procedure is a fresh
-             * node home plus a seeded Store and a valid cursor. */
+            /* A reseed starts from a fresh node home and the writer Store,
+             * whose committed mark supplies the resume boundary. */
             AeronStoreIntegrationIT.delete(readers[victim].nodeDir());
-            audit(startNanos, "reseed-copied reader=%d seedTarget=%d".formatted(victim, seedTarget.logicalSequence()));
+            audit(startNanos, "reseed-copied reader=%d seedTarget=%d".formatted(victim, seedTarget.sequence()));
             ReaderNode rejoined = null;
             try {
                 rejoined = ReaderNode.open(readers[victim].nodeDir(), storeDir, "reader",
                         readers[victim].nodeId(), topology.clusterId(), topology.generation(),
-                        seedTarget, topology.controlPort(), topology.livePort(), topology.watermarkPort());
-                rejoined.overwritePersistedCursor(seedTarget);
+                        topology.controlPort(), topology.livePort(), topology.watermarkPort());
                 rejoined.start();
                 audit(startNanos, "reseed-await-live reader=%d".formatted(victim));
                 rejoined.awaitLive();
@@ -1473,11 +1409,11 @@ class AeronWriterReaderSoakIT {
             holders[victim] = rejoined;
             this.reseedsExecuted.incrementAndGet();
             recordFate(victim, "reseed:rejoined %s seedTarget=%d".formatted(
-                    proactive ? "proactive" : "parked", seedTarget.logicalSequence()));
+                    proactive ? "proactive" : "parked", seedTarget.sequence()));
             audit(startNanos, "reseed-rejoined reader=%d proactive=%s seedTarget=%d"
-                    .formatted(victim, proactive, seedTarget.logicalSequence()));
+                    .formatted(victim, proactive, seedTarget.sequence()));
             event(startNanos, "reseed-rejoined", "reader=%d proactive=%s seedTarget=%d"
-                    .formatted(victim, proactive, seedTarget.logicalSequence()));
+                    .formatted(victim, proactive, seedTarget.sequence()));
             markActivity();
             return OpOutcome.effectiveHeavy();
         } catch (final AssertionError failure) {
@@ -1493,19 +1429,19 @@ class AeronWriterReaderSoakIT {
 
     /// Retention chaos on the real watermark quorum: when a quorum is
     /// assembled, assert deletion never touches history a lagging live reader
-    /// still needs, then purge complete segments up to the minimum durable
-    /// reader cursor. Parked readers count toward the minimum through whatever
-    /// durable cursor they left — their last published watermark bounds safe
+    /// still needs, then purge complete segments up to the minimum applied
+    /// reader boundary. Parked readers count toward the minimum through the
+    /// Store mark they left — their last published watermark bounds safe
     /// deletion exactly.
     ///
-    /// Watermark validation accepts progress past the terminal commit
-    /// checkpoint when the Archive has durably recorded its bytes (see
+    /// Watermark validation accepts progress past the writer Store mark when
+    /// the Archive has durably recorded its bytes (see
     /// AeronArchiveRetention.requireWithinDurableBoundary), so the quorum
     /// assembles on this continuously-appending writer. The op still waits
     /// only boundedly and WITHOUT holding the writer lock (holding it starves
     /// the appends that feed the readers), and skips with
     /// "quorum-not-supported" when the quorum stays unassembled — that now
-    /// means genuinely missing readers, not checkpoint-cadence rejections.
+    /// means genuinely missing readers, not writer-mark lag rejections.
     /// Retention IS coverage-gated like every enabled op: a purge that never
     /// lands and never had a park-caused skip fails the run. When the quorum
     /// assembles, deleteThrough caps a request ahead of a lagging reader at the
@@ -1518,7 +1454,7 @@ class AeronWriterReaderSoakIT {
     /// surfaces as a side effect of the generic restart ops.
     private OpOutcome retentionPurge(final long startNanos, final WriterHandle writer,
                                      final ReaderNode[] holders, final ReadWriteLock[] gates,
-                                     final ReaderSpec[] readers, final Random random) {
+                                     final Random random) {
         audit(startNanos, "retention-start");
         final ReplicationLogRetention retention;
         synchronized (this.writeLock) {
@@ -1539,33 +1475,21 @@ class AeronWriterReaderSoakIT {
          * briefly, never for the quorum wait above. */
         synchronized (this.writeLock) {
             long minSequence = Long.MAX_VALUE;
-            ReplicationCursor minCursor = null;
+            ReplicationPosition minCursor = null;
             long maxLiveSequence = Long.MIN_VALUE;
-            ReplicationCursor maxLiveCursor = null;
+            ReplicationPosition maxLiveCursor = null;
             for (int r = 0; r < holders.length; r++) {
                 gates[r].readLock().lock();
                 try {
                     final ReaderNode node = holders[r];
-                    ReplicationCursor cursor = node != null ? node.persistedCursor() : null;
-                    if (cursor == null && node == null) {
-                        final Path cursorFile = readers[r].nodeDir().resolve("cursor");
-                        if (Files.isRegularFile(cursorFile)) {
-                            try (DurableCursorFile manager =
-                                         DurableCursorFile.of(cursorFile)) {
-                                cursor = manager.get();
-                            } catch (final RuntimeException torn) {
-                                audit(startNanos, "retention-cursor-unreadable reader=%d (%s)"
-                                        .formatted(r, torn.getMessage()));
-                            }
-                        }
-                    }
-                    if (cursor == null) continue;
-                    if (cursor.logicalSequence() < minSequence) {
-                        minSequence = cursor.logicalSequence();
+                    if (node == null) continue;
+                    final ReplicationPosition cursor = node.persistedPosition();
+                    if (cursor.sequence() < minSequence) {
+                        minSequence = cursor.sequence();
                         minCursor = cursor;
                     }
-                    if (node != null && cursor.logicalSequence() > maxLiveSequence) {
-                        maxLiveSequence = cursor.logicalSequence();
+                    if (cursor.sequence() > maxLiveSequence) {
+                        maxLiveSequence = cursor.sequence();
                         maxLiveCursor = cursor;
                     }
                 } finally {
@@ -1579,8 +1503,7 @@ class AeronWriterReaderSoakIT {
             if (maxLiveCursor != null && maxLiveSequence > minSequence) {
                 deferredChecked = true;
                 final ReplicationLogRetention.MaintenanceResult deferred = retention.deleteThrough(maxLiveCursor);
-                final long slowestPosition = AeronReplicationCursor.decode(
-                        minCursor.providerPositionBytes()).recordingPosition();
+                final long slowestPosition = minCursor.prepareStartPosition();
                 assertTrue(deferred.position() <= slowestPosition,
                         "retention crossed the slowest reader's durable position: %s slowest=%d"
                                 .formatted(deferred, slowestPosition));
@@ -1591,11 +1514,10 @@ class AeronWriterReaderSoakIT {
                 audit(startNanos, "retention-skipped (no reader progress past baseline)");
                 return OpOutcome.skipped("no-reader-progress");
             }
-            /* Purge boundary: the minimum durable cursor across every reader,
-             * live or parked. A parked reader's file may be torn (cursor
-             * corruption); when unreadable it is not waited on, and the purge
-             * retries absorb a watermark the writer has not yet observed. */
-            audit(startNanos, "retention-purge-attempt minCursor=%d".formatted(minSequence));
+            /* The live Store marks supply this test's explicit safety bound;
+             * the retention controller additionally clamps to its full
+             * watermark quorum, including readers that are currently parked. */
+            audit(startNanos, "retention-purge-attempt minMark=%d".formatted(minSequence));
             ReplicationLogRetention.MaintenanceResult purged = retention.deleteThrough(minCursor);
             for (int attempt = 1; attempt < 20 && purged.status() !=
                     ReplicationLogRetention.MaintenanceResult.Status.DELETED; attempt++) {
@@ -1606,9 +1528,9 @@ class AeronWriterReaderSoakIT {
             if (purged.status() == ReplicationLogRetention.MaintenanceResult.Status.DELETED) {
                 this.retentionPurges.incrementAndGet();
             }
-            audit(startNanos, "retention-purge status=%s minCursor=%d position=%d".formatted(
+            audit(startNanos, "retention-purge status=%s minMark=%d position=%d".formatted(
                     purged.status(), minSequence, purged.position()));
-            event(startNanos, "retention-purge", "status=%s minCursor=%d deferChecked=%s".formatted(
+            event(startNanos, "retention-purge", "status=%s minMark=%d deferChecked=%s".formatted(
                     purged.status(), minSequence, deferredChecked));
             markActivity();
             return OpOutcome.effective();
@@ -1622,109 +1544,18 @@ class AeronWriterReaderSoakIT {
     /// exactly once or near-the-boundary checks fire early on entities still
     /// in flight. Only ever moves forward, only called under the write lock.
     private void recalibrateTransactions(final WriterHandle writer) {
-        final long applied = writer.latest().logicalSequence() - this.baselineSeq;
+        final long applied = writer.latest().sequence() - this.baselineSeq;
         if (applied > this.publishedTransactions.get()) {
             this.publishedTransactions.set(applied);
         }
     }
 
-    /// The writer's latest durable fencing token from its checkpoint file, or
-    /// -1 when no checkpoint exists yet; -1 weakens the restart monotonicity
-    /// assertion to positivity rather than failing a run without history.
-    private static long currentFencingToken(final Path checkpointFile) {
-        if (!Files.exists(checkpointFile)) return -1L;
+    /// Reads the fencing token carried by the writer's latest resolved boundary.
+    private static long currentFencingToken(final ReplicationPosition cursor) {
         try {
-            return AeronReplicationCheckpointStore.read(checkpointFile).fencingToken();
-        } catch (final Exception unreadable) {
+            return cursor.fencingToken();
+        } catch (final RuntimeException unavailable) {
             return -1L;
-        }
-    }
-
-    /// Corrupts the victim's durable cursor file while the reader is stopped,
-    /// then requires the fresh read to fail closed. A reader that converges
-    /// past this injection has silently replayed from a torn boundary.
-    private OpOutcome corruptCursorFile(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates,
-                                            final AtomicLong[] readerCorruptionParks,
-                                            final Random random) {
-        final int victim = random.nextInt(holders.length);
-        if (holders[victim] == null) {
-            audit(startNanos, "cursor-corrupt-skipped (victim parked)");
-            return OpOutcome.skipped("parked-victim");
-        }
-        if (liveHolders(holders) < 2) {
-            audit(startNanos, "cursor-corrupt-skipped reader=%d (quorum guard: last live reader)".formatted(victim));
-            return OpOutcome.skipped("quorum-guard");
-        }
-        gates[victim].writeLock().lock();
-        try {
-            final ReaderNode node = holders[victim];
-            if (isBuried(node)) {
-                audit(startNanos, "cursor-corrupt-skipped reader=%d (buried reader)".formatted(victim));
-                return OpOutcome.skipped("buried-reader");
-            }
-            node.stopAtLatest();
-            final ReplicationCursor stopped = node.persistedCursor();
-            final Path cursorFile = node.cursorPath();
-            if (stopped == null || !Files.exists(cursorFile) || Files.isDirectory(cursorFile)) {
-                audit(startNanos, "cursor-corrupt-skipped reader=%d (no durable cursor file)".formatted(victim));
-                node.restartTransport(stopped != null ? stopped : node.liveCursor());
-                node.awaitLive();
-                return OpOutcome.skipped("no-cursor-file");
-            }
-            final byte[] bytes = Files.readAllBytes(cursorFile);
-            if (bytes.length == 0) {
-                audit(startNanos, "cursor-corrupt-skipped reader=%d (empty cursor file)".formatted(victim));
-                node.restartTransport(stopped);
-                node.awaitLive();
-                return OpOutcome.skipped("empty-cursor-file");
-            }
-            bytes[bytes.length / 2] ^= 0x01;
-            Files.write(cursorFile, bytes);
-            this.corruptionFired.incrementAndGet();
-            audit(startNanos, "cursor-corrupt-fired reader=%d stopped=%d".formatted(victim, stopped.logicalSequence()));
-            event(startNanos, "cursor-corrupt", "reader=%d stopped=%d".formatted(victim, stopped.logicalSequence()));
-            /* The fresh read runs in its own narrow catch: cursor decoding
-             * fails with NodeException on every torn input, and only
-             * that type counts as the expected fail-closed path. Any Error
-             * (OOM, internal assertion) or unexpected RuntimeException must
-             * propagate and fail the soak, never park as success. */
-            final ReplicationCursor reread;
-            try {
-                reread = node.readPersistedCursorFresh();
-            } catch (final NodeException expected) {
-                audit(startNanos, "cursor-corrupt-failclosed reader=%d (%s)".formatted(victim, expected.getMessage()));
-                event(startNanos, "cursor-failclosed", "reader=%d".formatted(victim));
-                node.close();
-                holders[victim] = null;
-                readerCorruptionParks[victim].incrementAndGet();
-                recordFate(victim, "cursor-corrupt:fail-closed");
-                return OpOutcome.effective();
-            }
-            if (reread.logicalSequence() == stopped.logicalSequence()) {
-                /* The flip did not land observably; repair and resume so
-                 * the soak continues, but record that the injection was
-                 * a no-op rather than a passed assertion. */
-                node.overwritePersistedCursor(stopped);
-                node.restartTransport(stopped);
-                node.awaitLive();
-                audit(startNanos, "cursor-corrupt-noop reader=%d".formatted(victim));
-                return OpOutcome.skipped("injection-noop");
-            }
-            /* A torn cursor parsed to a different boundary: restarting
-             * from it must still fail closed, never converge. This call sits
-             * outside every Error-catching scope on purpose: its
-             * AssertionError on silent convergence must fail the soak, never
-             * be laundered into a parked-reader success. The gate records the
-             * exact fate itself (reseed/fail-closed/parked+outcome); no outer
-             * fate is recorded here so it can never overwrite the precise one. */
-            assertCorruptionFailsClosed(startNanos, holders, victim, reread,
-                    stopped.logicalSequence(), readerCorruptionParks);
-            return OpOutcome.effective();
-        } catch (final Exception failure) {
-            this.failures.add(failure);
-            throw new AssertionError("cursor corruption chaos failed unexpectedly", failure);
-        } finally {
-            gates[victim].writeLock().unlock();
         }
     }
 
@@ -1736,12 +1567,12 @@ class AeronWriterReaderSoakIT {
         return live;
     }
 
-    /// Resumes the victim from a deliberately rolled-back older cursor. The
-    /// duplicate-detection path must demand a reseed; silent convergence
-    /// means already-materialised transactions applied twice unnoticed.
-    private OpOutcome rollbackCursor(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates,
-                                         final ReplicationCursor baseline, final AtomicLong[] readerReseeds,
-                                         final AtomicLong[] readerRestarts, final Random random) {
+    /// Rewinds only the victim's Store mark, not its Store graph. Even if replay
+    /// reaches the old boundary, that deliberately inconsistent fixture is
+    /// quarantined and reseeded before it can participate in later chaos ops.
+    private OpOutcome rollbackStoreMark(final long startNanos, final ReaderNode[] holders, final ReadWriteLock[] gates,
+                                         final ReplicationPosition baseline, final AtomicLong[] readerReseeds,
+                                         final Random random) {
         final int victim = random.nextInt(holders.length);
         if (holders[victim] == null) {
             audit(startNanos, "rollback-skipped (victim parked)");
@@ -1759,21 +1590,21 @@ class AeronWriterReaderSoakIT {
                 return OpOutcome.skipped("buried-reader");
             }
             node.stopAtLatest();
-            final ReplicationCursor stopped = node.persistedCursor();
-            if (stopped == null || stopped.logicalSequence() <= baseline.logicalSequence()) {
+            final ReplicationPosition stopped = node.persistedPosition();
+            if (stopped == null || stopped.sequence() <= baseline.sequence()) {
                 audit(startNanos, "rollback-skipped reader=%d (no newer boundary)".formatted(victim));
-                node.restartTransport(stopped != null ? stopped : baseline);
+                node.restartTransport();
                 node.awaitLive();
                 return OpOutcome.skipped("no-newer-boundary");
             }
-            node.overwritePersistedCursor(baseline);
+            node.overwriteStoreMark(baseline);
             this.corruptionFired.incrementAndGet();
             audit(startNanos, "rollback-fired reader=%d stopped=%d baseline=%d"
-                    .formatted(victim, stopped.logicalSequence(), baseline.logicalSequence()));
+                    .formatted(victim, stopped.sequence(), baseline.sequence()));
             event(startNanos, "rollback", "reader=%d stopped=%d baseline=%d".formatted(
-                    victim, stopped.logicalSequence(), baseline.logicalSequence()));
-            return assertRollbackOutcome(startNanos, holders, victim, baseline, stopped.logicalSequence(),
-                    readerReseeds, readerRestarts);
+                    victim, stopped.sequence(), baseline.sequence()));
+            return assertRollbackOutcome(startNanos, holders, victim, baseline, stopped.sequence(),
+                    readerReseeds);
         } catch (final Exception failure) {
             this.failures.add(failure);
             throw new AssertionError("rollback chaos failed unexpectedly", failure);
@@ -1782,17 +1613,15 @@ class AeronWriterReaderSoakIT {
         }
     }
 
-    /// Rollback gate: the victim replays valid history from an older boundary.
-    /// Reseed or bounded failure parks it (duplicate application refused).
-    /// Convergence is allowed only when the replayed Store still matches the
-    /// transaction model exactly — genuinely idempotent replay — otherwise a
-    /// converged double-apply is silent corruption and fails the soak.
+    /// Exercises replay from the rewound mark. Failures demand a reseed; even
+    /// a successful replay is quarantined because the test changed metadata
+    /// without restoring the matching Store snapshot.
     private OpOutcome assertRollbackOutcome(final long startNanos, final ReaderNode[] holders, final int victim,
-                                                final ReplicationCursor baseline, final long targetSequence,
-                                                final AtomicLong[] readerReseeds, final AtomicLong[] readerRestarts) {
+                                                final ReplicationPosition baseline, final long targetSequence,
+                                                final AtomicLong[] readerReseeds) {
         final ReaderNode node = holders[victim];
         try {
-            node.restartTransport(baseline);
+            node.restartTransport();
         } catch (final ReseedRequiredException reseed) {
             audit(startNanos, "rollback-reseed reader=%d (%s)".formatted(victim, reseed.getMessage()));
             event(startNanos, "rollback-reseed", "reader=%d".formatted(victim));
@@ -1820,7 +1649,7 @@ class AeronWriterReaderSoakIT {
         }
         final AwaitResult outcome = awaitTargetBounded(node, targetSequence);
         if (outcome != AwaitResult.LIVE) {
-            if (outcome == AwaitResult.TIMEOUT) this.corruptionTimeouts.incrementAndGet();
+            if (outcome == AwaitResult.TIMEOUT) this.injectionTimeouts.incrementAndGet();
             audit(startNanos, "rollback-parked reader=%d outcome=%s".formatted(victim, outcome));
             event(startNanos, "rollback-parked", "reader=%d outcome=%s".formatted(victim, outcome));
             node.close();
@@ -1834,10 +1663,18 @@ class AeronWriterReaderSoakIT {
         if (!problems.isEmpty()) {
             throw new AssertionError("rollback reader %d converged with a corrupted Store: %s".formatted(victim, problems));
         }
-        audit(startNanos, "rollback-tolerated reader=%d (idempotent replay)".formatted(victim));
-        event(startNanos, "rollback-tolerated", "reader=%d".formatted(victim));
-        this.completedRestarts.incrementAndGet();
-        readerRestarts[victim].incrementAndGet();
+        /* The test rewound metadata without restoring the matching Store
+         * snapshot. A successful graph subset check cannot prove every
+         * persistent object still matches that mark, so never reuse this
+         * reader for another writer commit. The following reseed op replaces
+         * it from a consistent writer snapshot. */
+        node.close();
+        holders[victim] = null;
+        readerReseeds[victim].incrementAndGet();
+        this.reseedsDemanded.incrementAndGet();
+        recordFate(victim, "rollback:mark-rewind-quarantined");
+        audit(startNanos, "rollback-quarantined reader=%d (mark-only rewind)".formatted(victim));
+        event(startNanos, "rollback-quarantined", "reader=%d".formatted(victim));
         return OpOutcome.effectiveHeavy();
     }
 
@@ -1864,63 +1701,16 @@ class AeronWriterReaderSoakIT {
         });
     }
 
-    /// Shared fail-closed gate for torn-cursor injections: the victim restarts
-    /// from the injected boundary and must reseed or report a bounded
-    /// failure. Reaching the pre-injection boundary is silent acceptance of
-    /// torn history and fails the soak.
-    private void assertCorruptionFailsClosed(final long startNanos, final ReaderNode[] holders,
-                                             final int victim,
-                                             final ReplicationCursor injected, final long targetSequence,
-                                             final AtomicLong[] parks) {
-        final ReaderNode node = holders[victim];
-        try {
-            node.restartTransport(injected);
-        } catch (final ReseedRequiredException reseed) {
-            audit(startNanos, "%s-reseed reader=%d (%s)".formatted("cursor-torn", victim, reseed.getMessage()));
-            event(startNanos, "cursor-torn-reseed", "reader=%d".formatted(victim));
-            node.close();
-            holders[victim] = null;
-            parks[victim].incrementAndGet();
-            recordFate(victim, "cursor-torn:reseed");
-            return;
-        } catch (final RuntimeException restartFailure) {
-/* Fail-closed allowlist, nothing broader: reseed demands are caught
-             * above, and NodeException is the provider's fail-closed
-             * vocabulary for unreadable durable state. AssertionError is never
-             * a fail-closed signal and Error (OOM and friends) must fail
-             * loudly, so neither is caught here — both propagate by design. */
-            if (!(restartFailure instanceof NodeException)) throw restartFailure;
-            audit(startNanos, "%s-failclosed reader=%d (%s)".formatted("cursor-torn", victim, restartFailure));
-            event(startNanos, "cursor-torn-failclosed", "reader=%d".formatted(victim));
-            node.close();
-            holders[victim] = null;
-            parks[victim].incrementAndGet();
-            recordFate(victim, "cursor-torn:fail-closed");
-            return;
-        }
-        final AwaitResult outcome = awaitTargetBounded(node, targetSequence);
-        if (outcome == AwaitResult.LIVE) {
-            throw new AssertionError(
-                    "cursor-torn reader %d silently converged after corruption injection".formatted(victim));
-        }
-        if (outcome == AwaitResult.TIMEOUT) this.corruptionTimeouts.incrementAndGet();
-        audit(startNanos, "%s-parked reader=%d outcome=%s".formatted("cursor-torn", victim, outcome));
-        event(startNanos, "cursor-torn-parked", "reader=%d outcome=%s".formatted(victim, outcome));
-        node.close();
-        holders[victim] = null;
-        parks[victim].incrementAndGet();
-        recordFate(victim, "cursor-torn:parked outcome=%s".formatted(outcome));
-    }
-
     /// Corrupts the not-yet-replayed tail of the shared Archive while the
     /// victim is stopped: fresh transactions are published, the live readers
     /// consume the good bytes first, then the tail frame is truncated so only
     /// the victim's replay observes torn data. It must demand a reseed, never
     /// apply torn data and converge.
-    private OpOutcome corruptLiveSegment(final long startNanos, final Path root, final IndexRoot writerRoot,
-                                    final ClusterReplicationTransport writerTransport,
+    private OpOutcome corruptLiveSegment(final long startNanos, final Path root, final WriterHandle writer,
                                     final ReaderNode[] holders, final ReadWriteLock[] gates,
                                     final AtomicLong[] readerCorruptionParks, final Random random) {
+        final IndexRoot writerRoot = writer.root();
+        final ClusterReplicationTransport writerTransport = writer.transport();
         int victim = random.nextInt(holders.length);
         if (holders[victim] == null) {
             audit(startNanos, "segment-corrupt-skipped (victim parked)");
@@ -1938,9 +1728,9 @@ class AeronWriterReaderSoakIT {
                 return OpOutcome.skipped("buried-reader");
             }
             node.stopAtLatest();
-            final ReplicationCursor stopped = node.persistedCursor();
+            final ReplicationPosition stopped = node.persistedPosition();
             if (stopped == null) {
-                node.restartTransport(node.liveCursor());
+                node.restartTransport();
                 node.awaitLive();
                 return OpOutcome.skipped("no-cursor");
             }
@@ -1955,59 +1745,59 @@ class AeronWriterReaderSoakIT {
             synchronized (this.writeLock) {
             /* Publish fresh transactions the victim has not seen. Live
              * readers consume the good bytes before the corruption lands. */
-            final ReplicationCursor target;
+            final ReplicationPosition target;
             {
                 addBatch(writerRoot, random, 2);
-                writerRoot.articles.store();
+                writer.store(writerRoot.articles);
                 this.publishedTransactions.incrementAndGet();
                 target = AeronStoreIntegrationIT.latest(writerTransport);
             }
-            if (!awaitCursorsBeyond(holders, gates, victim, target.logicalSequence())) {
+            if (!awaitCursorsBeyond(holders, gates, victim, target.sequence())) {
                 audit(startNanos, "segment-corrupt-skipped reader=%d (live readers behind target=%d)"
-                        .formatted(victim, target.logicalSequence()));
-                node.restartTransport(stopped);
+                        .formatted(victim, target.sequence()));
+                node.restartTransport();
                 node.awaitLive();
                 return OpOutcome.skipped("live-readers-behind");
             }
             final Path archiveDir = root.resolve("writer/archive");
-            final Path checkpointFile = root.resolve("writer/checkpoint/writer.checkpoint");
-            final AeronReplicationCheckpoint checkpoint;
+            final ReplicationPosition writerCursor;
             try {
-                checkpoint = AeronReplicationCheckpointStore.read(checkpointFile);
-            } catch (final Exception unreadable) {
-                audit(startNanos, "segment-corrupt-skipped reader=%d (no checkpoint: %s)".formatted(victim, unreadable));
-                node.restartTransport(stopped);
+                writerCursor = AeronStoreIntegrationIT.latest(writerTransport);
+            } catch (final RuntimeException unavailable) {
+                audit(startNanos, "segment-corrupt-skipped reader=%d (no writer boundary: %s)".formatted(victim, unavailable));
+                node.restartTransport();
                 node.awaitLive();
-                return OpOutcome.skipped("no-checkpoint");
+                return OpOutcome.skipped("no-writer-boundary");
             }
             final List<Path> segments;
             try {
-                segments = ArchiveArtifactMutator.segments(archiveDir, checkpoint.recordingId());
+                segments = ArchiveArtifactMutator.segments(archiveDir, writerCursor.recordingId());
             } catch (final Exception missing) {
                 audit(startNanos, "segment-corrupt-skipped reader=%d (no segments: %s)".formatted(victim, missing));
-                node.restartTransport(stopped);
+                node.restartTransport();
                 node.awaitLive();
                 return OpOutcome.skipped("no-segments");
             }
             final Path tail = segments.getLast();
             final long base = segmentBase(tail);
             try {
-                ArchiveArtifactMutator.truncateFinalFrame(tail, base, checkpoint.recordingPosition());
+                ArchiveArtifactMutator.truncateFinalFrame(tail, base, writerCursor.prepareStartPosition());
             } catch (final Exception unusable) {
                 audit(startNanos, "segment-corrupt-skipped reader=%d (cannot truncate: %s)".formatted(victim, unusable));
-                node.restartTransport(stopped);
+                node.restartTransport();
                 node.awaitLive();
                 return OpOutcome.skipped("cannot-truncate");
             }
+            this.archiveTailCorrupted = true;
             this.corruptionFired.incrementAndGet();
             audit(startNanos, "segment-corrupt-fired reader=%d stopped=%d target=%d segment=%s"
-                    .formatted(victim, stopped.logicalSequence(), target.logicalSequence(), tail.getFileName()));
+                    .formatted(victim, stopped.sequence(), target.sequence(), tail.getFileName()));
             event(startNanos, "segment-corrupt", "reader=%d stopped=%d target=%d".formatted(
-                    victim, stopped.logicalSequence(), target.logicalSequence()));
+                    victim, stopped.sequence(), target.sequence()));
             /* The truncated tail fails closed on replay: reseed or bounded
              * failure parks the victim. Convergence past torn data fails. */
             try {
-                node.restartTransport(stopped);
+                node.restartTransport();
             } catch (final ReseedRequiredException reseed) {
                 audit(startNanos, "segment-reseed reader=%d (%s)".formatted(victim, reseed.getMessage()));
                 event(startNanos, "segment-reseed", "reader=%d".formatted(victim));
@@ -2031,12 +1821,12 @@ class AeronWriterReaderSoakIT {
                 recordFate(victim, "segment-corrupt:fail-closed");
                 return OpOutcome.effectiveHeavy();
             }
-            final AwaitResult outcome = awaitTargetBounded(node, target.logicalSequence());
+            final AwaitResult outcome = awaitTargetBounded(node, target.sequence());
             if (outcome == AwaitResult.LIVE) {
                 throw new AssertionError(
                         "segment-corrupt reader %d silently converged past torn data".formatted(victim));
             }
-            if (outcome == AwaitResult.TIMEOUT) this.corruptionTimeouts.incrementAndGet();
+            if (outcome == AwaitResult.TIMEOUT) this.injectionTimeouts.incrementAndGet();
             audit(startNanos, "segment-parked reader=%d outcome=%s".formatted(victim, outcome));
             event(startNanos, "segment-parked", "reader=%d outcome=%s".formatted(victim, outcome));
             node.close();
@@ -2077,8 +1867,13 @@ class AeronWriterReaderSoakIT {
                 try {
                     /* Read under the gate: a parked reader stays parked. */
                     if (holders[r] == null) continue;
-                    final ReplicationCursor cursor = holders[r].persistedCursor();
-                    if (cursor == null || cursor.logicalSequence() < sequence) ready = false;
+                    final RuntimeException failure = holders[r].clientFailure();
+                    if (failure != null) {
+                        throw new AssertionError("reader %d failed while awaiting sequence %d"
+                                .formatted(r, sequence), failure);
+                    }
+                    final ReplicationPosition cursor = holders[r].persistedPosition();
+                    if (cursor == null || cursor.sequence() < sequence) ready = false;
                 } finally {
                     gates[r].readLock().unlock();
                 }
@@ -2096,7 +1891,8 @@ class AeronWriterReaderSoakIT {
         while (System.nanoTime() < deadline) {
             this.markActivity();
             if (node.clientFailure() != null) return AwaitResult.FAILED;
-            if (node.liveCursor().logicalSequence() >= sequence) return AwaitResult.LIVE;
+            /* Reaching a historical boundary during Archive replay is not live convergence. */
+            if (node.isLive() && node.liveCursor().sequence() >= sequence) return AwaitResult.LIVE;
             LockSupport.parkNanos(1_000_000L);
         }
         return node.clientFailure() != null ? AwaitResult.FAILED : AwaitResult.TIMEOUT;
@@ -2128,22 +1924,22 @@ class AeronWriterReaderSoakIT {
                         state.append(" reader%d=reseed-pending".formatted(r));
                         continue;
                     }
-                    final ReplicationCursor cursor = holders[r].persistedCursor();
+                    final ReplicationPosition cursor = holders[r].persistedPosition();
                     final boolean live = holders[r].isLive();
                     final boolean running = holders[r].isRunning();
                     /* Observability cross-check: the live (applied) boundary the
-                     * client reports must never sit behind the durable cursor
+                     * client reports must never sit behind the Store mark
                      * ground truth, and the two lags must agree within one
                      * transaction — a wider gap means the operator-facing
                      * sequence is lying about durable state. */
                     if (cursor != null && live && running) {
-                        final long applied = holders[r].liveCursor().logicalSequence();
-                        assertTrue(applied >= cursor.logicalSequence(),
-                                "reader %d reported applied sequence %s behind its durable cursor %s"
-                                        .formatted(r, applied, cursor.logicalSequence()));
-                        assertTrue(applied - cursor.logicalSequence() <= 1L,
-                                "reader %d live sequence drifted %s transactions past its durable cursor"
-                                        .formatted(r, applied - cursor.logicalSequence()));
+                        final long applied = holders[r].liveCursor().sequence();
+                        assertTrue(applied >= cursor.sequence(),
+                                "reader %d reported applied sequence %s behind its Store mark %s"
+                                        .formatted(r, applied, cursor.sequence()));
+                        assertTrue(applied - cursor.sequence() <= 1L,
+                                "reader %d live sequence drifted %s transactions past its Store mark"
+                                        .formatted(r, applied - cursor.sequence()));
                         this.metricsCrossChecks++;
                     }
                     if (live != wasLive[r]) {
@@ -2151,7 +1947,7 @@ class AeronWriterReaderSoakIT {
                         this.liveFlips.incrementAndGet();
                         audit(startNanos, "live-flip reader=%d live=%s running=%s".formatted(r, live, running));
                     }
-                    final long lag = cursor == null ? -1L : writerSequence - cursor.logicalSequence();
+                    final long lag = cursor == null ? -1L : writerSequence - cursor.sequence();
                     /* Bounded-lag SLO: a live, running reader must stay within
                      * lagSlots transactions. Three consecutive violations fail
                      * fast instead of hanging the final converge. Reseed
@@ -2729,8 +2525,8 @@ class AeronWriterReaderSoakIT {
     /// every transaction; [ #restart(boolean)] swaps both under the same lock, so no
     /// iteration can publish through a disposed transport. The restart keeps
     /// the cluster, Store-generation, and node identities, so the transport
-    /// extends the same Archive recording and the fencing lease mints the
-    /// next token for the same node — the production writer-restart cycle.
+    /// extends the same Archive recording and the Store mark mints the next
+    /// token for the same node — the production writer-restart cycle.
     private static final class WriterHandle implements AutoCloseable {
         private final Path storePath;
         private final Path nodeRoot;
@@ -2772,7 +2568,7 @@ class AeronWriterReaderSoakIT {
             return this.root;
         }
 
-        synchronized ReplicationCursor latest() {
+        synchronized ReplicationPosition latest() {
             return AeronStoreIntegrationIT.latest(this.transport);
         }
 
@@ -2783,6 +2579,10 @@ class AeronWriterReaderSoakIT {
         synchronized void install(final EmbeddedStorageManager manager, final IndexRoot root) {
             this.manager = manager;
             this.root = root;
+        }
+
+        synchronized void store(final Object... instances) {
+            AeronStoreIntegrationIT.store(this.transport, this.manager, instances);
         }
 
             /// Stops the Store and releases the transport, then brings both back
@@ -2804,11 +2604,9 @@ class AeronWriterReaderSoakIT {
                     AeronStoreIntegrationIT.properties(this.nodeRoot, this.clusterId, this.nodeId,
                             this.generation, "writer", -1L,
                             this.controlPort, this.livePort, this.watermarkPort, this.retentionReaders));
-            this.transport.positionProvider("store").init();
-            final ReplicationPublisher distributor = this.transport.distributor("store");
+            final ReplicationPublisher distributor = this.transport.distributor();
             final EmbeddedStorageManager restarted = AeronStoreIntegrationIT.startExistingIndex(
-                    this.storePath, distributor,
-                    this.transport.persistenceTargetFactory("store", distributor));
+                    this.storePath, distributor, this.transport);
             this.manager = restarted;
             this.root = restarted.root();
         }
@@ -2843,19 +2641,18 @@ class AeronWriterReaderSoakIT {
         /// @param snapshotDir destination directory for the copy
         /// @return replication cursor matching the snapshot content
         /// @throws Exception when the stop, copy, or restart cannot complete
-        synchronized ReplicationCursor snapshotCopy(final Path snapshotDir) throws Exception {
+        synchronized ReplicationPosition snapshotCopy(final Path snapshotDir) throws Exception {
             if (this.manager != null) {
                 this.manager.shutdown();
                 this.manager = null;
                 this.root = null;
             }
-            final ReplicationCursor snapshot = this.transport.positionProvider("store").latest();
+            final ReplicationPosition snapshot = this.transport.positionProvider().latest();
             AeronStoreIntegrationIT.delete(snapshotDir);
             AeronStoreIntegrationIT.copyDirectory(this.storePath, snapshotDir);
-            final ReplicationPublisher distributor = this.transport.distributor("store");
+            final ReplicationPublisher distributor = this.transport.distributor();
             final EmbeddedStorageManager restarted = AeronStoreIntegrationIT.startExistingIndex(
-                    this.storePath, distributor,
-                    this.transport.persistenceTargetFactory("store", distributor));
+                    this.storePath, distributor, this.transport);
             this.manager = restarted;
             this.root = restarted.root();
             return snapshot;

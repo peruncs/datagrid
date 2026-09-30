@@ -15,23 +15,21 @@ import java.util.function.LongSupplier;
 final class AeronArchiveCapacity {
     private static final long CACHE_NANOS = 250_000_000L;
 
-    private final boolean externalArchive;
     private final long minimumFreeBytes;
     private final int segmentFileLength;
     private final LongSupplier usableSpace;
     private volatile CapacitySnapshot capacity = new CapacitySnapshot(0L, Long.MIN_VALUE);
 
     AeronArchiveCapacity(final AeronSettings settings) {
-        this(settings.archivePolicy().externalArchive(), settings.archivePolicy().minimumFreeBytes(),
+        this(settings.archivePolicy().minimumFreeBytes(),
                 settings.archivePolicy().segmentFileLength(),
                 () -> queryUsableSpace(settings.topology().directories().archiveDirectory()));
     }
 
-    AeronArchiveCapacity(final boolean externalArchive, final long minimumFreeBytes,
-                         final int segmentFileLength, final LongSupplier usableSpace) {
+    AeronArchiveCapacity(final long minimumFreeBytes, final int segmentFileLength,
+                         final LongSupplier usableSpace) {
         if (minimumFreeBytes < 0 || segmentFileLength <= 0)
             throw new IllegalArgumentException("invalid Aeron Archive capacity policy");
-        this.externalArchive = externalArchive;
         this.minimumFreeBytes = minimumFreeBytes;
         this.segmentFileLength = segmentFileLength;
         this.usableSpace = usableSpace;
@@ -55,8 +53,8 @@ final class AeronArchiveCapacity {
 
         /// Reports whether the Archive can accept one transaction of the given size.
     ///
-    /// External Archives and a zero minimum reserve admit unconditionally.
-    /// Otherwise the required free space is the configured reserve plus the
+    /// A zero minimum reserve admits unconditionally. Otherwise the required
+    /// free space is the configured reserve plus the
     /// larger of the transaction size and one Archive segment; an unknown
     /// usable space fails closed and refuses the write.
     ///
@@ -64,7 +62,7 @@ final class AeronArchiveCapacity {
     /// @return `true` when the configured policy admits the write
     boolean available(final long transactionBytes) {
         if (transactionBytes < 0) return false;
-        if (this.minimumFreeBytes == 0 || this.externalArchive) return true;
+        if (this.minimumFreeBytes == 0) return true;
         final long reserve = Math.max(transactionBytes, this.segmentFileLength);
         final long required;
         try {
@@ -79,12 +77,9 @@ final class AeronArchiveCapacity {
 
         /// Returns the last known usable Archive bytes.
     ///
-    /// An external Archive has no local volume to measure; `-1` is the
-    /// explicit "unknown" value rather than a fake zero.
-    ///
-    /// @return usable bytes, or `-1` when the Archive is external
+    /// @return usable bytes, or `-1` when the filesystem probe fails
     long usableSpaceBytes() {
-        return this.externalArchive ? -1L : this.usableSpace();
+        return this.usableSpace();
     }
 
         /// Drops the cached filesystem probe without touching policy.

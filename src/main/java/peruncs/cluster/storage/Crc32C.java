@@ -6,7 +6,7 @@ import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.zip.CRC32C;
 
-/// Shared CRC32C implementation for replication wire and checkpoint data.
+/// Shared CRC32C implementation for replication wire and metadata.
 public final class Crc32C {
     private Crc32C() {
     }

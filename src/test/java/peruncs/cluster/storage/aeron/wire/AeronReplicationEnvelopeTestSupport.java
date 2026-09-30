@@ -55,7 +55,7 @@ public final class AeronReplicationEnvelopeTestSupport {
     /// @param clusterId     cluster identity carried by the frame
     /// @param epoch         writer epoch carried by the frame
     /// @param fencingToken  writer fencing token carried by the frame
-    /// @param wireNonce     explicit wire nonce carried by the frame
+    /// @param wireNonce     redundant public cluster-id-derived framing value carried by the frame
     /// @param sequence      transaction sequence carried by the frame
     /// @param kind          frame kind (data, dictionary, commit, or abort)
     /// @param payloadLength logical transaction bytes, not the bytes in this frame
@@ -92,7 +92,7 @@ public final class AeronReplicationEnvelopeTestSupport {
         return encoded;
     }
 
-    /// Builds an owned envelope with the fixture-only derived nonce.
+    /// Builds an owned envelope with the public cluster-id-derived framing value.
     ///
     /// @param clusterId     cluster identity carried by the envelope
     /// @param epoch         writer epoch carried by the envelope

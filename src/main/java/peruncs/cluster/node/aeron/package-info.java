@@ -10,7 +10,7 @@
 /// instance belongs to one node and must not be shared between nodes.
 ///
 /// Choose the transport with
-/// `ECLIPSE_DATAGRID_REPLICATION_TRANSPORT=aeron`. Keep the Aeron
+/// `PERUNCS_REPLICATION_TRANSPORT=aeron`. Keep the Aeron
 /// settings consistent for every member that shares a stream.
 ///
 /// @since 1.0

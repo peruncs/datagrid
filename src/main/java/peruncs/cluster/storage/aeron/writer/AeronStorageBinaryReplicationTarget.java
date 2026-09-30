@@ -5,10 +5,10 @@ import org.eclipse.serializer.persistence.exceptions.PersistenceExceptionTransfe
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import peruncs.cluster.errors.WriteRejectedException;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
+import peruncs.cluster.storage.index.ClusterStoreIndexes;
+import peruncs.cluster.storage.io.FaultInjection;
 
-import java.util.function.BooleanSupplier;
-import java.util.function.LongConsumer;
-import java.util.function.Predicate;
+import java.util.function.*;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -44,16 +44,18 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     }
 
     private final PersistenceTarget<Binary> delegate;
-    private final AeronReplicationWriteCoordinator coordinator;
+    private final Supplier<AeronReplicationWriteCoordinator> coordinatorFactory;
+    private volatile AeronReplicationWriteCoordinator coordinator;
     private final ReplicationPublisher dictionarySource;
     private final LongConsumer committedSequence;
     private final BooleanSupplier distributionEnabled;
     private final Runnable writerIndexValidation;
     private final Predicate<Binary> commitTouchesIndexes;
+    private final ToIntFunction<Binary> commitScan;
 
     /// Creates a target with its provider-owned callbacks.
     ///
-    /// The provider keeps Store acceptance and checkpoint transitions under
+    /// The provider keeps Store acceptance and terminal-boundary updates under
     /// the same writer owner.
     ///
     /// @param delegate    local Store target
@@ -62,14 +64,42 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     public AeronStorageBinaryReplicationTarget(final PersistenceTarget<Binary> delegate,
                                                final AeronReplicationWriteCoordinator coordinator,
                                                final TargetCallbacks callbacks) {
+        this(delegate, coordinator, callbacks, null);
+    }
+
+    /// Creates a target with a combined index and replication-mark scan.
+    public AeronStorageBinaryReplicationTarget(final PersistenceTarget<Binary> delegate,
+                                               final AeronReplicationWriteCoordinator coordinator,
+                                               final TargetCallbacks callbacks,
+                                               final ToIntFunction<Binary> commitScan) {
+        this(delegate, () -> coordinator, callbacks, commitScan);
+    }
+
+    /// Creates a target that opens its writer only on the first Store operation.
+    public AeronStorageBinaryReplicationTarget(final PersistenceTarget<Binary> delegate,
+                                               final Supplier<AeronReplicationWriteCoordinator> coordinatorFactory,
+                                               final TargetCallbacks callbacks,
+                                               final ToIntFunction<Binary> commitScan) {
         this.delegate = notNull(delegate);
-        this.coordinator = notNull(coordinator);
+        this.coordinatorFactory = notNull(coordinatorFactory);
         final TargetCallbacks checked = notNull(callbacks);
         this.dictionarySource = checked.dictionarySource();
         this.committedSequence = checked.committedSequence();
         this.distributionEnabled = checked.distributionEnabled();
         this.writerIndexValidation = checked.writerIndexValidation();
         this.commitTouchesIndexes = checked.commitTouchesIndexes();
+        this.commitScan = commitScan;
+    }
+
+    private AeronReplicationWriteCoordinator coordinator() {
+        AeronReplicationWriteCoordinator current = this.coordinator;
+        if (current == null) {
+            synchronized (this) {
+                current = this.coordinator;
+                if (current == null) this.coordinator = current = notNull(this.coordinatorFactory.get());
+            }
+        }
+        return current;
     }
 
         /// Creates a target with replication enabled for every write and no
@@ -119,16 +149,16 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     @Override
     public void write(final Binary data) throws PersistenceExceptionTransfer {
         final AeronReplicationPublisher.PreparedTransaction prepared =
-                this.coordinator.prepareWriteAtomically(() -> this.prepareWrite(data));
+                this.coordinator().prepareWriteAtomically(() -> this.prepareWrite(data));
         if (prepared == null) {
             return;
         }
-        /* The slow commit wait runs outside write admission. A failure recorded
-         * as uncertain leaves the publisher terminal, so the token close is a
-         * no-op; a refusal before any publication still aborts through close. */
+        /* The COMMIT offer runs outside write admission and does not wait for
+         * Archive recording. On bounded back-pressure, the Store mark and open
+        * token remain recovery evidence; close must not emit a contradictory ABORT. */
         try (prepared) {
-            this.coordinator.commitOrMarkUncertain(prepared);
-            this.committedSequence.accept(prepared.sequence());
+            prepared.onCommit(this.committedSequence, prepared.sequence());
+            this.coordinator().commitAcceptedStore(prepared);
         }
     }
 
@@ -139,6 +169,10 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     /// owns its lifetime.
     private AeronReplicationPublisher.PreparedTransaction prepareWrite(final Binary data) {
         if (!this.distributionEnabled.getAsBoolean()) {
+            if (this.commitScan != null &&
+                (this.commitScan.applyAsInt(data) & ClusterStoreIndexes.COMMIT_BOOTSTRAP) == 0) {
+                throw new WriteRejectedException("replication is disabled for guarded Store commits");
+            }
             data.iterateChannelChunks(Binary::mark);
             try {
                 this.delegate.write(data);
@@ -147,15 +181,16 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
             }
             return null;
         }
-        /* Writer-side index enforcement before any publication step: a direct
-         * external registration fails here, ahead of the local Store write
-         * and the Aeron prepare/commit below. */
-        if (this.commitTouchesIndexes == null || this.commitTouchesIndexes.test(data)) {
-            try {
-                this.validateWriterState();
-            } catch (final IllegalArgumentException | IllegalStateException rejected) {
-                throw new WriteRejectedException("writer index validation rejected the Store write", rejected);
+        if (this.commitScan != null) {
+            final int scan = this.commitScan.applyAsInt(data);
+            if ((scan & ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK) == 0) {
+                throw new WriteRejectedException("replicated Store commit does not contain its replication mark");
             }
+            if ((scan & ClusterStoreIndexes.COMMIT_TOUCHES_INDEXES) != 0) this.rejectInvalidIndexWrite();
+        } else if (this.commitTouchesIndexes == null || this.commitTouchesIndexes.test(data)) {
+            /* Writer-side index enforcement before publication: an external
+             * registration is rejected before local Store acceptance. */
+            this.rejectInvalidIndexWrite();
         }
         if (this.dictionarySource != null) {
             final String dictionary = this.dictionarySource.consumeTypeDictionary();
@@ -164,23 +199,23 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
                  * The coordinator deliberately retains the bytes until commit(), so a
                  * local rejection or uncertain publication can retry the same dictionary
                  * even though the source has already cleared its staging slot. */
-                this.coordinator.distributeTypeDictionary(dictionary);
+                this.coordinator().distributeTypeDictionary(dictionary);
             }
         }
         data.iterateChannelChunks(Binary::mark);
         final AeronReplicationPublisher.PreparedTransaction prepared;
         try {
-            prepared = this.coordinator.prepare(data);
+            prepared = this.coordinator().prepare(data);
         } catch (final RuntimeException failure) {
             data.iterateChannelChunks(Binary::reset);
             throw failure;
         }
         boolean handedOff = false;
         try {
-            CrashHook.invoke("AFTER_PREPARE_BEFORE_LOCAL_WRITE", prepared.sequence());
+            FaultInjection.invoke("AFTER_PREPARE_BEFORE_LOCAL_WRITE", prepared.sequence());
             try {
                 this.delegate.write(data);
-                CrashHook.invoke("AFTER_LOCAL_WRITE_BEFORE_COMMIT", prepared.sequence());
+                FaultInjection.invoke("AFTER_LOCAL_WRITE_BEFORE_COMMIT", prepared.sequence());
             } catch (final Error failure) {
                 /* The local Store may already have accepted the bytes.  Abandon the
                  * token without emitting a contradictory ABORT; the PREPARING fence
@@ -197,7 +232,7 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
                  * and back admission rejection stay safe: only a caught
                  * failure after entering local persistence reaches this). */
                 try {
-                    this.coordinator.markCommittingUncertain(prepared);
+                    this.coordinator().markStoreOutcomeUncertain(prepared);
                 } catch (final RuntimeException maskFailure) {
                     failure.addSuppressed(maskFailure);
                 }
@@ -215,13 +250,21 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
                  * cannot commit, and the publisher must fail closed rather than
                  * continue. */
                 if (!handedOff) prepared.abandonWithoutAbort();
-            }
+        }
+    }
+    }
+
+    private void rejectInvalidIndexWrite() {
+        try {
+            this.validateWriterState();
+        } catch (final IllegalArgumentException | IllegalStateException rejected) {
+            throw new WriteRejectedException("writer index validation rejected the Store write", rejected);
         }
     }
 
         /// Returns whether the local persistence target can accept a write.
     @Override
     public boolean isWritable() {
-        return this.delegate.isWritable() && this.coordinator.isWritable();
+        return this.delegate.isWritable() && this.coordinator().isWritable();
     }
 }

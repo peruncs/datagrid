@@ -1,13 +1,11 @@
 package peruncs.cluster.storage.aeron.reader;
 
-import io.aeron.archive.client.ArchiveException;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import peruncs.cluster.errors.CorruptReplicationDataException;
-import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
@@ -35,35 +33,44 @@ final class TransactionAssembler {
      * immutable zero-capacity view instead of allocating native memory per empty
      * transaction. */
     private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(0);
+
+    /// One reader's immutable transaction-validation and delivery inputs.
+    record Configuration(AeronReplicationConfiguration replication,
+                         UUID clusterId,
+                         long epoch,
+                         long initialSequence,
+                         long initialPosition,
+                         StorageBinaryDataReceiver receiver,
+                         Consumer<CursorSnapshot> transactionResolved,
+                         long wireNonce) {
+        Configuration {
+            Objects.requireNonNull(replication, "replication");
+            Objects.requireNonNull(clusterId, "clusterId");
+            Objects.requireNonNull(receiver, "receiver");
+            Objects.requireNonNull(transactionResolved, "transactionResolved");
+            if (wireNonce == 0L) throw new IllegalArgumentException("wireNonce must not be zero");
+            if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1L) {
+                throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
+            }
+        }
+    }
+
     private final AeronReplicationConfiguration configuration;
     private final UUID clusterId;
     private final long wireNonce;
     private final long epoch;
+    private final long initialSequence;
     private final StorageBinaryDataReceiver receiver;
     private final Consumer<CursorSnapshot> transactionResolved;
-    private final ReaderDeliveryListener deliveryListener;
-    /* Live-source terminal markers are admitted only once the Archive has
-     * durably recorded them: a writer offers COMMIT and then awaits its
-     * recorded position, so live delivery runs ahead of durable recording by
-     * at most that gap. Without the gate a stalled or failing recording would
-     * let a reader apply and persist a transaction the writer later reports
-     * as not durable. The gate is consulted only for live-sourced terminal
-     * markers; replayed frames are recorded by definition. */
-    private final CommitDurabilityGate durabilityGate;
-    /* Bounded stall bookkeeping for a withheld terminal marker: the live
-     * image redelivers it on every poll, so recording progress or the
-     * configured stop timeout decides the outcome. Polling-thread confined;
-     * guarded reads happen through onFragment's delivery monitor. */
-    private volatile long withholdSinceNanos;
     /* The durable boundary is one immutable snapshot so a concurrent
      * status or cursor reader can never observe a new sequence paired with
      * the previous position (or vice versa). */
     private volatile CursorSnapshot resolvedBoundary;
-    /* Materialization can succeed before the durable cursor callback completes.
+    /* Materialization can succeed before the reader-watermark callback completes.
      * Keep that observation separate for health/lag reporting. */
     private volatile long lastAppliedSequence;
-    /* Greatest writer fencing token accepted so far. A lower token proves the
-     * frame comes from a deposed writer that lost the lease race; it fails
+    /* Greatest Store-mark fencing token accepted so far. A lower token proves
+     * the frame is older than this reader's persisted writer boundary; it fails
      * closed instead of interleaving stale history. Seeded from the durable
      * cursor at startup so a restart never re-accepts superseded history.
      * Raised only by fully accepted terminal frames (data-chunk tokens are
@@ -98,19 +105,11 @@ final class TransactionAssembler {
     private int lastResolutionDictionaryChunkCount;
     private Transaction transaction;
     /* Delivery batching state. Every resolved transaction is staged onto
-     * `pendingDeliveries` and published to cursor/listener callbacks only when
-     * the barrier flushes: at the configured window size, at an idle poll, or
-     * at a lifecycle stop. The barrier turns the per-transaction fsync storm —
-     * one Store import, one uncertainty-marker write, and one forced cursor
-     * write per transaction — into one of each per barrier, which is what
-     * makes backlog replay fast. Durability is unchanged: the marker is
-     * written before the first staged import of the batch can reach the Store
-     * and is deleted only after the barrier's cursor is forced, so a crash
-     * either keeps both (replay resumes at the cursor) or keeps only the
-     * marker (fail-closed reseed). All fields are guarded by the delivery
-     * monitor; only the polling thread ever stages or flushes. */
+     * `pendingDeliveries` and published to position callbacks only when the
+     * barrier flushes. Each imported transaction carries its Store mark, so
+     * no sidecar uncertainty journal is needed. All fields are guarded by the
+     * delivery monitor; only the polling thread ever stages or flushes. */
     private final ArrayDeque<PendingDelivery> pendingDeliveries = new ArrayDeque<>();
-    private boolean deliveryMarkerOpen;
     /* Set when any staged entry carries a Store binary; the flush waits for
      * materialization only then — abort-only barriers enqueue nothing. */
     private boolean barrierHasData;
@@ -124,49 +123,19 @@ final class TransactionAssembler {
 
     /// Creates the one production assembler state machine.
     ///
-    /// Callers pass the wire nonce explicitly so a fixture or a deployment can
-    /// never silently derive a nonce while its peer uses another. Test code
-    /// builds assemblers through `TransactionAssemblerTestSupport` factories
-    /// that fill in fixture defaults.
-    ///
-    /// @param configuration      framing and timeout limits shared with the writer
-    /// @param clusterId          expected cluster identity
-    /// @param epoch              expected writer epoch
-    /// @param initialSequence    last sequence already resolved, or `-1` before the first
-    /// @param initialPosition    last resolved Archive position, or `-1` before the first
-    /// @param receiver           destination for complete Store binaries
-    /// @param transactionResolved callback after a delivery barrier resolves durably; never `null`
-    /// @param deliveryListener   callback around Store materialization, or `null`
-    /// @param wireNonce          expected accidental-cross-wiring nonce; must not be zero
-    /// @param durabilityGate     durability proof required before a live-sourced terminal
-    ///                           marker is delivered to the Store; never `null`
-    TransactionAssembler(
-            final AeronReplicationConfiguration configuration,
-            final UUID clusterId,
-            final long epoch,
-            final long initialSequence,
-            final long initialPosition,
-            final StorageBinaryDataReceiver receiver,
-            final Consumer<CursorSnapshot> transactionResolved,
-            final ReaderDeliveryListener deliveryListener,
-            final long wireNonce,
-            final CommitDurabilityGate durabilityGate
-    ) {
-        this.configuration = Objects.requireNonNull(configuration, "configuration");
-        this.clusterId = Objects.requireNonNull(clusterId, "clusterId");
-        if (wireNonce == 0L) throw new IllegalArgumentException("wireNonce must not be zero");
-        this.wireNonce = wireNonce;
-        this.epoch = epoch;
-        this.receiver = Objects.requireNonNull(receiver, "receiver");
-        this.transactionResolved = Objects.requireNonNull(transactionResolved, "transactionResolved");
-        this.deliveryListener = deliveryListener;
-        this.durabilityGate = Objects.requireNonNull(durabilityGate, "durabilityGate");
-        if (initialSequence < -1 || initialSequence == Long.MAX_VALUE || initialPosition < -1) {
-            throw new IllegalArgumentException("initial cursor must be sequence >= -1 and position >= -1");
-        }
-        this.resolvedBoundary = new CursorSnapshot(initialSequence, initialPosition);
-        this.lastAppliedSequence = initialSequence;
-        this.nextExpectedSequence = initialSequence + 1;
+    /// @param configuration immutable framing and delivery inputs
+    TransactionAssembler(final Configuration configuration) {
+        final Configuration required = Objects.requireNonNull(configuration, "configuration");
+        this.configuration = required.replication();
+        this.clusterId = required.clusterId();
+        this.wireNonce = required.wireNonce();
+        this.epoch = required.epoch();
+        this.initialSequence = required.initialSequence();
+        this.receiver = required.receiver();
+        this.transactionResolved = required.transactionResolved();
+        this.resolvedBoundary = new CursorSnapshot(required.initialSequence(), required.initialPosition());
+        this.lastAppliedSequence = required.initialSequence();
+        this.nextExpectedSequence = required.initialSequence() + 1;
         /* ScopedValue bindings are not inherited by the virtual-thread poller
          * (final Scoped Values dropped inheritance), so the hook must be
          * captured here, on the thread that constructs the assembler, while
@@ -174,58 +143,8 @@ final class TransactionAssembler {
         this.chunkObserver = CHUNK_HOOK.isBound() ? CHUNK_HOOK.get() : null;
     }
 
-    /// Consumes one fragment from the subscription callback.
-    ///
-    /// The delivery monitor bounds detachment and execution to one delivery at
-    /// a time, but it is never acquired by the failure path: a Store import can
-    /// hold it for seconds. A latched failure is observed here, on the polling
-    /// thread, and releases any incomplete transaction before returning.
-    ///
-    /// @param buffer fragment source
-    /// @param offset fragment offset
-    /// @param length fragment length
-    /// @param header Aeron header, or `null` in direct tests
+    /// Consumes one fragment from the replay or live subscription.
     void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header) {
-        this.onFragment(buffer, offset, length, header, false);
-    }
-
-    /// Consumes one fragment, gating live-sourced terminal markers on
-    /// durable Archive coverage.
-    ///
-    /// A terminal marker observed on the live publication may currently be
-    /// ahead of the Archive recording: the writer offers COMMIT and only
-    /// then awaits its recorded position. Delivering it unseen would apply
-    /// and persist a transaction that a recording stall or failure could
-    /// still exclude from durable history. Withholding instead — the caller
-    /// returns `ABORT` so the fragment is redelivered on the next poll —
-    /// holds the transaction buffered until the recording provably covers
-    /// the marker's end position ([Header#position] is the position after
-    /// the frame), and a stall beyond the live-marker durability budget fails closed.
-    /// Data chunks are never gated: without the terminal marker they only
-    /// occupy the incomplete-transaction buffer.
-    ///
-    /// Withholding cannot deadlock against a following transaction: the
-    /// live image is an ordered stream, so an ABORTed marker stops the image
-    /// at its own position — no later sequence can be delivered past it —
-    /// and the writer's single-active-transaction invariant (one prepared
-    /// write at a time, committed before the next prepares) additionally
-    /// keeps the next terminal marker from being published while this one
-    /// is unrecorded.
-    ///
-    /// A failed Archive control query is not a durability verdict: the
-    /// marker stays withheld and the stall budget decides, so a transient
-    /// control-channel loss while live never latches a terminal failure.
-    ///
-    /// @param buffer     fragment source
-    /// @param offset     fragment offset
-    /// @param length     fragment length
-    /// @param header     Aeron header, or `null` in direct tests; live terminal
-    ///                   markers without a header fail closed
-    /// @param liveSource whether the fragment came from the live image rather
-    ///                   than the Archive replay
-    /// @return `true` when the fragment was withheld for redelivery
-    boolean onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header,
-                       final boolean liveSource) {
         try {
             /* A single reusable Delivery carries the detached transaction. The Aeron
              * subscription normally invokes this callback on one polling thread. Keep
@@ -234,49 +153,26 @@ final class TransactionAssembler {
              * still released before Store import and fsync. */
             synchronized (this.delivery) {
                 final AeronReplicationEnvelope.EnvelopeView envelope =
-                        AeronReplicationEnvelope.decodeView(buffer, offset, length, this.envelopeView);
-                if (liveSource && isTerminalMarker(envelope.kind())) {
-                    /* A live terminal marker without a header cannot prove its
-                     * durability position — fail closed rather than silently
-                     * bypass the gate. */
-                    if (header == null) {
-                        throw new CorruptReplicationDataException("live terminal marker without an Aeron header");
-                    }
-                    final boolean recorded;
-                    try {
-                        recorded = this.durabilityGate.isDurablyRecorded(header.position());
-                    } catch (final ArchiveException controlFailure) {
-                        /* A lost Archive control channel (writer restart,
-                         * network flap) is not proof for or against coverage:
-                         * keep withholding on the existing stall budget. */
-                        return this.withholdTerminalMarker(envelope.sequence());
-                    }
-                    if (!recorded) {
-                        return this.withholdTerminalMarker(envelope.sequence());
-                    }
-                    /* Recording coverage confirmed: the next stall starts a
-                     * fresh budget below. */
-                    this.withholdSinceNanos = 0L;
-                }
+                        AeronReplicationEnvelope.decodeViewAfter(
+                                buffer, offset, length, this.envelopeView, this.initialSequence);
+                /* The Store mark proves every frame through its sequence was
+                 * applied; no other bytes of those replayed frames matter. */
+                if (envelope == null) return;
                 final boolean deliver;
                 synchronized (this) {
                     if (this.failure.get() != null) {
                         this.releaseIncompleteTransaction();
-                        return false;
+                        return;
                     }
                     deliver = this.accept(envelope, header == null ? -1 : header.position());
-                    if (isTerminalMarker(envelope.kind())) this.withholdSinceNanos = 0L;
                 }
                 if (deliver) {
-                    /* Stage only: the blocking materialization wait must run
-                     * outside the fragment callback, or a full barrier would
-                     * stall the whole controlledPoll. The reader breaks the
-                     * poll when the barrier fills and flushes from its own
-                     * loop; an incomplete barrier flushes on the next idle
-                     * poll or lifecycle stop. */
-                    this.delivery.stage();
+                    /* Normal admission stays in the callback. If admission
+                     * would wait on queue pressure, retain this reusable
+                     * delivery and break the poll; the reader retries it
+                     * after controlledPoll returns. */
+                    this.delivery.stage(false);
                 }
-                return false;
             }
         } catch (final RuntimeException e) {
             this.failure(e);
@@ -289,51 +185,6 @@ final class TransactionAssembler {
         }
     }
 
-    private static boolean isTerminalMarker(final AeronReplicationEnvelope.Kind kind) {
-        return kind == AeronReplicationEnvelope.Kind.COMMIT || kind == AeronReplicationEnvelope.Kind.ABORT;
-    }
-
-    /// Withholds an unrecorded live terminal marker for redelivery, failing
-    /// closed once the recording stays behind past its configured budget.
-    ///
-    /// @param sequence withheld transaction sequence, for diagnostics
-    /// @return always `true`; the marker must be redelivered once durable
-    private boolean withholdTerminalMarker(final long sequence) {
-        final long now = System.nanoTime();
-        if (this.withholdSinceNanos == 0L) {
-            this.withholdSinceNanos = now;
-            return true;
-        }
-        if (now - this.withholdSinceNanos >= this.configuration.liveWithholdTimeoutNanos()) {
-            final ReplicationUnavailableException failure = new ReplicationUnavailableException(
-                    ("Archive recording did not durably cover the live terminal marker at sequence %d " +
-                     "within %dns; failing closed instead of applying an unrecorded transaction")
-                            .formatted(sequence, this.configuration.liveWithholdTimeoutNanos()));
-            this.failure(failure);
-            throw failure;
-        }
-        return true;
-    }
-
-        /// Reports whether a live-sourced terminal marker is durably recorded in
-    /// the writer's Archive. `ALWAYS` is the replay-safe default for callers
-    /// whose source can only be a recording.
-    ///
-    /// Implementations answer for the position after the marker's frame. The
-    /// check may block on the Archive control channel; it runs on the reader
-    /// polling thread outside the assembler monitor.
-    @FunctionalInterface
-    interface CommitDurabilityGate {
-        /// No gating: every marker is treated as recorded (replay sources).
-        CommitDurabilityGate ALWAYS = _ -> true;
-
-        /// Reports whether the recording has durably reached `requiredPosition`.
-        ///
-        /// @param requiredPosition recording position that covers the marker
-        /// @return `true` once the marker is durably recorded
-        boolean isDurablyRecorded(long requiredPosition);
-    }
-
     private boolean accept(final AeronReplicationEnvelope.EnvelopeView envelope, final long position) {
         if (!envelope.matches(this.clusterId, this.wireNonce) || this.epoch != envelope.epoch()) {
             throw new CorruptReplicationDataException("cluster or epoch mismatch");
@@ -342,13 +193,13 @@ final class TransactionAssembler {
          * frame is fully accepted below. Raising it here would let a poison
          * frame with a higher token but an invalid sequence or checksum lift
          * the floor before validation fails; that poisoned floor would then
-         * persist through checkpointed cursors. Data chunks therefore adopt
+             * persist through the Store mark. Data chunks therefore adopt
          * their token at commit time, when the whole transaction validates. */
         final long token = envelope.fencingToken();
         final long floor = this.lastAcceptedFencingToken;
         if (token < floor) {
-            throw new ReseedRequiredException(
-                    "stale writer fencing token %s below accepted %s; the writer lost the lease race".formatted(token, floor));
+            throw new CorruptReplicationDataException(
+                    "stale writer fencing token %s below accepted %s".formatted(token, floor));
         }
         final long lastResolvedSequence = this.resolvedBoundary.sequence();
         if (envelope.sequence() < lastResolvedSequence) {
@@ -432,8 +283,7 @@ final class TransactionAssembler {
             }
             this.adoptFencingToken(token);
             this.nextExpectedSequence = envelope.sequence() + 1;
-            this.delivery.prepare(null, null, null, envelope.sequence(), position, envelope.payloadLength(),
-                    envelope.chunkCount(), 0, AeronReplicationEnvelope.Kind.ABORT);
+            this.delivery.prepareAbort(envelope, position);
             return true;
         }
         if (envelope.kind() != AeronReplicationEnvelope.Kind.TYPE_DICTIONARY &&
@@ -571,8 +421,7 @@ final class TransactionAssembler {
         }
         this.transaction = null;
         this.nextExpectedSequence = envelope.sequence() + 1;
-        this.delivery.prepare(dictionary, direct, completed, envelope.sequence(), position, envelope.payloadLength(),
-                envelope.chunkCount(), envelope.commitCrc32c(), AeronReplicationEnvelope.Kind.COMMIT);
+        this.delivery.prepareCommit(dictionary, direct, completed, envelope, position);
     }
 
         /// Raises the stale-token floor after a frame is fully accepted.
@@ -613,9 +462,9 @@ final class TransactionAssembler {
         return this.epoch;
     }
 
-        /// Seeds the stale-token floor from the durable cursor before any frame is accepted.
+    /// Seeds the stale-token floor from the Store mark before any frame is accepted.
     ///
-    /// @param fencingToken greatest token the persisted cursor accepted, or `0` for a new reader
+    /// @param fencingToken greatest token recorded by the Store mark, or `0` for a new reader
     void startingFencingToken(final long fencingToken) {
         if (fencingToken < 0) {
             throw new IllegalArgumentException("starting fencing token must not be negative");
@@ -639,7 +488,8 @@ final class TransactionAssembler {
 
     /// Returns whether the current delivery barrier has reached either limit.
     synchronized boolean deliveryBarrierFull() {
-        return this.unflushedDeliveryCount() >= this.configuration.readerBarrierMaxTransactions()
+        return this.delivery.pending ||
+                this.unflushedDeliveryCount() >= this.configuration.readerBarrierMaxTransactions()
                 || this.unflushedDeliveryBytes() >= this.configuration.maxTransactionBytes();
     }
 
@@ -655,11 +505,6 @@ final class TransactionAssembler {
     /// @return `true` while an incomplete transaction retains native buffers
     synchronized boolean hasIncompleteTransaction() {
         return this.transaction != null;
-    }
-
-    /// Reports whether the reader is withholding a live terminal marker.
-    boolean isWithholdingTerminalMarker() {
-        return this.withholdSinceNanos != 0L;
     }
 
         /// Returns the latched terminal failure, or `null` while healthy.
@@ -690,8 +535,8 @@ final class TransactionAssembler {
     /// covers Store import, so disposal cannot be blocked by a slow receiver.
     /// An in-flight [Delivery] owns its detached transaction and is unaffected.
     void dispose() {
-        this.withholdSinceNanos = 0L;
         this.releaseIncompleteTransaction();
+        if (this.delivery.pending) this.delivery.discard();
         this.discardPendingDeliveries();
     }
 
@@ -898,6 +743,7 @@ final class TransactionAssembler {
         private String dictionary;
         private ByteBuffer data;
         private Transaction completed;
+        private boolean pending;
         private long sequence;
         private long position;
         private int resolutionDataLength;
@@ -905,61 +751,65 @@ final class TransactionAssembler {
         private int resolutionCrc32c;
         private AeronReplicationEnvelope.Kind resolutionKind;
 
-        /// Stages one resolved transaction for delivery outside the assembler monitor.
-        ///
-        /// @param dictionary                 assembled type dictionary, or `null`
-        /// @param data                       assembled Store binary storage, or `null` for abort
-        /// @param completed                  transaction that owns the storage
-        /// @param sequence                   terminal replication sequence
-        /// @param position                   terminal Archive position
-        /// @param resolutionDataLength       represented Store binary length
-        /// @param resolutionDataChunkCount   represented Store chunk count
-        /// @param resolutionCrc32c           commit checksum, or `0` for abort
-        /// @param resolutionKind             terminal marker kind
-        void prepare(final String dictionary, final ByteBuffer data, final Transaction completed,
-                     final long sequence, final long position, final int resolutionDataLength,
-                     final int resolutionDataChunkCount, final int resolutionCrc32c,
-                     final AeronReplicationEnvelope.Kind resolutionKind) {
+        /// Stages a validated commit without a per-transaction parameter record.
+        void prepareCommit(final String dictionary, final ByteBuffer data, final Transaction completed,
+                           final AeronReplicationEnvelope.EnvelopeView envelope, final long position) {
             this.dictionary = dictionary;
             this.data = data;
             this.completed = completed;
-            this.sequence = sequence;
+            this.sequence = envelope.sequence();
             this.position = position;
-            this.resolutionDataLength = resolutionDataLength;
-            this.resolutionDataChunkCount = resolutionDataChunkCount;
-            this.resolutionCrc32c = resolutionCrc32c;
-            this.resolutionKind = resolutionKind;
+            this.resolutionDataLength = envelope.payloadLength();
+            this.resolutionDataChunkCount = envelope.chunkCount();
+            this.resolutionCrc32c = envelope.commitCrc32c();
+            this.resolutionKind = AeronReplicationEnvelope.Kind.COMMIT;
+            this.pending = true;
+        }
+
+        /// Stages an abort using the marker's own primitive fields.
+        void prepareAbort(final AeronReplicationEnvelope.EnvelopeView envelope, final long position) {
+            this.dictionary = null;
+            this.data = null;
+            this.completed = null;
+            this.sequence = envelope.sequence();
+            this.position = position;
+            this.resolutionDataLength = envelope.payloadLength();
+            this.resolutionDataChunkCount = envelope.chunkCount();
+            this.resolutionCrc32c = 0;
+            this.resolutionKind = AeronReplicationEnvelope.Kind.ABORT;
+            this.pending = true;
         }
 
         /// Stages the validated transaction for the current delivery barrier.
         ///
-        /// The dictionary merge and the buffer hand-off run immediately; the
-        /// durability flip — Store backpressure wait, resolved-sequence
-        /// publication, resolved callback, and marker removal — is deferred to
-        /// [TransactionAssembler#flushDeliveries()] so consecutive
-        /// transactions replay in one barrier. The uncertainty marker is
-        /// opened before the first staged import of a barrier and covers every
-        /// later staged import of the same barrier; it is closed only after
-        /// the barrier's cursor callbacks ran. A receiver failure leaves the
-        /// marker open and the barrier unflushed, which restart treats
-        /// fail-closed.
+        /// The dictionary merge and buffer hand-off run immediately. Store
+        /// backpressure, resolved-sequence publication, and the progress
+        /// callback are deferred to [TransactionAssembler#flushDeliveries()]
+        /// so consecutive transactions replay in one barrier. Each Store
+        /// import commits the replication mark with its data.
         ///
         /// The receiver hand-off runs without the assembler monitor, so a slow
         /// Store never blocks failure latching; the barrier bookkeeping runs
         /// under the delivery monitor held by the caller.
-        void stage() {
+        boolean stage(final boolean waitForCapacity) {
+            if (this.data != null && !waitForCapacity) {
+                try {
+                    if (!receiver.canAcceptOwnedData(this.resolutionDataLength)) return false;
+                } catch (final RuntimeException | Error failure) {
+                    this.discard();
+                    throw failure;
+                }
+            }
+            this.stageAccepted();
+            return true;
+        }
+
+        private void stageAccepted() {
             boolean dataTransferred = false;
             try {
                 if (this.dictionary != null) receiver.receiveTypeDictionary(this.dictionary);
                 if (this.data != null) {
-                    final int dataLength = this.completed.dataLength;
-                    final int dataChunkCount = this.completed.dataChunkCount;
                     synchronized (barrierLock) {
-                        if (deliveryListener != null && !TransactionAssembler.this.deliveryMarkerOpen) {
-                            deliveryListener.beforeStoreImport(
-                                    this.sequence, this.position, dataLength, dataChunkCount, this.resolutionCrc32c);
-                            TransactionAssembler.this.deliveryMarkerOpen = true;
-                        }
                         TransactionAssembler.this.barrierHasData = true;
                     }
                     final Binary binary = ChunksWrapper.New(this.data);
@@ -990,7 +840,17 @@ final class TransactionAssembler {
                 this.data = null;
                 this.completed = null;
                 this.resolutionKind = null;
+                this.pending = false;
             }
+        }
+
+        private void discard() {
+            if (this.completed != null) this.completed.dispose();
+            this.dictionary = null;
+            this.data = null;
+            this.completed = null;
+            this.resolutionKind = null;
+            this.pending = false;
         }
     }
 
@@ -1014,22 +874,18 @@ final class TransactionAssembler {
 
         /// Flushes every staged transaction of the current delivery barrier.
     ///
-    /// Called by the polling loop after the poll breaks on a full window,
-    /// when a poll returns no fragments, or when the reader stops, so a live
-    /// transaction is never held back by more than one idle poll cycle while
-    /// a backlog replays at full window size — and so the blocking
-    /// materialization wait never runs inside a fragment callback. A latched
-    /// failure makes the flush a no-op: the queued buffers belong to the
-    /// receiver, whose failure path releases them, and the open uncertainty
-    /// marker correctly fails the next start closed.
+    /// Called by the polling loop after a full window, an idle poll, or stop.
+    /// The blocking materialization wait never runs inside a fragment
+    /// callback. On failure the caller stops the reader; the Store mark is
+    /// the restart boundary.
     ///
     /// @throws RuntimeException when the receiver's materialization failed
     void flushDeliveries() {
-        boolean markerHeld;
+        if (this.failure.get() != null) return;
+        if (this.delivery.pending) this.delivery.stage(true);
         boolean hasData;
         synchronized (this.barrierLock) {
             if (this.pendingDeliveries.isEmpty() || this.failure.get() != null) return;
-            markerHeld = this.deliveryMarkerOpen;
             hasData = this.barrierHasData;
         }
         /* One materialization wait covers the whole barrier: the receiver's
@@ -1039,11 +895,9 @@ final class TransactionAssembler {
          * holds no monitor: failure latching and disposal stay lock-free, and a
          * snapshot of the staged entries is only taken below. */
         if (hasData) receiver.awaitApplied();
-        /* The staged barrier is inspected, not drained: a transient
-         * durability-callback failure must stay retryable, so the drained
-         * entries are dropped only after the callback reports the new
-         * boundary durable. Until then status and cursorSnapshot() keep
-         * exposing the preceding durable boundary. */
+        /* Keep the staged barrier intact until the progress callback returns;
+         * if publication fails, this reader stops and a restart reads the
+         * authoritative boundary from the Store mark. */
         final PendingDelivery resolvedTail;
         long candidateAppliedSequence = this.lastAppliedSequence;
         synchronized (this.barrierLock) {
@@ -1057,14 +911,12 @@ final class TransactionAssembler {
                 }
             }
         }
-        /* The staged barrier is retained on a callback failure so the flush
-         * stays retryable: latching the failure is the caller's decision —
-         * the reader loop does exactly that when this exception reaches it,
-         * while a standalone retry can still complete the boundary. */
+        /* Publish the in-memory progress snapshot only after Store apply and
+         * the progress callback have both completed. */
         final CursorSnapshot boundary = new CursorSnapshot(resolvedTail.sequence(), resolvedTail.position());
         this.transactionResolved.accept(boundary);
-        /* The callback made the new boundary durable: publish the snapshot
-         * and only now retire the staged barrier. */
+        /* The Store mark is the durable boundary; now publish the matching
+         * in-memory snapshot and retire this barrier. */
         this.lastAppliedSequence = candidateAppliedSequence;
         synchronized (this) {
             this.resolvedBoundary = boundary;
@@ -1078,11 +930,7 @@ final class TransactionAssembler {
         synchronized (this.barrierLock) {
             this.pendingDeliveries.clear();
             this.barrierBytes = 0L;
-            this.deliveryMarkerOpen = false;
             this.barrierHasData = false;
-        }
-        if (markerHeld && deliveryListener != null) {
-            this.deliveryListener.afterStoreImport();
         }
     }
 
@@ -1110,7 +958,6 @@ final class TransactionAssembler {
         synchronized (this.barrierLock) {
             this.pendingDeliveries.clear();
             this.barrierBytes = 0L;
-            this.deliveryMarkerOpen = false;
             this.barrierHasData = false;
         }
     }

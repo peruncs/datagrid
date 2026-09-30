@@ -2,23 +2,21 @@ package peruncs.cluster.storage.aeron.writer;
 
 import io.aeron.Aeron;
 import io.aeron.ExclusivePublication;
-import org.agrona.BufferUtil;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.WriteRejectedException;
-import peruncs.cluster.errors.WriterFencedException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
+import peruncs.cluster.storage.binary.NativeMemory;
+import peruncs.cluster.storage.io.FaultInjection;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongConsumer;
-import java.util.function.LongSupplier;
 import java.util.function.LongUnaryOperator;
-import java.util.function.Supplier;
 import java.util.zip.CRC32C;
 
 /// Publishes one ordered transaction at a time.
@@ -28,20 +26,37 @@ import java.util.zip.CRC32C;
 /// Every transaction reuses the same direct staging buffer; publication ownership
 /// prevents a second transaction from writing it while one is pending.
 final class AeronReplicationPublisher implements AutoCloseable {
+    private record Configuration(AeronOfferRetryer.Offerer offerer, int maxMessageLength,
+                                 AeronReplicationConfiguration replication, UUID clusterId,
+                                 long epoch, long initialSequence, AutoCloseable closeAction,
+                                 LongUnaryOperator commitPositionAwaiter, long wireNonce) {
+        Configuration {
+            Objects.requireNonNull(offerer, "offerer");
+            Objects.requireNonNull(replication, "replication");
+            Objects.requireNonNull(clusterId, "clusterId");
+            Objects.requireNonNull(commitPositionAwaiter, "commitPositionAwaiter");
+            if (initialSequence < 0 || initialSequence == Long.MAX_VALUE || maxMessageLength <= 0 ||
+                maxMessageLength > replication.maxMessageLength() ||
+                (long) replication.chunkSize() + AeronReplicationEnvelope.HEADER_LENGTH > maxMessageLength ||
+                wireNonce == 0L) {
+                throw new IllegalArgumentException("invalid publisher configuration");
+            }
+        }
+    }
+
     private volatile AeronOfferRetryer offerer;
     private volatile int maxMessageLength;
     private final AeronReplicationConfiguration configuration;
     private final UUID clusterId;
     private final long wireNonce;
     private final long epoch;
-    /* Fencing token from the writer lease, claimed once the transport owns the
-     * lease and before any envelope is offered. Direct construction in tests
-     * keeps the neutral default; production writers always claim the lease. */
+    /* Fencing token selected from the Store mark before recovery starts. */
     private volatile long fencingToken = 1L;
     private boolean fencingTokenClaimed;
     private volatile AutoCloseable closeAction;
     private volatile LongUnaryOperator commitPositionAwaiter;
     private final ByteBuffer framingStorage;
+    private final EnvelopeFramer.Configuration framerConfiguration;
     /* transactionMetadata is synchronized, so its CRC accumulator is confined
      * to one publisher call at a time and can be reset for each transaction. */
     private final CRC32C metadataCrc = new CRC32C();
@@ -56,11 +71,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
     private long reservedSequence = -1L;
     private PreparedTransaction pendingTransaction;
     private Object coordinatorOwner;
-    private volatile WriterLeaseGate leaseGate = WriterLeaseGate.alwaysValid();
-    /* Captured once so per-transaction framers read the live volatile fields
-     * without any per-transaction lambda allocation. */
-    private final LongSupplier fencingTokenSupplier = () -> this.fencingToken;
-    private final Supplier<WriterLeaseGate> leaseGateSupplier = () -> this.leaseGate;
     private volatile boolean failed;
     private boolean closeRequested;
     private boolean closeInProgress;
@@ -73,17 +83,18 @@ final class AeronReplicationPublisher implements AutoCloseable {
     /// @param publication          exclusive publication owned by the publisher
     /// @param configuration        framing, retry, and timeout limits
     /// @param clusterId            replication cluster identity
-    /// @param epoch                writer epoch bound to the checkpoint
+    /// @param epoch                writer epoch bound to the Store mark
     /// @param initialSequence      first sequence to publish
     /// @param commitPositionAwaiter waits for the Archive to record a position
-    /// @param wireNonce            nonce reserved for this publication
+    /// @param wireNonce            public cluster-id-derived framing value, not a credential
     /// @return publisher that closes the publication on close
     static AeronReplicationPublisher onPublication(final ExclusivePublication publication,
                                                    final AeronReplicationConfiguration configuration, final UUID clusterId,
                                                    final long epoch, final long initialSequence,
                                                    final LongUnaryOperator commitPositionAwaiter, final long wireNonce) {
-        return new AeronReplicationPublisher(offerer(publication), actualMaxMessageLength(publication, configuration),
-                configuration, clusterId, epoch, initialSequence, publication, commitPositionAwaiter, wireNonce);
+        return new AeronReplicationPublisher(new Configuration(
+                offerer(publication), actualMaxMessageLength(publication, configuration),
+                configuration, clusterId, epoch, initialSequence, publication, commitPositionAwaiter, wireNonce));
     }
 
         /// Creates a publisher for an integration test that owns a real publication.
@@ -91,7 +102,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
     /// @param publication     exclusive publication owned by the publisher
     /// @param configuration   framing, retry, and timeout limits
     /// @param clusterId       replication cluster identity
-    /// @param epoch           writer epoch bound to the checkpoint
+    /// @param epoch           writer epoch bound to the Store mark
     /// @param initialSequence first sequence to publish
     /// @return publisher using identity position acknowledgement
     static AeronReplicationPublisher onPublication(final ExclusivePublication publication,
@@ -107,7 +118,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
     /// @param maxMessageLength publication message capacity
     /// @param configuration  framing, retry, and timeout limits
     /// @param clusterId      replication cluster identity
-    /// @param epoch          writer epoch bound to the checkpoint
+    /// @param epoch          writer epoch bound to the Store mark
     /// @param initialSequence first sequence to publish
     /// @return publisher using identity position acknowledgement
     static AeronReplicationPublisher forTests(final AeronOfferRetryer.Offerer offerer, final int maxMessageLength,
@@ -124,7 +135,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
     /// @param maxMessageLength publication message capacity
     /// @param configuration  framing, retry, and timeout limits
     /// @param clusterId      replication cluster identity
-    /// @param epoch          writer epoch bound to the checkpoint
+    /// @param epoch          writer epoch bound to the Store mark
     /// @param initialSequence first sequence to publish
     /// @param commitPositionAwaiter waits for the Archive to record a position
     /// @return publisher without an owned publication
@@ -132,32 +143,26 @@ final class AeronReplicationPublisher implements AutoCloseable {
                                               final AeronReplicationConfiguration configuration, final UUID clusterId,
                                               final long epoch, final long initialSequence,
                                               final LongUnaryOperator commitPositionAwaiter) {
-        return new AeronReplicationPublisher(offerer, maxMessageLength, configuration, clusterId, epoch,
-                initialSequence, null, commitPositionAwaiter, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+        return new AeronReplicationPublisher(new Configuration(
+                offerer, maxMessageLength, configuration, clusterId, epoch,
+                initialSequence, null, commitPositionAwaiter, AeronReplicationEnvelope.defaultWireNonce(clusterId)));
     }
 
-    private AeronReplicationPublisher(final AeronOfferRetryer.Offerer offerer, final int maxMessageLength,
-                                      final AeronReplicationConfiguration configuration, final UUID clusterId, final long epoch,
-                                      final long initialSequence, final AutoCloseable closeAction,
-                                      final LongUnaryOperator commitPositionAwaiter, final long wireNonce) {
-        if (offerer == null || configuration == null || clusterId == null || commitPositionAwaiter == null ||
-            initialSequence < 0 || initialSequence == Long.MAX_VALUE || maxMessageLength <= 0 ||
-            maxMessageLength > configuration.maxMessageLength() ||
-            (long) configuration.chunkSize() + AeronReplicationEnvelope.HEADER_LENGTH > maxMessageLength ||
-            wireNonce == 0L) {
-            throw new IllegalArgumentException("invalid publisher configuration");
-        }
-        this.offerer = new AeronOfferRetryer(offerer, configuration);
-        this.maxMessageLength = maxMessageLength;
-        this.configuration = configuration;
-        this.clusterId = clusterId;
-        this.wireNonce = wireNonce;
-        this.epoch = epoch;
-        this.nextSequence = initialSequence;
-        this.closeAction = closeAction;
-        this.commitPositionAwaiter = commitPositionAwaiter;
-        this.framingStorage = ByteBuffer.allocateDirect(
-                configuration.chunkSize() + AeronReplicationEnvelope.HEADER_LENGTH);
+    private AeronReplicationPublisher(final Configuration settings) {
+        this.offerer = new AeronOfferRetryer(settings.offerer(), settings.replication());
+        this.maxMessageLength = settings.maxMessageLength();
+        this.configuration = settings.replication();
+        this.clusterId = settings.clusterId();
+        this.wireNonce = settings.wireNonce();
+        this.epoch = settings.epoch();
+        this.nextSequence = settings.initialSequence();
+        this.closeAction = settings.closeAction();
+        this.commitPositionAwaiter = settings.commitPositionAwaiter();
+        this.framingStorage = NativeMemory.allocateDirect(
+                settings.replication().chunkSize() + AeronReplicationEnvelope.HEADER_LENGTH);
+        this.framerConfiguration = new EnvelopeFramer.Configuration(
+                settings.clusterId(), settings.epoch(), settings.wireNonce(),
+                settings.replication().chunkSize(), this.framingStorage);
     }
 
     private static AeronOfferRetryer.Offerer offerer(final ExclusivePublication publication) {
@@ -218,6 +223,37 @@ final class AeronReplicationPublisher implements AutoCloseable {
         return this.commit(this.prepareTransaction(dictionary, dataBuffers, dataBuffers == null ? 0 : dataBuffers.length));
     }
 
+    /// Appends a terminal marker discovered by Store-mark recovery.
+    ///
+    /// Recovery markers keep the Store mark's token so another restart can
+    /// recognize them if recovery is interrupted before the next Store commit.
+    long appendRecoveryMarker(final long sequence, final AeronReplicationEnvelope.Kind kind,
+                              final int payloadLength, final int dataChunkCount,
+                              final int dataCrc32c, final long markToken) {
+        if (kind != AeronReplicationEnvelope.Kind.COMMIT && kind != AeronReplicationEnvelope.Kind.ABORT) {
+            throw new IllegalArgumentException("recovery may append only a terminal marker");
+        }
+        synchronized (this) {
+            this.ensureOpen();
+            if (this.pendingTransaction != null || this.preparing || this.terminalOperation ||
+                this.reservedSequence >= 0L || this.coordinatorOwner != null) {
+                throw new IllegalStateException("recovery marker requires an idle publisher");
+            }
+        }
+        if (markToken <= 0L) throw new IllegalArgumentException("recovery marker requires a positive mark token");
+        final EnvelopeFramer framer = new EnvelopeFramer(
+                sequence, this.framerConfiguration, markToken, this.maxMessageLength, this.offerer);
+        try {
+            final long offered = framer.offerMarker(kind, payloadLength, dataChunkCount, dataCrc32c);
+            return this.commitPositionAwaiter.applyAsLong(offered);
+        } catch (final RuntimeException | Error failure) {
+            this.failClosed();
+            throw failure;
+        } finally {
+            framer.close();
+        }
+    }
+
         /// Publishes dictionary and Store-data chunks and returns a token whose commit
     /// marker is pending. The caller must commit or close the token. If publishing
     /// fails after a sequence is reserved, the publisher attempts an abort and
@@ -247,7 +283,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
                         "coordinator-owned publisher requires the explicit reserved-sequence preparation path");
             }
             this.ensureNoPendingTransaction();
-            CrashHook.invoke("BEFORE_PREPARE", this.nextSequence);
+            FaultInjection.invoke("BEFORE_PREPARE", this.nextSequence);
             final int dictionaryLength = dictionary == null ? 0 : dictionary.length;
             final long totalDataLength = totalRemaining(dataBuffers, bufferCount);
             if (totalDataLength > (long) this.configuration.maxTransactionBytes() - dictionaryLength) {
@@ -302,7 +338,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 (long) metadata.dataLength() > (long) this.configuration.maxTransactionBytes() - dictionaryLength) {
                 throw new IllegalArgumentException("transaction metadata does not match Store data");
             }
-            CrashHook.invoke("BEFORE_PREPARE", reservedSequence);
+            FaultInjection.invoke("BEFORE_PREPARE", reservedSequence);
             this.preparing = true;
         }
         return this.prepareWithRecovery(dictionary, dataBuffers, bufferCount, reservedSequence,
@@ -316,10 +352,9 @@ final class AeronReplicationPublisher implements AutoCloseable {
         EnvelopeFramer framer = null;
         boolean handedOff = false;
         try {
-            framer = new EnvelopeFramer(sequence, this.clusterId, this.epoch, this.wireNonce,
-                    this.configuration.chunkSize(), this.maxMessageLength,
-                    this.configuration.offerTimeoutNanos(), this.offerer,
-                    this.fencingTokenSupplier, this.leaseGateSupplier, this.framingStorage);
+            framer = new EnvelopeFramer(
+                    sequence, this.framerConfiguration, this.fencingToken,
+                    this.maxMessageLength, this.offerer);
             final PreparedTransaction prepared = this.prepareReserved(dictionary, dataBuffers, bufferCount, sequence,
                     dataLength, dataChunks, expectedCrc32c, verifyExpectedCrc, framer);
             synchronized (this) {
@@ -346,13 +381,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
             synchronized (this) {
                 pending = this.pendingTransaction;
             }
-            if (failure instanceof WriterFencedException) {
-                /* Fencing loss must never be followed by an old-token terminal
-                 * marker: the deposed writer stops offering immediately and
-                 * recovery reads the durable PREPARING fence instead. */
-                this.failPendingTransaction(pending, sequence);
-                throw failure;
-            }
             long abortPosition = -1L;
             boolean abortRecorded = false;
             try {
@@ -373,22 +401,19 @@ final class AeronReplicationPublisher implements AutoCloseable {
             }
             if (abortRecorded) {
                 try {
-                    CrashHook.invoke("AFTER_PREPARE_FAILURE_ABORT_OFFERED", sequence);
+                    FaultInjection.invoke("AFTER_PREPARE_FAILURE_ABORT_OFFERED", sequence);
                     if (pending != null) pending.invokeAbortAction(abortPosition);
                 } catch (final RuntimeException | Error cleanupFailure) {
                     this.failPendingTransaction(pending, sequence);
                     cleanupFailure.addSuppressed(failure);
                     throw cleanupFailure;
                 }
-                this.detachPending(pending, sequence, !(failure instanceof ReplicationUnavailableException));
-                if (failure instanceof ReplicationUnavailableException) {
-                    throw WriteRejectedException.afterRecordedAbort(
-                            "Aeron prepare failed and its ABORT was recorded", failure, abortPosition);
-                }
-                throw failure;
+                this.detachPending(pending, sequence, false);
+                throw WriteRejectedException.afterRecordedAbort(
+                        "Aeron prepare failed and its ABORT was recorded", failure, abortPosition);
             }
             try {
-                CrashHook.invoke("AFTER_PREPARE_FAILURE_ABORT_OFFERED", sequence);
+                FaultInjection.invoke("AFTER_PREPARE_FAILURE_ABORT_OFFERED", sequence);
             } catch (final RuntimeException | Error hookFailure) {
                 failure.addSuppressed(hookFailure);
             }
@@ -427,20 +452,24 @@ final class AeronReplicationPublisher implements AutoCloseable {
                                                 final boolean verifyExpectedCrc, final EnvelopeFramer framer) {
         if (dictionary != null && dictionary.length != 0) {
             framer.offerDictionaryChunks(new UnsafeBuffer(dictionary), dictionary.length);
-            CrashHook.invoke("AFTER_DICTIONARY_CHUNKS", sequence);
+            FaultInjection.invoke("AFTER_DICTIONARY_CHUNKS", sequence);
         }
         final int dataCrc32c = framer.offerDataChunks(dataBuffers, bufferCount, dataLength);
         if (verifyExpectedCrc && dataCrc32c != expectedCrc32c) {
             throw new IllegalArgumentException("transaction data changed after durable fence");
         }
-        CrashHook.invoke("AFTER_DATA_CHUNKS", sequence);
+        /* The local Store write may start only after every prepare frame is
+         * durably recorded. The Store mark then lets restart recovery finish a
+         * missing COMMIT without ever having to guess whether its payload exists. */
+        this.commitPositionAwaiter.applyAsLong(framer.lastOfferPosition());
+        FaultInjection.invoke("AFTER_DATA_CHUNKS", sequence);
         final PreparedTransaction prepared = new PreparedTransaction(this, sequence, dataLength, dataChunks,
                 dataCrc32c, framer);
         synchronized (this) {
             this.pendingTransaction = prepared;
             if (this.reservedSequence == sequence) this.reservedSequence = -1L;
         }
-        CrashHook.invoke("AFTER_PREPARE", sequence);
+        FaultInjection.invoke("AFTER_PREPARE", sequence);
         return prepared;
     }
 
@@ -451,23 +480,23 @@ final class AeronReplicationPublisher implements AutoCloseable {
         return this.nextSequence;
     }
 
-        /// Returns the writer epoch bound to the checkpoint at construction.
+    UUID clusterId() {
+        return this.clusterId;
+    }
+
+    /// Returns the writer epoch bound to this publisher at construction.
     long epoch() {
         return this.epoch;
     }
 
-        /// Claims the fencing token acquired with the writer lease.
+    /// Installs the next token derived from the persisted Store mark.
     ///
     /// Every envelope offered afterwards carries this token; readers reject
     /// frames from a deposed writer whose token is lower. The claim happens
-    /// once the transport holds the lease, before the write coordinator
-    /// admits its first transaction. The claim is single-shot: a second claim
-    /// with a different token proves the publisher outlived its lease (a steal
-    /// race it lost) and fails instead of letting one publication mix two
-    /// token series. When the lease is lost the publisher is failed closed;
-    /// the writer must restart with a fresh lease, never keep publishing.
+    /// before the write coordinator admits its first transaction. The claim is
+    /// single-shot so a publication cannot mix token series.
     ///
-    /// @param fencingToken positive lease token
+    /// @param fencingToken positive token
     /// @throws IllegalArgumentException when the token is not positive
     /// @throws IllegalStateException when a different token was already claimed
     void claimFencingToken(final long fencingToken) {
@@ -479,7 +508,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 if (this.fencingToken != fencingToken) {
                     this.failed = true;
                     throw new IllegalStateException(
-                            "writer fencing token %s was already claimed; a different token %s means the lease was lost and a restart is required".formatted(
+                            "writer fencing token %s was already claimed; cannot replace it with %s".formatted(
                                     this.fencingToken, fencingToken));
                 }
                 return;
@@ -487,15 +516,6 @@ final class AeronReplicationPublisher implements AutoCloseable {
             this.fencingToken = fencingToken;
             this.fencingTokenClaimed = true;
         }
-    }
-
-        /// Fails the publisher because its writer lease was lost.
-    ///
-    /// A writer that lost a steal race must stop, never keep publishing with
-    /// a stale token readers will reject. The writer process must restart and
-    /// re-acquire the lease before publishing again.
-    synchronized void failLeaseLost() {
-        this.failed = true;
     }
 
         /// Returns the fencing token carried by offered envelopes.
@@ -606,19 +626,40 @@ final class AeronReplicationPublisher implements AutoCloseable {
 
         /// Offers the commit marker without waiting for durability.
     ///
-    /// Each non-blocking offer attempt claims lease ownership separately;
-    /// back-pressure waits and Archive acknowledgement hold no lease lock.
+    /// Back-pressure waits and Archive acknowledgement hold no publisher lock.
     ///
     /// @param transaction prepared transaction
     /// @return Aeron publication position of the offered marker
     long offerCommitMarker(final PreparedTransaction transaction) {
+        return this.offerCommitMarker(transaction, false);
+    }
+
+    /// Offers a Store-backed COMMIT without waiting for Archive recording.
+    /// A bounded offer failure leaves the prepared token open for retry.
+    long offerStoreCommitMarker(final PreparedTransaction transaction) {
+        return this.offerCommitMarker(transaction, true);
+    }
+
+    private long offerCommitMarker(final PreparedTransaction transaction, final boolean retryable) {
         this.beginTerminal(transaction);
         /* No publisher lock is held across back-pressure retries. The
          * prepared transaction owns its frame buffer until it is terminal. */
         try {
-            CrashHook.invoke("BEFORE_COMMIT_OFFER", transaction.sequence);
-            return transaction.framer.offerMarker(AeronReplicationEnvelope.Kind.COMMIT,
+            FaultInjection.invoke("BEFORE_COMMIT_OFFER", transaction.sequence);
+            final long position = transaction.framer.offerMarker(AeronReplicationEnvelope.Kind.COMMIT,
                     transaction.dataLength, transaction.dataChunkCount, transaction.crc32c);
+            if (retryable) this.finishTerminal(transaction, false);
+            return position;
+        } catch (final ReplicationUnavailableException unavailable) {
+            if (retryable) {
+                synchronized (this) {
+                    transaction.commitPending = true;
+                    this.terminalOperation = false;
+                }
+            } else {
+                this.finishTerminal(transaction, true);
+            }
+            throw unavailable;
         } catch (final RuntimeException | Error failure) {
             this.finishTerminal(transaction, true);
             throw failure;
@@ -632,9 +673,9 @@ final class AeronReplicationPublisher implements AutoCloseable {
     /// @return recorded Archive position
     long awaitCommitPosition(final PreparedTransaction transaction, final long commitPosition) {
         try {
-            CrashHook.invoke("AFTER_COMMIT_OFFER", transaction.sequence);
+            FaultInjection.invoke("AFTER_COMMIT_OFFER", transaction.sequence);
             final long recordedPosition = this.commitPositionAwaiter.applyAsLong(commitPosition);
-            CrashHook.invoke("AFTER_COMMIT_RECORDED", transaction.sequence);
+            FaultInjection.invoke("AFTER_COMMIT_RECORDED", transaction.sequence);
             this.finishTerminal(transaction, false);
             return recordedPosition;
         } catch (final RuntimeException | Error failure) {
@@ -666,8 +707,8 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 this.terminalOperation = false;
             }
             transaction.framer.close();
-            CrashHook.invoke("AFTER_ABORT_OFFERED", transaction.sequence);
-            /* Notify outside the publisher monitor. Checkpoint listeners may acquire the
+            FaultInjection.invoke("AFTER_ABORT_OFFERED", transaction.sequence);
+            /* Notify outside the publisher monitor. Boundary callbacks may acquire the
              * provider lock, and invoking them while holding this lock would create a
              * publisher/provider lock-order cycle during shutdown. */
             transaction.invokeAbortAction(position);
@@ -742,14 +783,12 @@ final class AeronReplicationPublisher implements AutoCloseable {
     }
 
         /// Claims the publisher for its single write coordinator.
-    synchronized void claimCoordinator(final AeronReplicationWriteCoordinator coordinator,
-                                       final WriterLeaseGate leaseGate) {
+    synchronized void claimCoordinator(final AeronReplicationWriteCoordinator coordinator) {
         this.ensureOpen();
         if (this.coordinatorOwner != null && this.coordinatorOwner != coordinator) {
             throw new IllegalStateException("an Aeron publisher already has a write coordinator");
         }
         this.coordinatorOwner = coordinator;
-        this.leaseGate = Objects.requireNonNull(leaseGate, "leaseGate");
     }
 
         /// Releases the coordinator claim during owner disposal.
@@ -757,7 +796,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         if (this.coordinatorOwner == coordinator) this.coordinatorOwner = null;
     }
 
-        /// Prevents further writes after an external durability or checkpoint failure.
+    /// Prevents further writes after an external durability or boundary failure.
     synchronized void failClosed() {
         this.failed = true;
     }
@@ -788,16 +827,9 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 throw new IllegalStateException("Aeron publisher close is already in progress");
             }
             pending = this.pendingTransaction;
-            abortPending = pending != null && !pending.terminal && this.leaseGate.isValid();
+            abortPending = pending != null && !pending.terminal && !pending.commitPending;
             this.closeInProgress = true;
             this.closeRequested = true;
-            if (!abortPending && pending != null && !pending.terminal) {
-                /* Without a valid lease no abort marker can be trusted. Detach the token
-                 * but leave any coordinator fence on disk to force reseed on restart. */
-                pending.terminal = true;
-                this.pendingTransaction = null;
-                this.failed = true;
-            }
             if (this.reservedSequence != -1L) {
                 /* A fence can exist before preparation creates a token.  Keep the
                  * sequence consumed for fail-closed recovery, but drop the in-memory
@@ -809,6 +841,17 @@ final class AeronReplicationPublisher implements AutoCloseable {
         RuntimeException failure = null;
         Error fatalFailure = null;
         boolean abortCompleted = !abortPending;
+        if (!abortPending && pending != null) {
+            /* A locally accepted Store commit must never be contradicted by an
+             * ABORT during shutdown. Its persisted mark lets restart recovery
+             * append the missing COMMIT if this offer did not reach Aeron. */
+            synchronized (this) {
+                if (this.pendingTransaction == pending) {
+                    pending.terminal = true;
+                    this.pendingTransaction = null;
+                }
+            }
+        }
         if (abortPending) {
             boolean abortMarkerOffered = false;
             try {
@@ -831,7 +874,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
                  * pending token and publication alive so a transient NOT_CONNECTED or
                  * back-pressure condition can be retried. Once the marker was accepted,
                  * its durability is ambiguous and the writer must fail closed. */
-                if (abortMarkerOffered || !this.leaseGate.isValid()) {
+                if (abortMarkerOffered) {
                     this.failed = true;
                     /* The marker was accepted but its durable position is unknown. A
                      * coordinator callback records COMMITTING_UNCERTAIN and keeps restart
@@ -839,7 +882,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
                     this.invokeAbortActionAfterFailure(pending, abortFailure);
                     /* Aeron accepted the marker, so a second close must never emit a
                      * contradictory terminal marker.  Its recorded position is unknown,
-                     * therefore the checkpoint callback is intentionally not invoked and
+                     * therefore the boundary callback is intentionally not invoked and
                      * recovery remains fail-closed. */
                     abortCompleted = true;
                 } else {
@@ -903,7 +946,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
     }
 
     private void releaseFramingStorage() {
-        if (this.framingStorageFreed.compareAndSet(false, true)) BufferUtil.free(this.framingStorage);
+        if (this.framingStorageFreed.compareAndSet(false, true)) NativeMemory.releaseDirect(this.framingStorage);
     }
 
         /// Metadata retained while a transaction moves through writer states.
@@ -921,6 +964,10 @@ final class AeronReplicationPublisher implements AutoCloseable {
         private volatile LongConsumer abortAction;
         private boolean abortActionInvoked;
         private boolean abortAttempted;
+        private volatile boolean commitPending;
+        private volatile LongConsumer commitAction;
+        private long commitSequence;
+        private boolean commitActionInvoked;
         private volatile boolean terminal;
         private long abortPosition = Aeron.NULL_VALUE;
 
@@ -949,6 +996,23 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 /// Returns the CRC32C of the Store binary carried by this transaction.
         int dataCrc32c() {
             return this.crc32c;
+        }
+
+        void onCommit(final LongConsumer action, final long sequence) {
+            this.commitAction = Objects.requireNonNull(action, "action");
+            this.commitSequence = sequence;
+        }
+
+        void invokeCommitAction() {
+            final LongConsumer action;
+            final long sequence;
+            synchronized (this.owner) {
+                if (this.commitActionInvoked || this.commitAction == null) return;
+                this.commitActionInvoked = true;
+                action = this.commitAction;
+                sequence = this.commitSequence;
+            }
+            action.accept(sequence);
         }
 
                 /// Registers a callback for an abort whose publication has been attempted.
@@ -1005,7 +1069,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
         @Override
         public void close() {
             synchronized (this.owner) {
-                if (this.terminal) return;
+                if (this.terminal || this.commitPending) return;
                 if (this.owner.closeRequested || this.owner.closed) {
                     return;
                 }

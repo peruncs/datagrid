@@ -21,6 +21,7 @@ import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.errors.WriteRejectedException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.index.ClusterStoreIndexes;
+import peruncs.cluster.storage.index.ClusterIndexTestSupport;
 
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
@@ -122,7 +123,7 @@ class WriterIndexValidationTest {
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-                publisher, (state, sequence, length, chunks, crc, position) -> {
+                publisher, sequence -> {
         });
         try {
             final List<String> localWrites = new ArrayList<>();
@@ -148,7 +149,7 @@ class WriterIndexValidationTest {
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-                publisher, (state, sequence, length, chunks, crc, position) -> {
+                publisher, sequence -> {
         });
         try {
             final List<String> localWrites = new ArrayList<>();
@@ -203,7 +204,7 @@ class WriterIndexValidationTest {
                     }, configuration.maxMessageLength(), configuration,
                     UUID.randomUUID(), 1, 0);
             this.coordinator = new AeronReplicationWriteCoordinator(
-                    publisher, (state, sequence, length, chunks, crc, position) -> {
+                    publisher, sequence -> {
             });
             this.target = new AeronStorageBinaryReplicationTarget(
                     recordingTarget(this.localWrites), this.coordinator,
@@ -211,7 +212,8 @@ class WriterIndexValidationTest {
                             null, this.committed::set, () -> true,
                             () -> {
                                 this.hookRan.set(true);
-                                ClusterStoreIndexes.validateStorageRoots(connection);
+                                ClusterStoreIndexes.validateStorageRoots(
+                                        connection, ClusterIndexTestSupport.typeHandlers());
                             }, ignored -> true));
         }
 

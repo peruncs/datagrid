@@ -11,8 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class AeronDistributionGateTest {
     @Test
     void nonWriterCannotAdvanceTheMessageIndex() {
-        final AeronDistributionGate gate = new AeronDistributionGate(() -> false, ignored -> {
-        });
+        final AeronDistributionGate gate = new AeronDistributionGate(() -> false, ignored -> { }, () -> null);
 
         assertThrows(IllegalStateException.class, () -> gate.messageIndex(1L));
     }
@@ -20,7 +19,7 @@ class AeronDistributionGateTest {
     @Test
     void writerIndexAdvancesTheNextSequence() {
         final AtomicLong next = new AtomicLong();
-        final AeronDistributionGate gate = new AeronDistributionGate(() -> true, next::set);
+        final AeronDistributionGate gate = new AeronDistributionGate(() -> true, next::set, () -> null);
 
         gate.messageIndex(41L);
 

@@ -3,10 +3,11 @@ package peruncs.cluster.node.store;
 import org.eclipse.store.storage.types.StorageManager;
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.api.ClusterStorageManager;
+import peruncs.cluster.storage.StorageGraphCoordinator;
 
 import java.lang.reflect.Proxy;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -55,8 +56,8 @@ class ClusterStorageManagerShutdownTest {
             }
         };
         final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
-                store, StorageSizeValidation.notReached(), nodeClose,
-                new peruncs.cluster.storage.StorageGraphCoordinator());
+                store, () -> false, nodeClose,
+                new StorageGraphCoordinator());
 
         assertThrows(IllegalStateException.class, manager::shutdown);
         assertEquals(0, storeShutdowns.get(), "a failed node close must not route to the raw Store twice");
@@ -116,9 +117,9 @@ class ClusterStorageManagerShutdownTest {
             public void checkOpen() {
             }
         };
-        final peruncs.cluster.api.ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
-                store, StorageSizeValidation.notReached(), nodeClose,
-                new peruncs.cluster.storage.StorageGraphCoordinator());
+        final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+                store, () -> false, nodeClose,
+                new StorageGraphCoordinator());
         final AtomicReference<Throwable> firstFailure = new AtomicReference<>();
         final AtomicReference<Throwable> secondFailure = new AtomicReference<>();
         final AtomicReference<Boolean> secondResult = new AtomicReference<>();
@@ -188,8 +189,8 @@ class ClusterStorageManagerShutdownTest {
             }
         };
         final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
-                store, StorageSizeValidation.notReached(), nodeClose,
-                new peruncs.cluster.storage.StorageGraphCoordinator());
+                store, () -> false, nodeClose,
+                new StorageGraphCoordinator());
         assertTrue(manager.shutdown());
         assertFalse(manager.shutdown(), "a second shutdown observes the completed close");
         assertThrows(IllegalStateException.class, manager::start,

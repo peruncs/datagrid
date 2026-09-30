@@ -6,7 +6,7 @@ import io.aeron.driver.MediaDriver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.storage.Crc32C;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
+import peruncs.cluster.storage.aeron.position.AeronReaderWatermark;
 
 import java.nio.file.Path;
 import java.util.UUID;

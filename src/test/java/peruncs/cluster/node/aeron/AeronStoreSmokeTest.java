@@ -22,14 +22,14 @@ import static org.junit.jupiter.api.Assertions.*;
 /// surefire gate across three forked phases ([AeronStoreSmokeChildMain]): a
 /// dedicated process seeds the writer Store, the next process imports one
 /// transaction, and a third process restarts everything so the reader resumes
-/// from its persisted atomic cursor, imports the next transaction, and the
+/// from its committed Store mark, imports the next transaction, and the
 /// restarted Store still answers both indexes.
 ///
 /// Every phase runs in its own JVM, and a Store that one phase created is
 /// only ever reopened by a later phase: closing then reopening the same Store
 /// files inside one JVM races Store teardown and failed intermittently with
-/// `BinaryBitmapIndex`. Files under the shared root carry stores, cursors,
-/// checkpoints, and archives across the restarts.
+/// `BinaryBitmapIndex`. Files under the shared root carry Stores, Store marks,
+/// and Archives across the restarts.
 @Timeout(300)
 class AeronStoreSmokeTest {
     /// Verifies writer, reader, and index state survive a restart across the three forked smoke phases.

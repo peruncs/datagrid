@@ -10,7 +10,7 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.reader.ReplicationApplierAeron;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
@@ -104,10 +104,10 @@ class AeronUdpReplicationIT {
             assertEquals("class=example.Type", receiver.dictionary);
             assertArrayEquals(data, receiver.data);
             assertFalse(receiver.observedBeforeLocal);
-            final AeronReplicationCursor cursor = client.cursor(UUID.randomUUID(), UUID.randomUUID(), 11);
-            assertEquals(0, cursor.sequence());
-            assertEquals(11, cursor.recordingId());
-            if (cursor.recordingPosition() < 0) {
+            final ReplicationPosition position = client.position(UUID.randomUUID(), UUID.randomUUID(), 11);
+            assertEquals(0, position.sequence());
+            assertEquals(11, position.recordingId());
+            if (position.prepareStartPosition() < 0) {
                 throw new AssertionError("Aeron header position was not captured");
             }
             assertNull(client.failure());

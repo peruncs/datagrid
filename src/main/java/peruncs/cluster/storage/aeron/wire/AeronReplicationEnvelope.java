@@ -18,14 +18,14 @@ import java.util.UUID;
 /// and full-binary checksum pass validation.
 ///
 /// The header and payload CRC32C checksums detect accidental corruption. The
-/// cluster wire nonce rejects accidental cross-wiring between otherwise valid
+/// public cluster-id-derived wire value rejects accidental cross-wiring between otherwise valid
 /// replication streams. The protocol has no node authentication or transport
 /// encryption, and neither is required.
 public final class AeronReplicationEnvelope {
     public static final int MAGIC = 0x44474152; // DGAR
         /// Wire version with a checksum covering every decision-bearing header field.
     public static final short VERSION = 5;
-        /// Header bytes, including the wire nonce and final header CRC32C.
+        /// Header bytes, including the redundant wire value and final header CRC32C.
     public static final int HEADER_LENGTH = 84;
         /// Largest logical transaction payload accepted on the wire.
     public static final int MAX_TRANSACTION_PAYLOAD_BYTES = 64 * 1024 * 1024;
@@ -37,15 +37,11 @@ public final class AeronReplicationEnvelope {
     private AeronReplicationEnvelope() {
     }
 
-    /// Derives the stable nonce for standalone codec fixtures only.
+    /// Derives the redundant framing value from the public cluster identity.
+    /// It is not secret and provides no node authentication.
     ///
-    /// Production nodes pass the configured nonce explicitly to both the writer
-    /// and the reader. Deriving a nonce from the cluster id is a fixture
-    /// convenience, never a deployment default: mixing a derived nonce with an
-    /// explicitly configured one cross-wires the streams.
-    ///
-    /// @param clusterId fixture cluster identity
-    /// @return non-zero derived nonce
+    /// @param clusterId public cluster identity
+    /// @return non-zero derived value
     public static long defaultWireNonce(final UUID clusterId) {
         Objects.requireNonNull(clusterId, "clusterId");
         return clusterId.getLeastSignificantBits() | 1L;
@@ -84,7 +80,7 @@ public final class AeronReplicationEnvelope {
     /// @param clusterId       replication cluster identity
     /// @param epoch           writer epoch
     /// @param fencingToken    writer fencing token; readers reject stale tokens
-    /// @param wireNonce       deployment nonce shared with the reader; must not be zero
+    /// @param wireNonce       public cluster-id-derived framing value; must not be zero
     /// @param sequence        transaction sequence
     /// @param kind            envelope kind
     /// @param payloadLength   logical, unchunked payload length
@@ -132,7 +128,7 @@ public final class AeronReplicationEnvelope {
     /// @param clusterId       replication cluster identity
     /// @param epoch           writer epoch
     /// @param fencingToken    writer fencing token; readers reject stale tokens
-    /// @param wireNonce       deployment nonce shared with the reader; must not be zero
+    /// @param wireNonce       public cluster-id-derived framing value; must not be zero
     /// @param sequence        transaction sequence
     /// @param kind            envelope kind
     /// @param payloadLength   logical payload length
@@ -302,6 +298,32 @@ public final class AeronReplicationEnvelope {
         return decodeViewInternal(source, offset, length, view);
     }
 
+    /// Skips a replay frame already covered by the local Store mark before
+    /// validating its remaining bytes.
+    ///
+    /// @param source encoded frame
+    /// @param offset first byte of the frame
+    /// @param length frame length
+    /// @param view reusable decode target
+    /// @param committedThrough last sequence committed in the Store
+    /// @return `null` when the frame sequence is already committed; otherwise the decoded view
+    public static EnvelopeView decodeViewAfter(
+            final DirectBuffer source,
+            final int offset,
+            final int length,
+            final EnvelopeView view,
+            final long committedThrough
+    ) {
+        Objects.requireNonNull(view, "view");
+        if (source != null && offset >= 0 && length >= 24 && length <= source.capacity() &&
+            offset <= source.capacity() - length &&
+            source.getLong(offset + 16, ByteOrder.BIG_ENDIAN) <= committedThrough) {
+            view.clear();
+            return null;
+        }
+        return decodeViewInternal(source, offset, length, view);
+    }
+
     private static EnvelopeView decodeViewInternal(
             final DirectBuffer source,
             final int offset,
@@ -336,7 +358,7 @@ public final class AeronReplicationEnvelope {
             throw new CorruptReplicationDataException("envelope carries no writer fencing token");
         }
         if (wireNonce == 0L) {
-            throw new CorruptReplicationDataException("envelope carries no wire nonce");
+            throw new CorruptReplicationDataException("envelope carries no framing value");
         }
         final long sequence = source.getLong(offset + 16, ByteOrder.BIG_ENDIAN);
         final int payloadLength = source.getInt(offset + 24, ByteOrder.BIG_ENDIAN);
@@ -515,7 +537,7 @@ public final class AeronReplicationEnvelope {
                    clusterId.getLeastSignificantBits() == this.clusterLeastSignificantBits;
         }
 
-        /// Returns whether this frame belongs to the expected cluster and nonce.
+        /// Returns whether this frame matches the expected cluster and redundant framing value.
         public boolean matches(final UUID clusterId, final long wireNonce) {
             return matches(clusterId) && this.wireNonce == wireNonce;
         }
@@ -605,7 +627,7 @@ public final class AeronReplicationEnvelope {
             Objects.requireNonNull(payload, "payload");
             payload = payload.clone();
             if (wireNonce == 0L) {
-                throw new CorruptReplicationDataException("owned envelope carries no wire nonce");
+                throw new CorruptReplicationDataException("owned envelope carries no framing value");
             }
             if (payloadLength < 0 || payloadLength > MAX_TRANSACTION_PAYLOAD_BYTES ||
                 chunkIndex < 0 || chunkCount <= 0 || chunkCount > MAX_PACKET_COUNT ||

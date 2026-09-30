@@ -15,6 +15,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.lang.reflect.Proxy;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -39,6 +41,22 @@ class ClusterStoreIndexesTest {
     private static final AtomicInteger VECTORIZE_CALLS = new AtomicInteger();
     @TempDir
     Path storagePath;
+
+    private static void validateGraph(final Object root) {
+        ClusterStoreIndexes.validateGraph(root, ClusterIndexTestSupport.typeHandlers());
+    }
+
+    private static void validateMap(final GigaMap<?> map) {
+        ClusterStoreIndexes.validateMap(map, ClusterIndexTestSupport.typeHandlers());
+    }
+
+    private static void validateStorageRoots(final StorageConnection storage) {
+        ClusterStoreIndexes.validateStorageRoots(storage, ClusterIndexTestSupport.typeHandlers());
+    }
+
+    private static void refreshImportedIndexes(final StorageConnection storage) {
+        ClusterStoreIndexes.refreshImportedIndexes(storage, ClusterIndexTestSupport.typeHandlers());
+    }
 
     private static VectorIndexConfiguration vectorConfiguration() {
         return VectorIndexConfiguration.builder()
@@ -83,7 +101,8 @@ class ClusterStoreIndexesTest {
         root.holder = holder;
         assertThrows(IllegalArgumentException.class,
                 () -> ClusterIndexValidation.validateGraph(root,
-                        ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null),
+                        ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null, null,
+                        new ClusterIndexValidation.ValidationScratch(ClusterIndexTestSupport.typeHandlers())),
                 "a subtype-held external index must trip validation, not hide behind the declared type");
     }
 
@@ -96,12 +115,12 @@ class ClusterStoreIndexesTest {
         final Root root = new Root();
 
         root.special = new IndexCarrierNumber(indexed);
-        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(root));
 
         root.special = EnumIndexCarrier.INSTANCE;
         EnumIndexCarrier.INSTANCE.value = indexed;
         try {
-            assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
+            assertThrows(IllegalArgumentException.class, () -> validateGraph(root));
         } finally {
             EnumIndexCarrier.INSTANCE.value = null;
         }
@@ -275,7 +294,7 @@ class ClusterStoreIndexesTest {
              * replicated Store arrives committed. */
             root.articles.store();
             VECTORIZE_CALLS.set(0);
-            ClusterStoreIndexes.refreshImportedIndexes(connection);
+            refreshImportedIndexes(connection);
             assertEquals(0, VECTORIZE_CALLS.get(), "refresh must reset graphs without vectorizing entities");
             final VectorIndices<Article> vectors = root.articles.index().get(VectorIndices.Category());
             assertEquals("doc7", vectors.get("article-vectors")
@@ -316,8 +335,8 @@ class ClusterStoreIndexesTest {
                 assertEquals(1, text.query("title:kept").size(), "cycle " + cycle);
                 root.articles.update(kept, article -> article.body = "steady body " + round);
                 root.articles.store();
-                ClusterStoreIndexes.refreshImportedIndexes(connection);
-                ClusterStoreIndexes.refreshImportedIndexes(connection);
+                refreshImportedIndexes(connection);
+                refreshImportedIndexes(connection);
                 assertEquals(1, text.query("title:kept").size(), "reopen after cycle " + cycle);
                 assertEquals(1, text.query("body:steady").size(), "reopen after cycle " + cycle);
             }
@@ -328,6 +347,7 @@ class ClusterStoreIndexesTest {
 
     @Test
     void unchangedVectorGraphSurvivesAnApplyBoundary() {
+        VECTORIZE_CALLS.set(0);
         final Root root = new Root();
         root.articles = GigaMap.New();
         ClusterStoreIndexes.registerVector(root.articles, "article-vectors", vectorConfiguration(),
@@ -339,15 +359,14 @@ class ClusterStoreIndexesTest {
             final VectorIndex<Article> index = root.articles.index()
                     .get(VectorIndices.<Article>Category()).get("article-vectors");
             index.search(new float[]{1, 0, 0}, 1);
-            final var graphField = StoreIndexReflection.vectorGraphFields(index.getClass()).graph();
-            final Object graph = StoreIndexReflection.read(index, graphField);
-            assertNotNull(graph);
+            final int vectorizations = VECTORIZE_CALLS.get();
 
-            final var scratch = ClusterIndexMaintenance.refreshImportedIndexes(connection, 4096);
+            final var scratch = ClusterIndexMaintenance.refreshImportedIndexes(connection, ClusterIndexTestSupport.typeHandlers(), 4096);
             ClusterIndexMaintenance.validateAndRebuildImportedIndexes(connection, 4096, scratch);
 
-            assertSame(graph, StoreIndexReflection.read(index, graphField),
-                    "an unchanged vector index must not pay for a graph rebuild");
+            assertEquals(vectorizations, VECTORIZE_CALLS.get(),
+                    "an unchanged vector index must not vectorize entities again");
+            assertEquals("kept", index.search(new float[]{1, 0, 0}, 1).toList().getFirst().entity().title);
         }
     }
 
@@ -360,12 +379,12 @@ class ClusterStoreIndexesTest {
             final StorageConnection connection = storage.createConnection();
             final long rootId = connection.persistenceManager().lookupObjectId(root);
             assertTrue(rootId > 0L);
-            final java.nio.ByteBuffer changedRoot = java.nio.ByteBuffer.allocateDirect(24)
-                    .order(java.nio.ByteOrder.nativeOrder());
+            final ByteBuffer changedRoot = ByteBuffer.allocateDirect(24)
+                    .order(ByteOrder.nativeOrder());
             changedRoot.putLong(24L).putLong(1L).putLong(rootId).flip();
 
-            final ClusterIndexMaintenance maintenance = new ClusterIndexMaintenance();
-            maintenance.beforeApply(connection, new java.nio.ByteBuffer[]{changedRoot}, 1, 4096);
+            final ClusterIndexMaintenance maintenance = new ClusterIndexMaintenance(ClusterIndexTestSupport.typeHandlers());
+            maintenance.beforeApply(connection, new ByteBuffer[]{changedRoot}, 1, 4096);
             root.articles = GigaMap.New();
             root.articles.index().register(LuceneIndex.Category(LuceneContext.New(
                     this.storagePath.resolve("new-external-lucene"), new ArticlePopulator())));
@@ -382,7 +401,7 @@ class ClusterStoreIndexesTest {
         root.articles.index().register(LuceneIndex.Category(LuceneContext.New(
                 this.storagePath.resolve("external-lucene"), new ArticlePopulator())));
 
-        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(root));
     }
 
     /// Verifies a directly registered external vector index is rejected by graph validation.
@@ -398,15 +417,15 @@ class ClusterStoreIndexesTest {
                 .indexDirectory(this.storagePath.resolve("external-vectors"))
                 .build(), new ArticleVectorizer());
 
-        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(root));
     }
 
     /// Verifies unregistered external Lucene and vector configurations are rejected by graph validation.
     @Test
     void unregisteredExternalConfigurationsAreRejectedByGraphValidation() {
-        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(
                 LuceneContext.New(this.storagePath.resolve("stray-lucene"), new ArticlePopulator())));
-        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(
                 VectorIndexConfiguration.builder()
                         .dimension(3)
                         .similarityFunction(VectorSimilarityFunction.COSINE)
@@ -420,15 +439,15 @@ class ClusterStoreIndexesTest {
     void externalConfigurationBehindAtomicReferenceIsRejected() {
         final AtomicReference<Object> reference = new AtomicReference<>(
                 LuceneContext.New(this.storagePath.resolve("wrapped-lucene"), new ArticlePopulator()));
-        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(reference));
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(reference));
     }
 
-    /// Verifies an opaque JDK holder is rejected instead of being silently pruned.
+    /// Verifies Serializer's handler follows JDK holders and finds hidden indexes.
     @Test
-    void opaqueJdkHolderIsRejectedInsteadOfBeingPruned() {
+    void externalConfigurationBehindMarkableReferenceIsRejected() {
         final AtomicMarkableReference<Object> holder = new AtomicMarkableReference<>(
                 LuceneContext.New(this.storagePath.resolve("opaque-jdk-lucene"), new ArticlePopulator()), false);
-        assertThrows(IllegalStateException.class, () -> ClusterStoreIndexes.validateGraph(holder));
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(holder));
     }
 
     /// Verifies an external configuration hidden behind a WeakReference is still inspected and rejected.
@@ -436,7 +455,7 @@ class ClusterStoreIndexesTest {
     void externalConfigurationBehindReferenceIsInspected() {
         final java.lang.ref.WeakReference<Object> reference = new java.lang.ref.WeakReference<>(
                 LuceneContext.New(this.storagePath.resolve("ref-lucene"), new ArticlePopulator()));
-        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(reference),
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(reference),
                 "a Reference wrapper must not hide an external index from validation");
     }
 
@@ -450,7 +469,7 @@ class ClusterStoreIndexesTest {
                         .onDisk(true)
                         .indexDirectory(this.storagePath.resolve("ref-vectors"))
                         .build());
-        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(reference),
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(reference),
                 "a SoftReference wrapper must not hide an external index from validation");
     }
 
@@ -460,7 +479,7 @@ class ClusterStoreIndexesTest {
         final GigaMap<Article> map = GigaMap.New();
         final LuceneIndex<Article> text = map.index().register(LuceneIndex.Category(LuceneContext.New(
                 this.storagePath.resolve("ref-group-lucene"), new ArticlePopulator())));
-        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(
                 new java.lang.ref.WeakReference<>(text)),
                 "an IndexGroup referent must stay visible after simplifying the Reference check");
         final VectorIndices<Article> vectors = map.index().register(VectorIndices.Category());
@@ -470,7 +489,7 @@ class ClusterStoreIndexesTest {
                 .onDisk(true)
                 .indexDirectory(this.storagePath.resolve("ref-group-vectors"))
                 .build(), new ArticleVectorizer());
-        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(
                 new java.lang.ref.WeakReference<>(vectors)),
                 "an IndexGroup referent must stay visible after simplifying the Reference check");
     }
@@ -484,8 +503,8 @@ class ClusterStoreIndexesTest {
         ClusterStoreIndexes.registerLucene(root.articles, new ArticlePopulator());
         ClusterStoreIndexes.registerVector(root.articles, "article-vectors", vectorConfiguration(), new ArticleVectorizer());
 
-        assertDoesNotThrow(() -> ClusterStoreIndexes.validateGraph(root));
-        assertDoesNotThrow(() -> ClusterStoreIndexes.validateMap(root.articles));
+        assertDoesNotThrow(() -> validateGraph(root));
+        assertDoesNotThrow(() -> validateMap(root.articles));
     }
 
     /// Verifies materialized storage roots with embedded indexes pass validation.
@@ -498,7 +517,7 @@ class ClusterStoreIndexesTest {
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
             root.articles.add(new Article("Eclipse", "distributed storage", new float[]{1, 0, 0}));
             storage.storeRoot();
-            assertDoesNotThrow(() -> ClusterStoreIndexes.validateStorageRoots(storage.createConnection()));
+            assertDoesNotThrow(() -> validateStorageRoots(storage.createConnection()));
         }
     }
 
@@ -546,7 +565,7 @@ class ClusterStoreIndexesTest {
     void bitmapOnlyMapPassesMapValidation() {
         /* The core bitmap group is in-graph by construction: enumerating it
          * must accept the map instead of rejecting an "unknown" category. */
-        assertDoesNotThrow(() -> ClusterStoreIndexes.validateMap(GigaMap.New()));
+        assertDoesNotThrow(() -> validateMap(GigaMap.New()));
     }
 
     /// Verifies an unknown index category fails map validation as an unsupported index group.
@@ -584,7 +603,7 @@ class ClusterStoreIndexesTest {
         });
 
         final IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
-                () -> ClusterStoreIndexes.validateMap(map));
+                () -> validateMap(map));
         assertTrue(failure.getMessage().contains("unsupported index group"),
                 "an unknown category must fail closed: " + failure.getMessage());
     }
@@ -598,7 +617,7 @@ class ClusterStoreIndexesTest {
                 this.storagePath.resolve("writer-external-lucene"), new ArticlePopulator())));
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(luceneRoot, this.storagePath.resolve("lucene"))) {
             assertThrows(IllegalArgumentException.class,
-                    () -> ClusterStoreIndexes.validateStorageRoots(storage.createConnection()));
+                    () -> validateStorageRoots(storage.createConnection()));
         }
 
         final Root vectorRoot = new Root();
@@ -612,7 +631,7 @@ class ClusterStoreIndexesTest {
                 .build(), new ArticleVectorizer());
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(vectorRoot, this.storagePath.resolve("vectors"))) {
             assertThrows(IllegalArgumentException.class,
-                    () -> ClusterStoreIndexes.validateStorageRoots(storage.createConnection()));
+                    () -> validateStorageRoots(storage.createConnection()));
         }
     }
 
@@ -630,8 +649,8 @@ class ClusterStoreIndexesTest {
          * reach index metadata: `java.time` fields are provably index-free,
          * so the prune must skip the entries and their date values without
          * failing — roughly 10,000 objects under the old rule. */
-        assertDoesNotThrow(() -> ClusterStoreIndexes.validateGraph(root));
-        assertDoesNotThrow(() -> ClusterStoreIndexes.validateMap(root.articles));
+        assertDoesNotThrow(() -> validateGraph(root));
+        assertDoesNotThrow(() -> validateMap(root.articles));
     }
 
     /// Verifies an external index hidden among a large ordinary graph is still rejected.
@@ -648,7 +667,7 @@ class ClusterStoreIndexesTest {
 
         /* Pruning ordinary entities must not hide the directly registered
          * external index among them. */
-        assertThrows(IllegalArgumentException.class, () -> ClusterStoreIndexes.validateGraph(root));
+        assertThrows(IllegalArgumentException.class, () -> validateGraph(root));
     }
 
     /// Verifies writer validation is scoped to the store being written so another store's violation does not block a clean writer.
@@ -668,10 +687,10 @@ class ClusterStoreIndexesTest {
             ClusterStoreIndexes.registerLucene(clean.articles, new ArticlePopulator());
             try (EmbeddedStorageManager mine = EmbeddedStorage.start(clean, this.storagePath.resolve("mine"))) {
                 mine.storeRoot();
-                assertDoesNotThrow(() -> ClusterStoreIndexes.validateStorageRoots(mine.createConnection()),
+                assertDoesNotThrow(() -> validateStorageRoots(mine.createConnection()),
                         "another Store's violating map must not block this writer");
                 assertThrows(IllegalArgumentException.class,
-                        () -> ClusterStoreIndexes.validateStorageRoots(other.createConnection()),
+                        () -> validateStorageRoots(other.createConnection()),
                         "the violating Store must still fail its own validation");
             }
         }
@@ -689,7 +708,7 @@ class ClusterStoreIndexesTest {
         }
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
             storage.storeRoot();
-            assertDoesNotThrow(() -> ClusterStoreIndexes.validateStorageRoots(storage.createConnection()),
+            assertDoesNotThrow(() -> validateStorageRoots(storage.createConnection()),
                     "the writer entry must not walk the application's data set per transaction");
         }
     }
@@ -704,7 +723,7 @@ class ClusterStoreIndexesTest {
         try (EmbeddedStorageManager storage = EmbeddedStorage.start(root, this.storagePath)) {
             root.articles.add(new Article("Eclipse", "distributed storage", new float[]{1, 0, 0}));
             storage.storeRoot();
-            assertDoesNotThrow(() -> ClusterStoreIndexes.validateStorageRoots(storage.createConnection()));
+            assertDoesNotThrow(() -> validateStorageRoots(storage.createConnection()));
         }
     }
 

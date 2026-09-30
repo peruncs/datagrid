@@ -2,6 +2,8 @@ package peruncs.cluster.node.store;
 
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongSupplier;
 
 import static java.lang.System.Logger.Level.*;
 
@@ -14,81 +16,82 @@ import static java.lang.System.Logger.Level.*;
 /// writable and read-only.
 public final class StorageLimitGate {
     private static final System.Logger LOGGER = System.getLogger(StorageLimitGate.class.getName());
+    private static final int MEASUREMENT_KNOWN = 1;
+    private static final int LIMIT_REACHED = 1 << 1;
     /// Wall-clock spacing between "still full" reminders while the limit stays reached.
     private static final long FULL_REMINDER_INTERVAL_MILLIS = 600_000L;
     private long lastFullLogMillis;
     private static final long BYTES_PER_GIGABYTE = 1_000_000_000L;
     private static final int DEFAULT_RELEASE_PERMILLE = 100;
 
-    private final AtomicBoolean limitReached = new AtomicBoolean();
-    private final AtomicBoolean measurementKnown = new AtomicBoolean();
+    private final AtomicInteger state = new AtomicInteger();
     private final AtomicBoolean unknownWarningLogged = new AtomicBoolean();
-    private final int limitGb;
     private final long limitBytes;
     private final long releaseBytes;
 
-    private StorageLimitGate(final int limitGb, final int releasePermille) {
-        this.limitGb = limitGb;
-        this.limitBytes = Math.multiplyExact(limitGb, BYTES_PER_GIGABYTE);
+    private StorageLimitGate(final long limitBytes, final int releasePermille) {
+        this.limitBytes = limitBytes;
         if (releasePermille < 0 || releasePermille > 1_000) {
             throw new IllegalArgumentException("releasePermille must be between 0 and 1000");
         }
-        this.releaseBytes = this.limitBytes - this.limitBytes * releasePermille / 1_000L;
+        final long releaseBytes = this.limitBytes / 1_000L * releasePermille +
+                this.limitBytes % 1_000L * releasePermille / 1_000L;
+        this.releaseBytes = this.limitBytes - releaseBytes;
     }
 
-        /// Creates a gate for the given limit with the default hysteresis.
+    /// Creates a gate for the given byte limit with the default hysteresis.
     ///
-    /// @param limitGb the limit in decimal gigabytes
+    /// @param limitBytes the limit in bytes
     /// @return a gate that fails closed until its first measurement
-    public static StorageLimitGate create(final int limitGb) {
-        return create(limitGb, DEFAULT_RELEASE_PERMILLE);
+    public static StorageLimitGate create(final long limitBytes) {
+        return create(limitBytes, DEFAULT_RELEASE_PERMILLE);
     }
 
         /// Creates a gate with an explicit release hysteresis.
     ///
-    /// @param limitGb        the limit in decimal gigabytes
+    /// @param limitBytes     the limit in bytes
     /// @param releasePermille hysteresis below the limit, in tenths of a
     ///                        percent (100 = release ten percent below)
     /// @return a gate that has not reached its limit yet
-    public static StorageLimitGate create(final int limitGb, final int releasePermille) {
-        if (limitGb <= 0) {
-            throw new IllegalArgumentException("Storage limit must be a positive number of gigabytes");
+    public static StorageLimitGate create(final long limitBytes, final int releasePermille) {
+        if (limitBytes <= 0L) {
+            throw new IllegalArgumentException("Storage limit must be positive");
         }
-        return new StorageLimitGate(limitGb, releasePermille);
+        return new StorageLimitGate(limitBytes, releasePermille);
     }
 
         /// Records one storage measurement.
     ///
     /// @param usedBytes measured used bytes
-    public synchronized void updateUsage(final long usedBytes) {
+    public void updateUsage(final long usedBytes) {
         if (usedBytes < 0L) return;
         this.unknownWarningLogged.set(false);
-        if (!this.measurementKnown.get()) {
-            this.limitReached.set(usedBytes >= this.limitBytes);
-            this.measurementKnown.set(true);
-            return;
-        }
-        if (this.limitReached.get()) {
-            if (usedBytes <= this.releaseBytes) {
-                this.limitReached.set(false);
-            }
-        } else if (usedBytes >= this.limitBytes) {
-            this.limitReached.set(true);
-        }
+        int current;
+        int updated;
+        do {
+            current = this.state.get();
+            final boolean wasLimited = (current & LIMIT_REACHED) != 0;
+            final boolean limited = wasLimited
+                    ? usedBytes > this.releaseBytes
+                    : usedBytes >= this.limitBytes;
+            updated = MEASUREMENT_KNOWN | (limited ? LIMIT_REACHED : 0);
+            if (current == updated) return;
+        } while (!this.state.compareAndSet(current, updated));
     }
 
         /// Reports whether a measurement has reached the configured limit.
     ///
     /// @return `true` after a measurement reaches the limit
     public boolean limitReached() {
-        return !this.measurementKnown.get() || this.limitReached.get();
+        final int current = this.state.get();
+        return (current & MEASUREMENT_KNOWN) == 0 || (current & LIMIT_REACHED) != 0;
     }
 
         /// Returns the limit in decimal gigabytes.
     ///
     /// @return limit in gigabytes
-    public int limitGb() {
-        return this.limitGb;
+    public long limitGb() {
+        return this.limitBytes / BYTES_PER_GIGABYTE;
     }
 
         /// Returns the limit in bytes.
@@ -105,7 +108,7 @@ public final class StorageLimitGate {
     ///
     /// @param diskSpaceReader storage measurement source
     /// @return limit-check task for maintenance scheduling
-    public Runnable createScheduledWork(final StorageUsageGauge diskSpaceReader) {
+    public Runnable createScheduledWork(final LongSupplier diskSpaceReader) {
         Objects.requireNonNull(diskSpaceReader, "diskSpaceReader");
         return () ->
         {
@@ -113,7 +116,7 @@ public final class StorageLimitGate {
                 LOGGER.log(TRACE, "Executing storage limit checker task");
             }
             final long nowMillis = System.currentTimeMillis();
-            final long usedBytes = diskSpaceReader.readUsedDiskSpaceBytes();
+            final long usedBytes = diskSpaceReader.getAsLong();
             if (usedBytes < 0L) {
                 if (this.unknownWarningLogged.compareAndSet(false, true)) {
                     LOGGER.log(WARNING, "Storage usage is unknown; writes are disabled until a measurement succeeds");

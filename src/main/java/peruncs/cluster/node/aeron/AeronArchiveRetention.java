@@ -6,9 +6,8 @@ import org.eclipse.serializer.functional.Action;
 import org.eclipse.serializer.functional.Producer;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.node.replication.ReplicationLogRetention;
-import peruncs.cluster.storage.ReplicationCursor;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
+import peruncs.cluster.storage.aeron.position.AeronReaderWatermark;
 import peruncs.cluster.storage.io.AtomicFileWriter;
 
 import java.io.IOException;
@@ -201,39 +200,39 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         });
     }
 
-    /// Deletes Archive history through the requested cursor, gated by the reader quorum.
+    /// Deletes Archive history through the requested position, gated by the reader quorum.
     ///
     /// Nothing is deleted unless the complete configured reader set has
     /// acknowledged at least the requested sequence, the watermark recording
     /// matches the active writer, and the watermark stays within the durable
-    /// writer boundary: the terminal commit checkpoint, extended by the
+    /// writer boundary: the last resolved terminal marker, extended by the
     /// Archive's durably recorded position so a truthful reader acknowledgement
-    /// is not refused just because the checkpoint fsync trails the live
+    /// is not refused just because the published boundary trails the live
     /// recording (see [#requireWithinDurableBoundary]). Deletion stops at
     /// complete segment boundaries; when a live replay still uses a selected
     /// segment the request defers instead. Any Archive failure fails closed.
-    /// A cursor that has not crossed a full segment reports nothing to delete
+    /// A position that has not crossed a full segment reports nothing to delete
     /// rather than deleting partially.
     ///
-    /// @param cursor durable boundary to delete through
+    /// @param position durable boundary to delete through
     /// @return deletion outcome with the boundary position
     @Override
-    public MaintenanceResult deleteThrough(final ReplicationCursor cursor) {
-        return this.onAgent(() -> this.deleteThroughOnAgent(cursor));
+    public MaintenanceResult deleteThrough(final ReplicationPosition position) {
+        return this.onAgent(() -> this.deleteThroughOnAgent(position));
     }
 
-    private MaintenanceResult deleteThroughOnAgent(final ReplicationCursor cursor) {
+    private MaintenanceResult deleteThroughOnAgent(final ReplicationPosition position) {
         if (this.closed) throw new IllegalStateException("Aeron retention is closed");
         if (!this.watermarkDeliveryAvailable.getAsBoolean()) {
             throw new UnsupportedOperationException("Aeron retention requires a deployed reader-to-writer watermark channel");
         }
         this.ensureStateRestored();
-        if (cursor == null || !"aeron".equalsIgnoreCase(cursor.transport()))
-            throw new IllegalArgumentException("Aeron retention requires an Aeron cursor");
-        if (cursor.logicalSequence() < 0)
-            throw new IllegalArgumentException("retention cursor must name a resolved sequence");
+        if (position == null || position.clusterId() == null)
+            throw new IllegalArgumentException("Aeron retention requires a typed Aeron position");
+        if (position.sequence() < 0)
+            throw new IllegalArgumentException("retention position must name a resolved sequence");
         try {
-            final AeronWriterRecoveryBoundary requested = this.requestedBoundary(cursor);
+            final AeronWriterRecoveryBoundary requested = this.requestedBoundary(position);
             this.ensureWriter.run();
             final long activeRecordingId = this.recordingId.getAsLong();
             if (requested.recordingId() != activeRecordingId)
@@ -274,9 +273,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             throw failure;
         } catch (final RuntimeException failure) {
             if (failure instanceof ArchiveException archiveFailure) {
-                throw new ReplicationUnavailableException(
-                        "Aeron Archive retention failed closed (errorCode=%s)".formatted(archiveFailure.errorCode()),
-                        archiveFailure, archiveFailure.errorCode());
+                throw new ReplicationUnavailableException("Aeron Archive retention failed closed", archiveFailure);
             }
             throw new ReplicationUnavailableException("Aeron Archive retention failed closed", failure);
         }
@@ -311,38 +308,34 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
 
     /// Records one reader's durable boundary into the retention quorum.
     ///
-    /// The cursor must carry a watermark naming the same sequence and Store
-    /// generation as the cursor itself; anything else is rejected as a
+    /// The position must carry a watermark naming the same sequence and Store
+    /// generation as the position itself; anything else is rejected as a
     /// mismatched boundary rather than counted toward deletion.
     ///
-    /// @param cursor reader cursor carrying the watermark
+    /// @param position reader position carrying the watermark
     @Override
-    public void recordReaderWatermark(final ReplicationCursor cursor) {
-        this.onAgent(() -> this.recordReaderWatermarkOnAgent(cursor));
+    public void recordReaderWatermark(final ReplicationPosition position) {
+        this.onAgent(() -> this.recordReaderWatermarkOnAgent(position));
     }
 
-    private void recordReaderWatermarkOnAgent(final ReplicationCursor cursor) {
+    private void recordReaderWatermarkOnAgent(final ReplicationPosition position) {
         if (this.closed) throw new IllegalStateException("Aeron retention is closed");
         if (!this.watermarkDeliveryAvailable.getAsBoolean()) {
             throw new UnsupportedOperationException(
                     "Aeron retention watermark delivery is not configured");
         }
         this.ensureStateRestored();
-        if (cursor == null || !"aeron".equalsIgnoreCase(cursor.transport()))
-            throw new IllegalArgumentException("Aeron retention requires an Aeron cursor");
-        if (cursor.logicalSequence() < 0)
+        if (position == null || position.clusterId() == null || position.nodeId() == null)
+            throw new IllegalArgumentException("Aeron retention requires a typed reader position");
+        if (position.sequence() < 0L || position.prepareStartPosition() < 0L)
             throw new IllegalArgumentException("reader watermark must name a resolved sequence");
-        final AeronReaderWatermark watermark;
-        try {
-            watermark = AeronReaderWatermark.decode(cursor.providerPositionBytes());
-        } catch (final RuntimeException failure) {
-            throw new IllegalArgumentException("reader cursor has no Aeron watermark", failure);
+        if (!this.clusterId.equals(position.clusterId()) ||
+            !this.storeGeneration.equals(position.storeGeneration()) || position.epoch() != this.writerEpoch) {
+            throw new IllegalArgumentException("reader position identity does not match the active writer");
         }
-        if (watermark.sequence() != cursor.logicalSequence() ||
-            !this.storeGeneration.equals(cursor.storeGeneration())) {
-            throw new IllegalArgumentException("reader cursor and watermark do not name one boundary");
-        }
-        this.recordReaderWatermark(watermark);
+        this.recordReaderWatermarkOnAgent(AeronReaderWatermark.of(
+                position.nodeId(), position.clusterId(), position.storeGeneration(), position.epoch(),
+                position.recordingId(), position.sequence(), position.prepareStartPosition()));
     }
 
         /// Accepts a watermark already decoded by the Aeron control subscription.
@@ -496,14 +489,14 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
 
     /// Validates reader-claimed progress against the writer's durable boundary.
     ///
-    /// The boundary is the terminal commit checkpoint extended by the Archive's
-    /// durably recorded position. Progress at or below the terminal checkpoint
+    /// The boundary is the last terminal marker extended by the Archive's
+    /// durably recorded position. Progress at or below that marker
     /// is trivially covered. Progress past it is still admissible on a
     /// continuously appending writer: a reader resolves a commit from the live
     /// stream while the writer is between the commit's Archive acknowledgement
-    /// and the checkpoint fsync, so a truthful watermark can name a sequence
-    /// the checkpoint file has not reached yet. Such progress is accepted only
-    /// when it occupies new bytes — strictly beyond the checkpoint position —
+    /// and boundary publication, so a truthful watermark can name a sequence
+    /// the writer boundary has not reached yet. Such progress is accepted only
+    /// when it occupies new bytes — strictly beyond the boundary position —
     /// that already lie inside the durably recorded region of the active
     /// recording. A future sequence without new bytes, and any position beyond
     /// the recorded position, is genuinely impossible for a reader to know and
@@ -515,8 +508,8 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             sequence == terminal.sequence() && position <= terminal.position()) {
             return;
         }
-        /* Past the terminal checkpoint. The recording question below runs only
-         * in this slow path, so a watermark accepted at or below the checkpoint
+        /* Past the terminal marker. The recording question below runs only
+         * in this slow path, so a watermark accepted at or below the boundary
          * never pays for an Archive control round-trip. */
         final long recorded = this.recordedDurablePosition(this.recordingId.getAsLong());
         if (position <= terminal.position() || recorded < 0 || position > recorded) {
@@ -531,23 +524,15 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         return stop >= 0 ? stop : this.recordingPositions.recordingPosition().applyAsLong(recordingId);
     }
 
-    private AeronWriterRecoveryBoundary requestedBoundary(final ReplicationCursor cursor) {
-        if (!this.storeGeneration.equals(cursor.storeGeneration())) {
-            throw new IllegalArgumentException("retention cursor belongs to another Store generation");
+    private AeronWriterRecoveryBoundary requestedBoundary(final ReplicationPosition position) {
+        if (!this.clusterId.equals(position.clusterId()) ||
+            !this.storeGeneration.equals(position.storeGeneration()) || position.epoch() != this.writerEpoch ||
+            position.sequence() < 0L || position.recordingId() < 0L || position.prepareStartPosition() < 0L ||
+            position.fencingToken() <= 0L) {
+            throw new IllegalArgumentException("retention position identity does not match the active writer");
         }
-        try {
-            final AeronReplicationCursor requested = AeronReplicationCursor.decode(cursor.providerPositionBytes());
-            if (!requested.clusterId().equals(this.clusterId) ||
-                !requested.storeGeneration().equals(this.storeGeneration) ||
-                requested.epoch() != this.writerEpoch || requested.sequence() != cursor.logicalSequence() ||
-                requested.recordingPosition() < 0) {
-                throw new IllegalArgumentException("retention cursor identity does not match the active writer");
-            }
-            return new AeronWriterRecoveryBoundary(
-                    requested.sequence(), requested.recordingId(), requested.recordingPosition());
-        } catch (final RuntimeException failure) {
-            throw new IllegalArgumentException("retention cursor must carry a valid Aeron replication cursor", failure);
-        }
+        return new AeronWriterRecoveryBoundary(
+                position.sequence(), position.recordingId(), position.prepareStartPosition());
     }
 
     private void restoreState() {

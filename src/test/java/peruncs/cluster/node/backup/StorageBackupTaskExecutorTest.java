@@ -120,7 +120,7 @@ class StorageBackupTaskExecutorTest {
     }
 
     @Test
-    void completesBackupCallbacksOutsideTheStateMonitor() throws Exception {
+    void completesBackupCallbacksOutsideTheStateLock() throws Exception {
         final BlockingManager manager = new BlockingManager();
         try (final StorageBackupTaskExecutor executor =
                      StorageBackupTaskExecutor.create(new TestStorageConnection(), manager)) {
@@ -140,7 +140,7 @@ class StorageBackupTaskExecutorTest {
                 });
                 try {
                     if (!observed.await(1, TimeUnit.SECONDS)) {
-                        throw new AssertionError("completion callback held the backup state monitor");
+                        throw new AssertionError("completion callback held the backup state lock");
                     }
                 } catch (final InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
@@ -229,7 +229,7 @@ class StorageBackupTaskExecutorTest {
         }
     }
 
-    /// Holds a submitted task until close cancels it, then runs it to model the worker's entry race.
+    /// Holds the submitted body until close cancels its future, then invokes the body to model late worker entry.
     private static final class PausedExecutor extends AbstractExecutorService {
         private Runnable task;
         private boolean shutdown;
@@ -239,6 +239,13 @@ class StorageBackupTaskExecutorTest {
         public void execute(final Runnable command) {
             if (this.shutdown) throw new RejectedExecutionException();
             this.task = command;
+        }
+
+        @Override
+        public Future<?> submit(final Runnable command) {
+            if (this.shutdown) throw new RejectedExecutionException();
+            this.task = command;
+            return new FutureTask<>(command, null);
         }
 
         @Override

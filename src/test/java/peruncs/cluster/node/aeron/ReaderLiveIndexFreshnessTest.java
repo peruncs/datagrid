@@ -12,7 +12,7 @@ import peruncs.cluster.node.aeron.AeronStoreIntegrationIT.IndexRoot;
 import peruncs.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticle;
 import peruncs.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
 
 import java.nio.file.Files;
@@ -85,8 +85,8 @@ class ReaderLiveIndexFreshnessTest {
         try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
                         controlPort, livePort, watermarkPort))) {
-            writerTransport.positionProvider("store").init();
-            final ReplicationPublisher distributor = writerTransport.distributor("store");
+            writerTransport.positionProvider().init();
+            final ReplicationPublisher distributor = writerTransport.distributor();
             final IndexRoot initial = new IndexRoot();
             initial.articles = GigaMap.New();
             AeronStoreIntegrationIT.configureIndexes(initial.articles);
@@ -100,21 +100,19 @@ class ReaderLiveIndexFreshnessTest {
                 liveTitles.add(title);
                 liveVectors.put(title, vector);
             }
-            final EmbeddedStorageManager seeded = AeronStoreIntegrationIT.startIndex(writerStore, initial, distributor,
-                    writerTransport.persistenceTargetFactory("store", distributor));
-            seeded.storeRoot();
+            final EmbeddedStorageManager seeded = AeronStoreIntegrationIT.startIndex(
+                    writerStore, initial, distributor, writerTransport);
             seeded.shutdown();
             for (final Path readerStore : readerStores) AeronStoreIntegrationIT.copyDirectory(writerStore, readerStore);
 
-            final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(writerStore, distributor,
-                    writerTransport.persistenceTargetFactory("store", distributor));
+            final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(
+                    writerStore, distributor, writerTransport);
             final IndexRoot writerRoot = writer.root();
             try {
-                final ReplicationCursor baseline = AeronStoreIntegrationIT.latest(writerTransport);
                 final ReaderNode[] readers = new ReaderNode[readerStores.length];
                 for (int i = 0; i < readers.length; i++) {
                     readers[i] = ReaderNode.open(readerNodes[i], readerStores[i], "reader", UUID.randomUUID(),
-                            clusterId, generation, baseline, controlPort, livePort, watermarkPort);
+                            clusterId, generation, controlPort, livePort, watermarkPort);
                     readers[i].start();
                     readers[i].awaitLive();
                 }
@@ -125,7 +123,8 @@ class ReaderLiveIndexFreshnessTest {
                      * join the coordinator read side like production query
                      * endpoints, so every completed read must observe a whole
                      * batch boundary: the merger holds one write section
-                     * across materialization, validation, and index refresh.
+                     * across materialization, validation, and graph invalidation,
+                     * then warms changed graphs on the read side.
                      * Any torn read — an exception or a graph/index mismatch
                      * — fails the test. */
                     final java.util.concurrent.atomic.AtomicBoolean streaming =
@@ -176,8 +175,8 @@ class ReaderLiveIndexFreshnessTest {
                             writerRoot.articles.removeById(liveIds.remove(slot));
                             liveVectors.remove(liveTitles.remove(slot));
                         }
-                        writerRoot.articles.store();
-                        final ReplicationCursor target = AeronStoreIntegrationIT.latest(writerTransport);
+                AeronStoreIntegrationIT.store(writerTransport, writer, writerRoot.articles);
+                        final ReplicationPosition target = AeronStoreIntegrationIT.latest(writerTransport);
                         for (final ReaderNode reader : readers) reader.await(target);
                     }
                     for (final ReaderNode reader : readers) reader.assertHealthy();

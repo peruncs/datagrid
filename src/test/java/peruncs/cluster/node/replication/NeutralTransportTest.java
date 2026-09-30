@@ -16,12 +16,12 @@ class NeutralTransportTest {
     @Test
     void noOpTransportKeepsCoreUsableWithoutAnyProviderDependency() {
         final ClusterReplicationTransport transport = ClusterReplicationTransport.noOp();
-        final ReplicationPublisher distributor = transport.distributor("stream");
+        final ReplicationPublisher distributor = transport.distributor();
         distributor.messageIndex(12);
         distributor.ignoreDistribution(true);
         assertEquals(12, distributor.messageIndex());
         assertTrue(distributor.ignoreDistribution());
-        assertEquals("none", transport.id());
+        assertNull(transport.replicationMark());
         distributor.dispose();
         transport.close();
     }

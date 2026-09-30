@@ -1,7 +1,7 @@
 package peruncs.cluster.node.aeron;
 
 import org.junit.jupiter.api.Test;
-import peruncs.cluster.errors.ReplicationPositionUnavailableException;
+import peruncs.cluster.errors.internal.ReplicationPositionUnavailableException;
 
 import java.util.UUID;
 
@@ -21,7 +21,7 @@ class AeronPositionProviderTest {
 
     @Test
     void fencingFailureIsPreservedAsTheCause() {
-        final RuntimeException cause = new IllegalStateException("lease lost");
+        final RuntimeException cause = new IllegalStateException("Store mark unavailable");
         final AeronPositionProvider provider = provider(true, true, () -> {
             throw cause;
         });

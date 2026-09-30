@@ -2,13 +2,14 @@ package peruncs.cluster.storage;
 
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.errors.GraphDrainTimeoutException;
-import peruncs.cluster.storage.binary.ObjectGraphUpdateHandler;
+import peruncs.cluster.errors.GraphInvalidatedException;
 
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -132,15 +133,15 @@ class StorageGraphCoordinatorTest {
                 }));
         assertSame(boom, thrown, "the original failure must propagate to the writer");
 
-        assertInstanceOf(peruncs.cluster.errors.GraphInvalidatedException.class, coordinator.graphFailure());
+        assertInstanceOf(GraphInvalidatedException.class, coordinator.graphFailure());
         assertSame(boom, coordinator.graphFailure().getCause(), "the latched cause must name the failed update");
-        final var readFailure = assertThrows(peruncs.cluster.errors.GraphInvalidatedException.class,
+        final var readFailure = assertThrows(GraphInvalidatedException.class,
                 () -> coordinator.read(() -> {
                 }), "a coordinated read must fail closed on a torn graph");
         assertSame(boom, readFailure.getCause());
-        assertThrows(peruncs.cluster.errors.GraphInvalidatedException.class,
+        assertThrows(GraphInvalidatedException.class,
                 () -> coordinator.read(() -> 1), "supplier reads fail closed too");
-        final var writeFailure = assertThrows(peruncs.cluster.errors.GraphInvalidatedException.class,
+        final var writeFailure = assertThrows(GraphInvalidatedException.class,
                 () -> coordinator.write(() -> {
                 }), "further writes must not build on a torn graph");
         assertSame(boom, writeFailure.getCause());
@@ -201,15 +202,15 @@ class StorageGraphCoordinatorTest {
         failNow.countDown();
         writer.join(TIMEOUT.toMillis());
         reader.join(TIMEOUT.toMillis());
-        assertInstanceOf(peruncs.cluster.errors.GraphInvalidatedException.class, readOutcome.get(),
+        assertInstanceOf(GraphInvalidatedException.class, readOutcome.get(),
                 "the read queued behind the failed write must fail closed, outcome: " + readOutcome.get());
     }
 
-    /// Verifies per-store graph updates run on the write side and wait while an application read is held.
+    /// Verifies a coordinator method reference waits on the write side while an application read is held.
     @Test
-    void perStoreHandlerRunsUpdatesOnTheWriteSide() throws Exception {
+    void writeUpdaterWaitsForAnApplicationRead() throws Exception {
         final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
-        final ObjectGraphUpdateHandler handler = ObjectGraphUpdateHandler.PerStore(coordinator);
+        final Consumer<Runnable> updater = coordinator::write;
         final CountDownLatch readHeld = new CountDownLatch(1);
         final CountDownLatch readRelease = new CountDownLatch(1);
         final AtomicBoolean updateRan = new AtomicBoolean();
@@ -226,7 +227,7 @@ class StorageGraphCoordinatorTest {
         await(readHeld, "read to hold the coordinator");
 
         final Thread materialization = Thread.ofVirtual().start(() ->
-                handler.objectGraphUpdateAvailable(() -> updateRan.set(true)));
+                updater.accept(() -> updateRan.set(true)));
         materialization.join(500L);
         assertTrue(materialization.isAlive(), "materialization entered while an application read was held");
         assertFalse(updateRan.get());
@@ -235,12 +236,6 @@ class StorageGraphCoordinatorTest {
         materialization.join(TIMEOUT.toMillis());
         reader.join(TIMEOUT.toMillis());
         assertTrue(updateRan.get(), "materialization never ran after the read released");
-    }
-
-    /// Verifies creating a per-store handler with a null coordinator fails fast.
-    @Test
-    void perStoreHandlerRejectsANullCoordinator() {
-        assertThrows(NullPointerException.class, () -> ObjectGraphUpdateHandler.PerStore(null));
     }
 
         /// A guarded read never observes a half-applied multi-field update.

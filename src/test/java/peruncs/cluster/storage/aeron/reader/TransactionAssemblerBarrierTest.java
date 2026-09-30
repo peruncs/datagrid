@@ -17,21 +17,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 
-/// Contract tests for the batched delivery barrier: staging, window-size
-/// auto-flush, idle flush by the polling loop, and the delivery-listener
-/// marker opening exactly once per barrier.
+/// Contract tests for the batched delivery barrier.
 class TransactionAssemblerBarrierTest {
     private static final UUID CLUSTER = UUID.randomUUID();
     private static final long EPOCH = 17;
 
     private static TransactionAssembler assembler(final int window, final StorageBinaryDataReceiver receiver,
-                                                  final Runnable resolved, final ReaderDeliveryListener listener) {
+                                                  final Runnable resolved) {
         return TransactionAssemblerTestSupport.New(
                 AeronReplicationConfiguration.builder()
                         .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024)
                         .readerBarrierMaxTransactions(window)
                         .build(),
-                CLUSTER, EPOCH, -1L, receiver, resolved, listener);
+                CLUSTER, EPOCH, -1L, receiver, resolved);
     }
 
     private static StorageBinaryDataReceiver swallowingReceiver() {
@@ -82,7 +80,7 @@ class TransactionAssemblerBarrierTest {
             if (failCallback.getAndSet(false)) {
                 throw new IllegalStateException("transient cursor force failure");
             }
-        }, null);
+        });
 
         commitOne(assembler, 0);
         assembler.flushDeliveries();
@@ -123,49 +121,11 @@ class TransactionAssemblerBarrierTest {
         }
     }
 
-    /// Transactions under the window stay staged until an explicit flush.
-    @Test
-    void stagedTransactionsPublishOnlyOnFlush() {
-        final AtomicInteger resolved = new AtomicInteger();
-        final AtomicInteger before = new AtomicInteger();
-        final AtomicInteger after = new AtomicInteger();
-        final TransactionAssembler assembler = assembler(4, swallowingReceiver(), resolved::incrementAndGet,
-                new ReaderDeliveryListener() {
-                    @Override
-                    public void beforeStoreImport(final long sequence, final long position, final int dataLength,
-                                                  final int dataChunkCount, final int crc32c) {
-                        before.incrementAndGet();
-                    }
-
-                    @Override
-                    public void afterStoreImport() {
-                        after.incrementAndGet();
-                    }
-                });
-
-        commitOne(assembler, 0);
-        commitOne(assembler, 1);
-        commitOne(assembler, 2);
-        assertEquals(-1, assembler.lastResolvedSequence(), "staged transactions must not resolve early");
-        assertEquals(3, assembler.unflushedDeliveryCount());
-        assertEquals(1, before.get(), "the barrier opens exactly one uncertainty marker");
-        assertEquals(0, after.get(), "the marker stays open until the barrier flushes");
-        assertEquals(0, resolved.get(), "no resolved callback before the flush");
-
-        assembler.flushDeliveries();
-        assertEquals(2, assembler.lastResolvedSequence());
-        assertEquals(2, assembler.lastAppliedSequence());
-        assertEquals(0, assembler.unflushedDeliveryCount());
-        assertEquals(1, resolved.get(), "one durable callback represents the barrier tail");
-        assertEquals(1, before.get());
-        assertEquals(1, after.get());
-    }
-
     /// A full window reports full, and the reader loop's flush publishes it.
     @Test
     void fullWindowFlushesFromTheReaderLoop() {
         final AtomicInteger resolved = new AtomicInteger();
-        final TransactionAssembler assembler = assembler(4, swallowingReceiver(), resolved::incrementAndGet, null);
+        final TransactionAssembler assembler = assembler(4, swallowingReceiver(), resolved::incrementAndGet);
 
         commitOne(assembler, 0);
         commitOne(assembler, 1);
@@ -183,11 +143,40 @@ class TransactionAssemblerBarrierTest {
         assertEquals(0, assembler.unflushedDeliveryCount());
     }
 
+    @Test
+    void backpressuredDeliveryIsRetriedAfterThePollCallbackReturns() {
+        final AtomicInteger dataCalls = new AtomicInteger();
+        final StorageBinaryDataReceiver receiver = new StorageBinaryDataReceiver() {
+            @Override
+            public boolean canAcceptOwnedData(final long payloadBytes) {
+                return false;
+            }
+
+            @Override
+            public void receiveData(final Binary value) {
+                dataCalls.incrementAndGet();
+            }
+
+            @Override
+            public void receiveTypeDictionary(final String value) {
+            }
+        };
+        final TransactionAssembler assembler = assembler(4, receiver, () -> { });
+
+        commitOne(assembler, 0);
+        assertEquals(0, dataCalls.get(), "a poll callback must not wait on receiver backpressure");
+        assertTrue(assembler.deliveryBarrierFull(), "the reader must stop polling for the pending delivery");
+
+        assembler.flushDeliveries();
+        assertEquals(1, dataCalls.get(), "the reader loop retries the retained delivery outside controlledPoll");
+        assertEquals(0L, assembler.lastResolvedSequence());
+    }
+
     /// A latched failure makes the flush a no-op and the barrier stays unflushed.
     @Test
     void latchedFailureSkipsFlush() {
         final AtomicInteger resolved = new AtomicInteger();
-        final TransactionAssembler assembler = assembler(4, swallowingReceiver(), resolved::incrementAndGet, null);
+        final TransactionAssembler assembler = assembler(4, swallowingReceiver(), resolved::incrementAndGet);
 
         commitOne(assembler, 0);
         assembler.failure(new IllegalStateException("driver stopped"));
@@ -210,7 +199,7 @@ class TransactionAssemblerBarrierTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024)
                 .readerBarrierMaxTransactions(4).build();
-        final TransactionAssembler assembler = new TransactionAssembler(
+        final TransactionAssembler assembler = new TransactionAssembler(new TransactionAssembler.Configuration(
                 configuration, CLUSTER, EPOCH, -1L, -1L, swallowingReceiver(), ignored -> {
                     entered.countDown();
                     try {
@@ -220,8 +209,7 @@ class TransactionAssemblerBarrierTest {
                         throw new AssertionError(interrupted);
                     }
                     throw failure;
-                }, null, AeronReplicationEnvelope.defaultWireNonce(CLUSTER),
-                TransactionAssembler.CommitDurabilityGate.ALWAYS);
+                }, AeronReplicationEnvelope.defaultWireNonce(CLUSTER)));
         commitOne(assembler, 0L);
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             final var flush = executor.submit(assembler::flushDeliveries);

@@ -1,7 +1,9 @@
 package peruncs.cluster.node;
 
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.errors.NodeException;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -74,11 +76,11 @@ class CloseSequencerTest {
     void checkedStageFailureIsReported() {
         final CloseSequencer sequencer = new CloseSequencer(List.of(
                 CloseSequencer.stage("checked", () -> true, () -> {
-                    throw new java.io.IOException("checked failure");
+                    throw new IOException("checked failure");
                 })));
         final Throwable failure = sequencer.close();
-        assertInstanceOf(peruncs.cluster.errors.NodeException.class, failure);
-        assertInstanceOf(java.io.IOException.class, failure.getCause());
+        assertInstanceOf(NodeException.class, failure);
+        assertInstanceOf(IOException.class, failure.getCause());
     }
 
         /// An Error thrown by a later stage must win over a RuntimeException
@@ -98,7 +100,7 @@ class CloseSequencerTest {
         assertSame(fatal, failure, "the Error must win over the earlier RuntimeException");
         assertSame(fatal, failure);
         assertEquals(2, failure.getSuppressed().length);
-        assertInstanceOf(peruncs.cluster.errors.NodeException.class, failure.getSuppressed()[0]);
+        assertInstanceOf(NodeException.class, failure.getSuppressed()[0]);
         assertEquals("Close stage 'fatal' failed", failure.getSuppressed()[0].getMessage());
         assertEquals("Close stage 'runtime' failed", failure.getSuppressed()[1].getMessage());
         assertEquals("stage one failed", failure.getSuppressed()[1].getCause().getMessage());

@@ -4,10 +4,10 @@ import io.aeron.archive.client.ArchiveException;
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.node.replication.ReplicationLogRetention;
-import peruncs.cluster.storage.ReplicationCursor;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
+import peruncs.cluster.storage.aeron.position.AeronReaderWatermark;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -81,11 +81,9 @@ class AeronArchiveRetentionTest {
                 CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, null, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
     }
 
-    /* A live writer behind its terminal checkpoint: the Archive has durably
-     * recorded up to `recordedPosition` while the checkpoint file still names
-     * sequence 4 at position 8192, as happens between the commit's Archive
-     * acknowledgement and the checkpoint fsync on a continuously appending
-     * writer. */
+    /* Model an Archive ahead of the writer Store mark: the Archive has
+     * recorded through `recordedPosition` while the mark still names sequence
+     * 4 at position 8192. */
     private static AeronArchiveRetention retentionWithRecordedPosition(final long recordedPosition) {
         return retentionWithRecordedPosition(recordedPosition, ignored -> 0L);
     }
@@ -101,14 +99,18 @@ class AeronArchiveRetentionTest {
                 AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
     }
 
-    private static ReplicationCursor deletionCursor(final long position) {
-        return ReplicationCursor.of("aeron", GENERATION, 4, new AeronReplicationCursor(
-                CLUSTER, UUID.randomUUID(), GENERATION, 1, 3, 17, position, 4).encode());
+    private static ReplicationPosition deletionCursor(final long position) {
+        return new ReplicationPosition(CLUSTER, GENERATION, 1L, 17L, 4L, position, 3L, UUID.randomUUID());
     }
 
-    private static ReplicationCursor cursor(final UUID reader) {
-        return ReplicationCursor.of("aeron", GENERATION, 4, AeronReaderWatermark.of(
-                reader, CLUSTER, GENERATION, 1, 17, 4, 4_096).encode());
+    private static ReplicationPosition cursor(final UUID reader) {
+        return new ReplicationPosition(CLUSTER, GENERATION, 1L, 17L, 4L, 4_096L, 1L, reader);
+    }
+
+    private static ReplicationPosition position(final AeronReaderWatermark watermark) {
+        return new ReplicationPosition(watermark.clusterId(), watermark.storeGeneration(),
+                watermark.writerEpoch(), watermark.recordingId(), watermark.sequence(),
+                watermark.position(), 1L, watermark.readerId());
     }
 
     /// A queued watermark remains owned by retention after a temporary writer
@@ -189,7 +191,7 @@ class AeronArchiveRetentionTest {
         final AtomicBoolean started = new AtomicBoolean();
         final AeronArchiveRetention retention = retention(() -> started.set(true));
         assertThrows(IllegalArgumentException.class, () -> retention.recordReaderWatermark(
-                new ReplicationCursor("aeron", GENERATION, 1, "010203")));
+                new ReplicationPosition(UUID.randomUUID(), GENERATION, 1L, 17L, 4L, 4_096L, 1L, READER)));
         assertFalse(started.get(), "identity checks must precede lazy writer startup");
         retention.close();
     }
@@ -213,7 +215,7 @@ class AeronArchiveRetentionTest {
         });
         final AeronReaderWatermark watermark = AeronReaderWatermark.of(
                 READER, CLUSTER, GENERATION, 1, 17, 4, 4_096);
-        retention.recordReaderWatermark(ReplicationCursor.of("aeron", GENERATION, 4, watermark.encode()));
+        retention.recordReaderWatermark(position(watermark));
         assertTrue(retention.isSupported());
         retention.close();
     }
@@ -231,6 +233,26 @@ class AeronArchiveRetentionTest {
                     READER, CLUSTER, GENERATION, 1, 17, 3, 4_096)));
             assertTrue(retention.isSupported(), "stale queued progress must not replace a newer quorum token");
             assertNull(retention.failure(), "superseded progress must not be retained as a retryable failure");
+        }
+    }
+
+    /// Conflicting or non-advancing boundaries cannot replace accepted reader progress.
+    @Test
+    void conflictingWatermarksPreserveTheAcceptedBoundary() {
+        try (final AeronArchiveRetention retention = retention(() -> { })) {
+            retention.recordReaderWatermark(AeronReaderWatermark.of(
+                    READER, CLUSTER, GENERATION, 1, 17, 3, 4_096));
+            assertThrows(IllegalArgumentException.class, () -> retention.recordReaderWatermark(
+                    AeronReaderWatermark.of(READER, CLUSTER, GENERATION, 1, 17, 4, 4_096)),
+                    "a later sequence must advance the Archive position");
+
+            retention.recordReaderWatermark(AeronReaderWatermark.of(
+                    READER, CLUSTER, GENERATION, 1, 17, 4, 8_192));
+            assertThrows(IllegalArgumentException.class, () -> retention.recordReaderWatermark(
+                    AeronReaderWatermark.of(READER, CLUSTER, GENERATION, 1, 17, 4, 4_096)),
+                    "one sequence cannot name two Archive positions");
+            assertTrue(retention.isSupported());
+            assertNull(retention.failure());
         }
     }
 
@@ -267,11 +289,11 @@ class AeronArchiveRetentionTest {
         });
         final AeronReaderWatermark watermark = AeronReaderWatermark.of(
                 READER, CLUSTER, GENERATION, 1, 17, 4, 4_096);
-        retention.recordReaderWatermark(ReplicationCursor.of("aeron", GENERATION, 4, watermark.encode()));
-        final byte[] ordinaryPosition = new AeronReplicationCursor(
-                CLUSTER, UUID.randomUUID(), GENERATION, 1, 3, 17, 4_096, 4).encode();
+        retention.recordReaderWatermark(position(watermark));
+        final ReplicationPosition ordinaryPosition =
+                new ReplicationPosition(CLUSTER, GENERATION, 1L, 17L, 4L, 4_096L, 3L, UUID.randomUUID());
         final IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> retention.deleteThrough(ReplicationCursor.of("aeron", GENERATION, 4, ordinaryPosition)));
+                () -> retention.deleteThrough(ordinaryPosition));
         assertEquals("Aeron Archive is not running", failure.getMessage());
         retention.close();
     }
@@ -306,17 +328,16 @@ class AeronArchiveRetentionTest {
         final ReplicationUnavailableException failure = assertThrows(ReplicationUnavailableException.class,
                 () -> retention.deleteThrough(deletionCursor(acknowledgedPosition)));
         assertInstanceOf(ArchiveException.class, failure.getCause());
-        assertEquals(ArchiveException.GENERIC, failure.errorCode());
         retention.close();
     }
 
     /// Reproduces the soak finding: a truthful watermark that resolves a commit
     /// from the live stream while the writer is still between the commit's
-    /// Archive acknowledgement and the checkpoint fsync names a sequence and
-    /// position the terminal checkpoint has not reached yet. It is admissible
+    /// Archive acknowledgement and Store-mark publication can briefly leave a
+    /// reader watermark beyond the writer mark. It is admissible
     /// because every byte it claims is already durably recorded in the Archive.
     @Test
-    void watermarkWithinRecordedPositionAheadOfTerminalCheckpointIsAccepted() {
+    void watermarkWithinRecordedPositionAheadOfWriterMarkIsAccepted() {
         final AeronArchiveRetention retention = retentionWithRecordedPosition(16L * 1_024 * 1_024);
         retention.recordReaderWatermark(AeronReaderWatermark.of(
                 READER, CLUSTER, GENERATION, 1, 17, 5, 12_288));
@@ -325,10 +346,10 @@ class AeronArchiveRetentionTest {
         retention.close();
     }
 
-    /// Verifies retention through a boundary beyond the terminal checkpoint is
+    /// Verifies retention through a boundary beyond the writer Store mark is
     /// authorized by the recorded Archive position and purges full segments.
     @Test
-    void deletionAheadOfTerminalCheckpointUsesTheRecordedPosition() {
+    void deletionAheadOfWriterMarkUsesTheRecordedPosition() {
         final long purged = 8L * 1_024 * 1_024;
         final AtomicReference<Long> purgedAt = new AtomicReference<>();
         final AeronArchiveRetention retention = retentionWithRecordedPosition(16L * 1_024 * 1_024, boundary -> {
@@ -337,10 +358,10 @@ class AeronArchiveRetentionTest {
         });
         retention.recordReaderWatermark(AeronReaderWatermark.of(
                 READER, CLUSTER, GENERATION, 1, 17, 5, 9L * 1_024 * 1_024));
-        final byte[] requestedPosition = new AeronReplicationCursor(
-                CLUSTER, UUID.randomUUID(), GENERATION, 1, 3, 17, 9L * 1_024 * 1_024, 5).encode();
+        final ReplicationPosition requestedPosition = new ReplicationPosition(
+                CLUSTER, GENERATION, 1L, 17L, 5L, 9L * 1_024 * 1_024, 3L, UUID.randomUUID());
         final ReplicationLogRetention.MaintenanceResult result =
-                retention.deleteThrough(ReplicationCursor.of("aeron", GENERATION, 5, requestedPosition));
+                retention.deleteThrough(requestedPosition);
         assertEquals(ReplicationLogRetention.MaintenanceResult.Status.DELETED, result.status(),
                 "the quorum minimum position 9MiB crosses exactly one complete 8MiB segment");
         assertEquals(purged, purgedAt.get(),
@@ -382,7 +403,7 @@ class AeronArchiveRetentionTest {
     }
 
     /// Verifies a fabricated future sequence without new Archive bytes stays rejected:
-    /// progress past the terminal checkpoint must occupy bytes beyond it.
+    /// progress past the writer mark must occupy bytes beyond it.
     @Test
     void fabricatedFutureSequenceWithoutNewBytesIsRejected() {
         final AeronArchiveRetention retention = retentionWithRecordedPosition(16L * 1_024 * 1_024);
@@ -414,8 +435,7 @@ class AeronArchiveRetentionTest {
         });
         final AeronReaderWatermark watermark = AeronReaderWatermark.of(
                 READER, CLUSTER, GENERATION, 1, 17, 5, 4_096);
-        assertThrows(IllegalStateException.class, () -> retention.recordReaderWatermark(
-                ReplicationCursor.of("aeron", GENERATION, 5, watermark.encode())));
+        assertThrows(IllegalStateException.class, () -> retention.recordReaderWatermark(position(watermark)));
         assertFalse(retention.isSupported(), "an acknowledgement beyond the writer boundary must not complete quorum");
         retention.close();
     }
@@ -428,7 +448,7 @@ class AeronArchiveRetentionTest {
             Files.deleteIfExists(state);
             final AeronReaderWatermark watermark = AeronReaderWatermark.of(
                     READER, CLUSTER, GENERATION, 1, 17, 4, 4_096);
-            final ReplicationCursor cursor = ReplicationCursor.of("aeron", GENERATION, 4, watermark.encode());
+            final ReplicationPosition cursor = position(watermark);
             final AeronArchiveRetention first = retention(() -> {
             }, state);
             first.recordReaderWatermark(cursor);
@@ -453,7 +473,7 @@ class AeronArchiveRetentionTest {
             }, state);
             final IllegalStateException failure = assertThrows(IllegalStateException.class,
                     retention::isSupported);
-            assertInstanceOf(java.io.IOException.class, failure.getCause());
+            assertInstanceOf(IOException.class, failure.getCause());
             assertEquals("unsupported retention state version", failure.getCause().getMessage());
             retention.close();
         } finally {
@@ -501,8 +521,8 @@ class AeronArchiveRetentionTest {
                     ignored -> 0L,
                     CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
             first.retireReader(secondReader);
-            first.recordReaderWatermark(ReplicationCursor.of("aeron", GENERATION, 4,
-                    AeronReaderWatermark.of(READER, CLUSTER, GENERATION, 1, 17, 4, 4_096).encode()));
+            first.recordReaderWatermark(position(
+                    AeronReaderWatermark.of(READER, CLUSTER, GENERATION, 1, 17, 4, 4_096)));
             assertTrue(first.isSupported());
             first.close();
 
@@ -512,9 +532,8 @@ class AeronArchiveRetentionTest {
                     ignored -> 0L,
                     CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608, () -> true, state, AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
             assertTrue(restarted.isSupported());
-            assertThrows(IllegalArgumentException.class, () -> restarted.recordReaderWatermark(ReplicationCursor.of(
-                    "aeron", GENERATION, 4, AeronReaderWatermark.of(
-                    secondReader, CLUSTER, GENERATION, 1, 17, 4, 4_096).encode())));
+            assertThrows(IllegalArgumentException.class, () -> restarted.recordReaderWatermark(position(
+                    AeronReaderWatermark.of(secondReader, CLUSTER, GENERATION, 1, 17, 4, 4_096))));
             restarted.close();
         } finally {
             Files.deleteIfExists(state);

@@ -5,7 +5,6 @@ import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.errors.CorruptReplicationDataException;
-import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelopeTestSupport;
@@ -73,14 +72,14 @@ class TransactionAssemblerFailureTest {
     }
 
     @Test
-    void staleWriterTokenIsTypedAsReseedRequired() {
+    void staleWriterTokenIsTypedAsCorruptData() {
         final TransactionAssembler assembler = assembler(emptyReceiver());
         assembler.startingFencingToken(2L);
         try {
             final byte[] frame = AeronReplicationEnvelopeTestSupport.encode(
                     CLUSTER, EPOCH, 1L, 0, AeronReplicationEnvelope.Kind.STORE_BINARY,
                     1, 0, 1, 0, 0, new byte[]{1});
-            assertThrows(ReseedRequiredException.class, () -> accept(assembler, frame));
+            assertThrows(CorruptReplicationDataException.class, () -> accept(assembler, frame));
         } finally {
             assembler.dispose();
         }
@@ -275,7 +274,12 @@ class TransactionAssemblerFailureTest {
     /// Proves a zero wire nonce is rejected by the canonical constructor.
     @Test
     void zeroWireNonceIsRejectedByTheCanonicalConstructor() {
-        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1)                .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .readerBarrierMaxTransactions(1)
+                .termLength(64 * 1024)
+                .chunkSize(256)
+                .maxTransactionBytes(1024)
+                .build();
         final StorageBinaryDataReceiver receiver = new StorageBinaryDataReceiver() {
             @Override
             public void receiveData(final Binary value) {
@@ -286,7 +290,7 @@ class TransactionAssemblerFailureTest {
             }
         };
         assertThrows(IllegalArgumentException.class, () -> new TransactionAssembler(
-                configuration, CLUSTER, EPOCH, -1, -1, receiver, ignored -> {
-        }, null, 0L, TransactionAssembler.CommitDurabilityGate.ALWAYS));
+                new TransactionAssembler.Configuration(configuration, CLUSTER, EPOCH, -1, -1,
+                        receiver, ignored -> { }, 0L)));
     }
 }

@@ -13,7 +13,6 @@ import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.*;
-import java.util.function.BiConsumer;
 
 import static java.lang.System.Logger.Level.WARNING;
 
@@ -29,86 +28,22 @@ import static java.lang.System.Logger.Level.WARNING;
 /// `/var`, and `/etc`, which require root privileges to create and are
 /// otherwise ubiquitous.
 public final class AtomicFileWriter {
-        /// Selects the metadata family whose crash-test hook names are emitted.
-    public enum Phase {
-        CHECKPOINT,
-        CURSOR
-    }
-
     private static final Logger LOGGER = System.getLogger(AtomicFileWriter.class.getName());
     private static final boolean WINDOWS = System.getProperty("os.name", "")
             .toLowerCase(Locale.ROOT).startsWith("windows");
     private static final boolean MAC_OS = System.getProperty("os.name", "")
             .toLowerCase(Locale.ROOT).contains("mac");
-    private static final ScopedValue<BiConsumer<String, Path>> TEST_HOOK = ScopedValue.newInstance();
     private static final FileAttribute<Set<PosixFilePermission>> OWNER_ONLY = PosixFilePermissions.asFileAttribute(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
 
     private AtomicFileWriter() {
     }
 
-        /// Runs file operations with a crash-test hook bound to their dynamic scope.
-    static void runWithTestHook(final BiConsumer<String, Path> hook, final Runnable action) {
-        Objects.requireNonNull(hook, "hook");
-        Objects.requireNonNull(action, "action");
-        ScopedValue.where(TEST_HOOK, hook).run(action);
-    }
-
-        /// Calls a file operation with a crash-test hook bound to its scope.
-    static <T, X extends Throwable> T callWithTestHook(
-            final BiConsumer<String, Path> hook,
-            final ScopedValue.CallableOp<? extends T, X> operation
-    ) throws X {
-        Objects.requireNonNull(hook, "hook");
-        Objects.requireNonNull(operation, "operation");
-        return ScopedValue.where(TEST_HOOK, hook).call(operation);
-    }
-
-    static Runnable inheritCurrentTestHook(final Runnable action) {
-        Objects.requireNonNull(action, "action");
-        final BiConsumer<String, Path> hook = TEST_HOOK.isBound() ? TEST_HOOK.get() : null;
-        return hook == null ? action : () -> ScopedValue.where(TEST_HOOK, hook).run(action);
-    }
-
-    private static void testPoint(final String phase, final Path path) {
-        final BiConsumer<String, Path> hook = TEST_HOOK.isBound() ? TEST_HOOK.get() : null;
-        if (hook != null) hook.accept(phase, path);
-    }
-
-        /// Writes a file through a forced sibling temporary file and replacement.
-    ///
-    /// The `phase` parameter selects the crash-test hook names.
-    /// When `null` the generic names `BEFORE_TEMP_WRITE`,
-    /// `DURING_FILE_WRITE`, `AFTER_TEMP_WRITE_BEFORE_RENAME`,
-    /// and `AFTER_RENAME_BEFORE_DIRECTORY_SYNC` are used. Checkpoint
-    /// and cursor stores pass [Phase#CHECKPOINT] or [Phase#CURSOR].
+    /// Writes a file through a forced sibling temporary file and replacement.
     ///
     /// @param path    destination path
     /// @param encoder callback that writes the complete encoded contents
-    /// @param phase   metadata family, or `null` for generic names
     /// @throws IOException if writing or replacement fails
-    public static void write(final Path path, final Encoder encoder, final Phase phase) throws IOException {
-        /* The crash-test hook names are formatted only when a hook is bound:
-         * every production write runs with no hook, and the formatted phase
-         * names cost four string allocations per metadata write otherwise. */
-        if (!TEST_HOOK.isBound()) {
-            write(path, encoder, null, null, null, null);
-            return;
-        }
-        final String phaseName = phase == null ? null : phase.name();
-        final String beforePhase = phaseName != null ? "BEFORE_%s_TEMP_WRITE".formatted(phaseName) : "BEFORE_TEMP_WRITE";
-        final String duringPhase = phaseName != null ? "DURING_%s_FILE_WRITE".formatted(phaseName) : "DURING_FILE_WRITE";
-        final String afterTempPhase = phaseName != null
-                ? "AFTER_%s_TEMP_WRITE_BEFORE_RENAME".formatted(phaseName)
-                : "AFTER_TEMP_WRITE_BEFORE_RENAME";
-        final String afterRenamePhase = phaseName != null
-                ? "AFTER_%s_RENAME_BEFORE_DIRECTORY_SYNC".formatted(phaseName)
-                : "AFTER_RENAME_BEFORE_DIRECTORY_SYNC";
-        write(path, encoder, beforePhase, duringPhase, afterTempPhase, afterRenamePhase);
-    }
-
-    private static void write(final Path path, final Encoder encoder,
-                              final String beforePhase, final String duringPhase,
-                              final String afterTempPhase, final String afterRenamePhase) throws IOException {
+    public static void write(final Path path, final Encoder encoder) throws IOException {
         final Path absolute = path.toAbsolutePath();
         final Path parent = absolute.getParent();
         if (parent == null) {
@@ -129,19 +64,19 @@ public final class AtomicFileWriter {
             throw new IOException("Failed to create replication metadata temp file " + absolute, failure);
         }
         try {
-            testPoint(beforePhase, absolute);
+            FaultInjection.invoke("BEFORE_TEMP_WRITE", absolute);
             try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)) {
-                testPoint(duringPhase, absolute);
+                FaultInjection.invoke("DURING_FILE_WRITE", absolute);
                 encoder.write(channel);
                 channel.force(true);
             }
-            testPoint(afterTempPhase, absolute);
+            FaultInjection.invoke("AFTER_TEMP_WRITE_BEFORE_RENAME", absolute);
             try {
                 Files.move(temporary, absolute, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (final AtomicMoveNotSupportedException failure) {
                 throw new IOException("Atomic replacement is unavailable for replication metadata %s".formatted(absolute), failure);
             }
-            testPoint(afterRenamePhase, absolute);
+            FaultInjection.invoke("AFTER_RENAME_BEFORE_DIRECTORY_SYNC", absolute);
             forceDirectory(parent);
         } finally {
             try {
@@ -158,17 +93,7 @@ public final class AtomicFileWriter {
                 ? new FileAttribute<?>[]{OWNER_ONLY} : new FileAttribute<?>[0];
     }
 
-        /// Writes a file through a forced sibling temporary file and replacement.
-    /// Uses generic phase names for the crash-test hook.
-    ///
-    /// @param path    destination path
-    /// @param encoder callback that writes the complete encoded contents
-    /// @throws IOException if writing or replacement fails
-    public static void write(final Path path, final Encoder encoder) throws IOException {
-        write(path, encoder, null);
-    }
-
-        /// Writes raw bytes through the atomic replacement protocol.
+    /// Writes raw bytes through the atomic replacement protocol.
     ///
     /// @param path  destination path
     /// @param bytes complete file contents
@@ -178,7 +103,7 @@ public final class AtomicFileWriter {
         write(path, channel -> writeFully(channel, ByteBuffer.wrap(bytes)));
     }
 
-        /// Verifies that the directory containing `path` supports the complete
+    /// Verifies that the directory containing `path` supports the complete
     /// atomic metadata protocol without changing the target file.
     ///
     /// @param path representative metadata path
@@ -217,9 +142,9 @@ public final class AtomicFileWriter {
         }
     }
 
-        /// Deletes a metadata file and forces the parent directory when the file was
+    /// Deletes a metadata file and forces the parent directory when the file was
     /// present. This is used for short-lived in-flight recovery records: removing
-    /// the record must be durable just like replacing the terminal checkpoint.
+    /// the record must be durable just like replacing the replication boundary.
     ///
     /// @param path file to remove
     /// @throws IOException if the file or its parent directory cannot be synced
@@ -227,11 +152,11 @@ public final class AtomicFileWriter {
         delete(path, true);
     }
 
-        /// Deletes a metadata file and optionally forces its parent directory.
+    /// Deletes a metadata file and optionally forces its parent directory.
     ///
     /// Callers may omit the directory force only for fail-closed markers whose
     /// stale presence is safe after a crash. A stale marker causes reseeding; it
-    /// must never make an uncheckpointed Store import appear durable.
+    /// must never make an unmarked Store import appear durable.
     ///
     /// # Threat model
     ///
@@ -405,7 +330,7 @@ public final class AtomicFileWriter {
             previousMoved = true;
             forceDirectory(parent);
             Files.move(absoluteSource, absoluteDestination, StandardCopyOption.ATOMIC_MOVE);
-            testPoint("AFTER_STORAGE_RENAME_BEFORE_DIRECTORY_SYNC", absoluteDestination);
+            FaultInjection.invoke("AFTER_STORAGE_RENAME_BEFORE_DIRECTORY_SYNC", absoluteDestination);
             ensureNoSymbolicLinks(absoluteDestination);
             if (!sourceFileKey.equals(stableFileKey(absoluteDestination))) {
                 throw new IOException("Installed Store does not match its staged source");
@@ -504,7 +429,7 @@ public final class AtomicFileWriter {
         final Path parent = path.getParent();
         final Object parentKey = parent == null ? null : stableFileKey(parent);
         final boolean deleted = Files.deleteIfExists(path);
-        if (deleted) testPoint("AFTER_REGULAR_DELETE", path);
+        if (deleted) FaultInjection.invoke("AFTER_REGULAR_DELETE", path);
         if (parentKey != null && !parentKey.equals(stableFileKey(parent))) {
             throw new IOException("Parent directory changed while deleting %s".formatted(path));
         }
@@ -512,7 +437,7 @@ public final class AtomicFileWriter {
             try {
                 final BasicFileAttributes replacement = Files.readAttributes(
                         path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-                /* A checkpoint rewrite may legitimately create a new file at
+                /* A metadata rewrite may legitimately create a new file at
                  * this path while cleanup races it. Only the same file identity
                  * proves the original entry survived the delete. */
                 if (original.fileKey().equals(replacement.fileKey())) {

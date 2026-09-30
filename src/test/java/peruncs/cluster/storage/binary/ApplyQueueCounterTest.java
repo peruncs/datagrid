@@ -9,6 +9,7 @@ import java.nio.ByteBuffer;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -41,9 +42,9 @@ class ApplyQueueCounterTest {
     private record ParkedHandler(
             CountDownLatch entered,
             CountDownLatch release,
-            AtomicReference<Runnable> updaterSeen) implements ObjectGraphUpdateHandler {
+            AtomicReference<Runnable> updaterSeen) implements Consumer<Runnable> {
         @Override
-        public void objectGraphUpdateAvailable(final Runnable updater) {
+        public void accept(final Runnable updater) {
             this.updaterSeen.set(updater);
             this.entered.countDown();
             try {
@@ -51,6 +52,26 @@ class ApplyQueueCounterTest {
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             }
+        }
+    }
+
+    @Test
+    void pollAdmissionCheckDefersOnlyDeliveriesThatWouldWait() {
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(
+                StorageBinaryDataMergerTestSupport.configuration(
+                        StorageBinaryDataMergerTestSupport.foundation(),
+                        StorageBinaryDataMergerTestSupport.connection(),
+                        ignored -> { },
+                        COALESCING_TIMEOUT_MS,
+                        SOFT_LIMIT_BYTES,
+                        60_000L));
+        try {
+            merger.receiveData(binary(2, Long.BYTES));
+            assertTrue(merger.canAcceptOwnedData(SOFT_LIMIT_BYTES - 16L));
+            assertFalse(merger.canAcceptOwnedData(SOFT_LIMIT_BYTES - 15L));
+            assertEquals(16L, merger.queuedBytes());
+        } finally {
+            merger.dispose();
         }
     }
 

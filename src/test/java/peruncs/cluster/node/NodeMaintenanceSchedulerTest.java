@@ -3,6 +3,7 @@ package peruncs.cluster.node;
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.api.BackupInfo;
 import peruncs.cluster.api.BackupSlot;
+import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.errors.BackupBusyException;
 import peruncs.cluster.node.backup.StorageBackupTaskExecutor;
 import peruncs.cluster.node.store.StorageLimitGate;
@@ -248,7 +249,7 @@ class NodeMaintenanceSchedulerTest {
             housekeeper.start();
             awaitCondition(() -> housekeeper.failure() != null, 10_000L,
                     "repeated failures must degrade health");
-            assertTrue(runs.get() >= NodeMaintenanceScheduler.FAILURE_THRESHOLD,
+            assertTrue(runs.get() >= NodeConfig.Operations.DEFAULT.maintenanceFailureThreshold(),
                     "degradation must require the documented threshold, saw %s".formatted(runs.get()));
             degradedObserved.set(true);
             awaitCondition(() -> housekeeper.failure() == null, 10_000L,

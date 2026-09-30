@@ -9,7 +9,7 @@ class StorageLimitGateTest {
         /// Usage must fall below the hysteresis release point before writes reopen.
     @Test
     void releasesOnlyAfterUsageLeavesHysteresisBand() {
-        final StorageLimitGate gate = StorageLimitGate.create(10);
+        final StorageLimitGate gate = StorageLimitGate.create(10_000_000_000L);
 
         gate.updateUsage(10_000_000_000L);
         assertTrue(gate.limitReached());
@@ -24,7 +24,7 @@ class StorageLimitGateTest {
     /// An unknown first measurement fails closed, then a real low measurement opens the gate.
     @Test
     void startsClosedUntilFirstMeasurement() {
-        final StorageLimitGate gate = StorageLimitGate.create(10);
+        final StorageLimitGate gate = StorageLimitGate.create(10_000_000_000L);
         assertTrue(gate.limitReached());
 
         gate.updateUsage(0L);
@@ -34,7 +34,7 @@ class StorageLimitGateTest {
         /// Usage below the limit never trips the gate.
     @Test
     void ignoresUsageBelowLimit() {
-        final StorageLimitGate gate = StorageLimitGate.create(10);
+        final StorageLimitGate gate = StorageLimitGate.create(10_000_000_000L);
 
         gate.updateUsage(9_999_999_999L);
 
@@ -43,7 +43,7 @@ class StorageLimitGateTest {
 
     @Test
     void unknownUsageStaysClosedUntilARealMeasurementArrives() {
-        final StorageLimitGate gate = StorageLimitGate.create(10);
+        final StorageLimitGate gate = StorageLimitGate.create(10_000_000_000L);
         gate.updateUsage(-1L);
         assertTrue(gate.limitReached());
 
@@ -54,9 +54,9 @@ class StorageLimitGateTest {
         /// The gate exposes its configured limit for log messages.
     @Test
     void exposesConfiguredLimit() {
-        final StorageLimitGate gate = StorageLimitGate.create(10);
+        final StorageLimitGate gate = StorageLimitGate.create(10_000_000_000L);
 
-        assertEquals(10, gate.limitGb());
+        assertEquals(10L, gate.limitGb());
         assertEquals(10_000_000_000L, gate.limitBytes());
     }
 

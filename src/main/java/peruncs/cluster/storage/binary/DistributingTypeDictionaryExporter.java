@@ -45,8 +45,6 @@ public final class DistributingTypeDictionaryExporter implements PersistenceType
     @Override
     public void exportTypeDictionary(final PersistenceTypeDictionary typeDictionary) {
         this.delegate.exportTypeDictionary(typeDictionary);
-        this.distributor.distributeTypeDictionary(
-                this.assembler.assemble(typeDictionary)
-        );
+        this.distributor.distributeTypeDictionary(this.assembler.assemble(typeDictionary));
     }
 }

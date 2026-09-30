@@ -1,7 +1,6 @@
 package peruncs.cluster.node.aeron;
 
 import io.aeron.archive.client.ArchiveEvent;
-import io.aeron.archive.client.ArchiveException;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -31,13 +30,6 @@ class AeronControlWarningTest {
                 new ArchiveEvent("ERROR - some unrelated archive warning")));
         assertFalse(AeronArchiveFailures.terminalControlResponseWarning(
                 new IllegalStateException(AERON_1_53_CONTROL_RESPONSE_DISCONNECTED)));
-    }
-
-    @Test
-    void unavailableArchiveFailureCanBeNestedWithoutMatchingUnrelatedMessages() {
-        assertTrue(AeronArchiveFailures.unavailable(new IllegalStateException("writer failed",
-                new ArchiveException("archive failed", ArchiveException.GENERIC))));
-        assertFalse(AeronArchiveFailures.unavailable(new IllegalStateException("unrelated failure")));
     }
 
     @Test

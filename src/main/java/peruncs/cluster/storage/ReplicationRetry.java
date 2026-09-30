@@ -1,6 +1,6 @@
 package peruncs.cluster.storage;
 
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.Random;
 import java.util.function.LongSupplier;
 
 /// Monotonic-clock helpers shared by bounded transport retry loops.
@@ -13,6 +13,8 @@ import java.util.function.LongSupplier;
 /// The clock-taking overloads exist for deterministic tests: production loops
 /// pass [System#nanoTime] (directly or through the single-clock methods).
 public final class ReplicationRetry {
+    private static final Random JITTER = new Random();
+
     private ReplicationRetry() {
     }
 
@@ -108,6 +110,6 @@ public final class ReplicationRetry {
         }
         final long capped = Math.min(exponential, capNanos);
         final long bound = capped == Long.MAX_VALUE ? Long.MAX_VALUE : capped + 1L;
-        return ThreadLocalRandom.current().nextLong(bound);
+        return JITTER.nextLong(bound);
     }
 }

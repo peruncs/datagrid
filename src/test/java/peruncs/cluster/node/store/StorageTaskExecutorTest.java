@@ -7,6 +7,7 @@ import java.lang.reflect.Proxy;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -15,6 +16,7 @@ class StorageTaskExecutorTest {
     private static final class GatedConnection {
         final CountDownLatch entered = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
+        final CountDownLatch finished = new CountDownLatch(1);
         final AtomicInteger checks = new AtomicInteger();
         final StorageConnection connection = (StorageConnection) Proxy.newProxyInstance(
                 getClass().getClassLoader(),
@@ -30,6 +32,8 @@ class StorageTaskExecutorTest {
                         } catch (final InterruptedException interrupted) {
                             Thread.currentThread().interrupt();
                             throw new IllegalStateException("check interrupted", interrupted);
+                        } finally {
+                            this.finished.countDown();
                         }
                         return null;
                     }
@@ -45,20 +49,36 @@ class StorageTaskExecutorTest {
         assertTrue(latch.await(30L, TimeUnit.SECONDS), what);
     }
 
-        /// A second request while a check runs is ignored instead of piling up.
+        /// Concurrent requests share one check instead of queuing duplicates.
     @Test
     void concurrentRunChecksRunsOnce() throws Exception {
         final GatedConnection gated = new GatedConnection();
+        final CountDownLatch submittersReady = new CountDownLatch(2);
+        final CountDownLatch startSubmitters = new CountDownLatch(1);
+        final AtomicReference<Throwable> submissionFailure = new AtomicReference<>();
         try (final StorageTaskExecutor executor = StorageTaskExecutor.create(gated.connection)) {
-            executor.runChecks();
+            final Runnable submit = () -> {
+                submittersReady.countDown();
+                try {
+                    await(startSubmitters, "simultaneous submissions were not released");
+                    executor.runChecks();
+                } catch (final Throwable failure) {
+                    submissionFailure.compareAndSet(null, failure);
+                }
+            };
+            final Thread first = Thread.ofVirtual().start(submit);
+            final Thread second = Thread.ofVirtual().start(submit);
+            await(submittersReady, "submission threads did not start");
+            startSubmitters.countDown();
+            first.join(TimeUnit.SECONDS.toMillis(30L));
+            second.join(TimeUnit.SECONDS.toMillis(30L));
+            assertFalse(first.isAlive(), "first submission did not finish");
+            assertFalse(second.isAlive(), "second submission did not finish");
+            assertNull(submissionFailure.get(), "concurrent submission failed");
             await(gated.entered, "check task did not start");
             assertTrue(executor.isRunningChecks());
-            executor.runChecks();
             gated.release.countDown();
-            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30L);
-            while (executor.isRunningChecks() && System.nanoTime() < deadline) {
-                Thread.sleep(10L);
-            }
+            await(gated.finished, "check task did not finish");
             assertEquals(1, gated.checks.get(), "expected exactly one check task");
         }
     }
@@ -70,7 +90,27 @@ class StorageTaskExecutorTest {
         final StorageTaskExecutor executor = StorageTaskExecutor.create(gated.connection);
         executor.runChecks();
         await(gated.entered, "check task did not start");
-        executor.close();
+        final CountDownLatch closersReady = new CountDownLatch(2);
+        final CountDownLatch releaseClosers = new CountDownLatch(1);
+        final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+        final Runnable close = () -> {
+            closersReady.countDown();
+            try {
+                await(releaseClosers, "concurrent close was not released");
+                executor.close();
+            } catch (final Throwable failure) {
+                closeFailure.compareAndSet(null, failure);
+            }
+        };
+        final Thread first = Thread.ofVirtual().start(close);
+        final Thread second = Thread.ofVirtual().start(close);
+        await(closersReady, "close threads did not start");
+        releaseClosers.countDown();
+        first.join(TimeUnit.SECONDS.toMillis(30L));
+        second.join(TimeUnit.SECONDS.toMillis(30L));
+        assertFalse(first.isAlive(), "first close did not finish");
+        assertFalse(second.isAlive(), "second close did not finish");
+        assertNull(closeFailure.get(), "concurrent close failed");
         executor.close();
         assertNotNull(executor.failure());
     }

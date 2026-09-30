@@ -9,10 +9,8 @@ import java.util.UUID;
 
 /// Builds [TransactionAssembler] fixtures with the canonical constructor.
 ///
-/// Production code must pass an explicit wire nonce. These factories fill in
-/// the documented fixture-only derived nonce so reader tests stay close to the
-/// production call shape without reintroducing a defaulting production
-/// overload.
+/// Production code passes the public cluster-id-derived framing value. These
+/// factories fill in the same deterministic value from the supplied cluster id.
 final class TransactionAssemblerTestSupport {
     private TransactionAssemblerTestSupport() {
     }
@@ -58,50 +56,11 @@ final class TransactionAssemblerTestSupport {
                                     final long epoch, final long initialSequence,
                                     final StorageBinaryDataReceiver receiver,
                                     final Runnable transactionResolved) {
-        return New(configuration, clusterId, epoch, initialSequence, receiver, transactionResolved, null);
-    }
-
-    /// Creates an assembler with resolution and delivery callbacks.
-    ///
-    /// @param configuration       framing and timeout limits
-    /// @param clusterId           expected cluster identity
-    /// @param epoch               expected writer epoch
-    /// @param initialSequence     last resolved sequence, or `-1`
-    /// @param receiver            Store binary receiver
-    /// @param transactionResolved callback after a transaction resolves
-    /// @param deliveryListener    callback around Store materialisation, or `null`
-    /// @return assembler with the supplied callbacks
-    static TransactionAssembler New(final AeronReplicationConfiguration configuration, final UUID clusterId,
-                                    final long epoch, final long initialSequence,
-                                    final StorageBinaryDataReceiver receiver,
-                                    final Runnable transactionResolved,
-                                    final ReaderDeliveryListener deliveryListener) {
-        return New(configuration, clusterId, epoch, initialSequence, -1L, receiver, transactionResolved,
-                deliveryListener);
-    }
-
-    /// Creates an assembler with resolution and delivery callbacks plus an
-    /// explicit durability gate for live-sourced terminal markers.
-    ///
-    /// @param configuration       framing and timeout limits
-    /// @param clusterId           expected cluster identity
-    /// @param epoch               expected writer epoch
-    /// @param initialSequence     last resolved sequence, or `-1`
-    /// @param receiver            Store binary receiver
-    /// @param transactionResolved callback after a transaction resolves
-    /// @param deliveryListener    callback around Store materialisation, or `null`
-    /// @param durabilityGate      durability proof for live-sourced terminal markers
-    /// @return assembler with the supplied callbacks and gate
-    static TransactionAssembler New(final AeronReplicationConfiguration configuration, final UUID clusterId,
-                                    final long epoch, final long initialSequence,
-                                    final StorageBinaryDataReceiver receiver,
-                                    final Runnable transactionResolved,
-                                    final ReaderDeliveryListener deliveryListener,
-                                    final TransactionAssembler.CommitDurabilityGate durabilityGate) {
         Objects.requireNonNull(clusterId, "clusterId");
-        return new TransactionAssembler(configuration, clusterId, epoch, initialSequence, -1L,
-                receiver, ignored -> transactionResolved.run(), deliveryListener,
-                AeronReplicationEnvelope.defaultWireNonce(clusterId), durabilityGate);
+        return new TransactionAssembler(new TransactionAssembler.Configuration(
+                configuration, clusterId, epoch, initialSequence, -1L,
+                receiver, ignored -> transactionResolved.run(),
+                AeronReplicationEnvelope.defaultWireNonce(clusterId)));
     }
 
     /// Creates an assembler at a recovered sequence and position.
@@ -113,18 +72,14 @@ final class TransactionAssemblerTestSupport {
     /// @param initialPosition     last resolved Archive position, or `-1`
     /// @param receiver            Store binary receiver
     /// @param transactionResolved callback after a transaction resolves
-    /// @param deliveryListener    callback around Store materialisation, or `null`
     /// @return assembler at the supplied cursor
     static TransactionAssembler New(final AeronReplicationConfiguration configuration, final UUID clusterId,
                                     final long epoch, final long initialSequence, final long initialPosition,
                                     final StorageBinaryDataReceiver receiver,
-                                    final Runnable transactionResolved,
-                                    final ReaderDeliveryListener deliveryListener) {
+                                    final Runnable transactionResolved) {
         Objects.requireNonNull(clusterId, "clusterId");
-        /* Direct assembler tests drive replay-shaped frames (or no header at
-         * all), which need no durability gate. */
-        return new TransactionAssembler(configuration, clusterId, epoch, initialSequence, initialPosition,
-                receiver, ignored -> transactionResolved.run(), deliveryListener,
-                AeronReplicationEnvelope.defaultWireNonce(clusterId), TransactionAssembler.CommitDurabilityGate.ALWAYS);
+        return new TransactionAssembler(new TransactionAssembler.Configuration(
+                configuration, clusterId, epoch, initialSequence, initialPosition,
+                receiver, ignored -> transactionResolved.run(), AeronReplicationEnvelope.defaultWireNonce(clusterId)));
     }
 }

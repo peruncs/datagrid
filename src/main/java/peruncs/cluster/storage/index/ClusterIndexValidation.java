@@ -1,10 +1,12 @@
 package peruncs.cluster.storage.index;
 
-import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.types.PersistenceFunction;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDefinition;
+import org.eclipse.serializer.persistence.types.PersistenceTypeDefinitionMember;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
-import org.eclipse.serializer.typing.KeyValue;
+import org.eclipse.serializer.persistence.types.PersistenceTypeHandler;
+import org.eclipse.serializer.persistence.types.PersistenceTypeHandlerManager;
 import org.eclipse.store.gigamap.jvector.VectorIndex;
 import org.eclipse.store.gigamap.jvector.VectorIndexConfiguration;
 import org.eclipse.store.gigamap.jvector.VectorIndices;
@@ -15,15 +17,23 @@ import org.eclipse.store.gigamap.types.GigaIndices;
 import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.gigamap.types.IndexGroup;
 import org.eclipse.store.storage.types.StorageConnection;
-import peruncs.cluster.api.NodeSettingsSource;
+import peruncs.cluster.api.NodeConfig;
+import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 
 import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
-import java.lang.reflect.Field;
-import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -31,55 +41,144 @@ import java.util.function.Consumer;
 /// can carry, and the bounded root-graph scan that proves it.
 ///
 /// Direct registrations bypass the [ClusterStoreIndexes] registration API, so
-/// enforcement also scans reachable index metadata. The scan never descends
-/// into GigaMap entity payloads, and it never expands objects whose class
-/// cannot reach index metadata: a per-class relevance analysis (cached, and
-/// conservative — anything unprovable stays relevant) prunes ordinary entity
-/// graphs, so a root holding thousands of plain objects validates without
-/// touching the object bound. The bound therefore counts only index-relevant
-/// objects and still fails closed whenever an upstream layout prevents proving
-/// that every index group was checked. The field reads use Store's own
-/// offset-based memory accessor, so no runtime `--add-opens` flag is
-/// required. JDK references cannot be persisted by Store; validation inspects
-/// direct index referents but prunes other runtime referents to avoid scanning
-/// Store's bookkeeping graph. Other opaque JDK holders with state fail closed.
+/// enforcement also scans reachable index metadata. The scan uses Serializer's
+/// registered type handlers, prunes types that cannot reach index metadata, and
+/// never descends into GigaMap entity payloads. Unknown layouts fail closed.
+/// JDK references cannot be persisted by Store; validation inspects direct index
+/// referents but prunes other runtime referents to avoid Store bookkeeping.
 final class ClusterIndexValidation {
     static final String EXTERNAL_LUCENE_MESSAGE = "Cluster replication supports only embedded Lucene indexes; external directories are not supported";
     static final String EXTERNAL_VECTOR_MESSAGE = "Cluster replication supports only in-graph JVector indexes; external index directories are not supported";
     static final String BACKGROUND_VECTOR_MESSAGE = "Cluster replication supports only synchronous JVector indexing; background graph workers cannot be retired safely on import";
     static final String UNKNOWN_INDEX_MESSAGE = "Cluster replication supports only embedded Lucene, in-graph JVector, and core bitmap indexes";
 
-        /* Bounds one graph scan so the reader hook never pays for the data
-         * set: only index-relevant objects are visited (ordinary entity graphs
-         * are pruned by class before they are enqueued), and the scan stops
-         * here. The merger overrides this through its configuration. */
-    static final int DEFAULT_MAX_VALIDATED_OBJECTS = NodeSettingsSource.DEFAULT_INDEX_VALIDATION_MAX_OBJECTS;
-
-        /* Per-class index-relevance cache backing the traversal prune. A class
-         * is relevant when its instances could reach index metadata; anything
-         * unprovable (interfaces, abstract types, `Object` fields, JDK state,
-         * reflection failures) stays relevant so the walk fails closed rather
-         * than skipping unknown state. Deterministic per class, so concurrent
-         * duplicate analyses are harmless. */
-    /* ClassValue lets application classes unload with their class loader. A
-     * process that creates and retires many Store class loaders must not keep
-     * every analyzed Class strongly reachable forever. */
-    private static final ClassValue<Boolean> INDEX_RELEVANT = new ClassValue<>() {
-        @Override
-        protected Boolean computeValue(final Class<?> type) {
-            return analyzeIndexRelevant(type, new HashSet<>());
-        }
-    };
+    /* Bounds one graph scan so ordinary entity data is pruned before enqueue. */
+    static final int DEFAULT_MAX_VALIDATED_OBJECTS = NodeConfig.Limits.DEFAULT_MAX_VALIDATED_INDEX_OBJECTS;
 
     private ClusterIndexValidation() {
     }
 
+    /// Caches index reachability from Serializer's runtime type descriptions.
+    private static final class TypeRelevance {
+        private PersistenceTypeDictionary dictionary;
+        private long definitionCount = -1L;
+        private long runtimeDefinitionCount;
+        private long countedRuntimeDefinitions;
+        private final HashMap<Class<?>, PersistenceTypeDefinition> definitions = new HashMap<>();
+        private final HashMap<Class<?>, List<PersistenceTypeDefinition>> assignable = new HashMap<>();
+        private final HashMap<Class<?>, Boolean> relevant = new HashMap<>();
+        private final HashSet<Class<?>> resolving = new HashSet<>();
+        private final Consumer<PersistenceTypeDefinition> definitionCounter = this::countRuntimeDefinition;
+
+        boolean bind(final PersistenceTypeDictionary current) {
+            /* Type ids are append-only; table size detects new classes without
+             * walking the dictionary on every writer commit. Unseen classes
+             * stay relevant until a full scan refreshes runtime bindings. */
+            final long currentCount = current == null ? 0L : current.allTypeDefinitions().size();
+            if (current == this.dictionary && currentCount == this.definitionCount) return false;
+            this.load(current, currentCount);
+            return true;
+        }
+
+        void refresh(final PersistenceTypeDictionary current) {
+            /* A lineage can gain a runtime definition without changing the
+             * dictionary's identity or number of type ids. Count runtime
+             * bindings on graph scans, but rebuild caches only when they change. */
+            final long currentCount = current == null ? 0L : current.allTypeDefinitions().size();
+            this.countedRuntimeDefinitions = 0L;
+            if (current != null) current.iterateRuntimeDefinitions(this.definitionCounter);
+            if (current == this.dictionary && currentCount == this.definitionCount &&
+                this.countedRuntimeDefinitions == this.runtimeDefinitionCount) return;
+            this.load(current, currentCount);
+        }
+
+        private void load(final PersistenceTypeDictionary current, final long currentCount) {
+            this.dictionary = current;
+            this.definitionCount = currentCount;
+            this.runtimeDefinitionCount = 0L;
+            this.definitions.clear();
+            this.assignable.clear();
+            this.relevant.clear();
+            this.resolving.clear();
+            if (current != null) {
+                current.iterateRuntimeDefinitions(definition -> {
+                    if (definition != null && definition.type() != null) {
+                        this.runtimeDefinitionCount++;
+                        this.definitions.put(definition.type(), definition);
+                    }
+                });
+            }
+        }
+
+        private void countRuntimeDefinition(final PersistenceTypeDefinition definition) {
+            if (definition != null && definition.type() != null) this.countedRuntimeDefinitions++;
+        }
+
+        boolean isRelevant(final Class<?> type) {
+            if (type == null) return true;
+            if (isLeafValue(type) || type.isPrimitive()) return false;
+            if (isIndexMetadata(type)) return true;
+            if (type.isArray()) return this.isRelevant(type.componentType());
+            if (Iterable.class.isAssignableFrom(type) || Map.class.isAssignableFrom(type) ||
+                Optional.class.isAssignableFrom(type) || AtomicReference.class.isAssignableFrom(type) ||
+                Reference.class.isAssignableFrom(type)) return true;
+            final Boolean cached = this.relevant.get(type);
+            if (cached != null) return cached;
+            if (!this.resolving.add(type)) return false;
+            boolean result = false;
+            try {
+                final List<PersistenceTypeDefinition> candidates = this.assignable.computeIfAbsent(type, declared ->
+                        this.definitions.entrySet().stream()
+                                .filter(entry -> declared.isAssignableFrom(entry.getKey()))
+                                .map(Map.Entry::getValue)
+                                .toList());
+                if (candidates.isEmpty()) {
+                    result = true;
+                }
+                for (final PersistenceTypeDefinition definition : candidates) {
+                    if (isIndexMetadata(definition.type())) {
+                        result = true;
+                        break;
+                    }
+                    boolean hasMembers = false;
+                    for (final PersistenceTypeDefinitionMember member : definition.instanceMembers()) {
+                        hasMembers = true;
+                        if (this.isRelevant(member.type())) {
+                            result = true;
+                            break;
+                        }
+                    }
+                    /* Empty custom definitions can still expose references
+                     * through their handler, so do not prune them by metadata. */
+                    if (!hasMembers && !isLeafValue(definition.type())) result = true;
+                    if (result) break;
+                }
+            } finally {
+                this.resolving.remove(type);
+            }
+            this.relevant.put(type, result);
+            return result;
+        }
+
+        private static boolean isIndexMetadata(final Class<?> type) {
+            return GigaMap.class.isAssignableFrom(type) || IndexGroup.class.isAssignableFrom(type) ||
+                    LuceneContext.class.isAssignableFrom(type) || LuceneIndex.class.isAssignableFrom(type) ||
+                    VectorIndices.class.isAssignableFrom(type) || VectorIndex.class.isAssignableFrom(type) ||
+                    VectorIndexConfiguration.class.isAssignableFrom(type);
+        }
+    }
+
     /// Reusable caller-owned scan state and per-batch discovery sinks.
     static final class ValidationScratch {
+        final PersistenceTypeHandlerManager<Binary> typeHandlers;
         final IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
         final ArrayDeque<Object> queue = new ArrayDeque<>();
+        final IdentityHashMap<Object, Boolean> groupSeen = new IdentityHashMap<>();
+        final ArrayDeque<Object> groupQueue = new ArrayDeque<>();
         final ArrayList<IndexGroup<?>> groups = new ArrayList<>();
+        final TypeRelevance typeRelevance = new TypeRelevance();
         int scanWork;
+        int groupWork;
         final ArrayList<GigaMap<?>> maps = new ArrayList<>();
         /* Rebuild plan for the merged validate-and-rebuild pass. Entries carry
          * the owning map so the rebuild can hold the same monitor queries use. */
@@ -95,20 +194,69 @@ final class ClusterIndexValidation {
         final ArrayList<VectorIndex<?>> vectorIndexes = new ArrayList<>();
         final ArrayList<VectorIndex<?>> dirtyVectorIndexes = new ArrayList<>();
         final IdentityHashMap<VectorIndices<?>, Boolean> rebuiltGroups = new IdentityHashMap<>();
+        final Consumer<Object> enqueueReferenceVisitor = this::enqueueReference;
+        final Consumer<Object> luceneContextVisitor = this::findLuceneContext;
+        final PersistenceFunction referenceWalker = new PersistenceFunction() {
+            @Override
+            public <T> long apply(final T reference) {
+                ValidationScratch.this.referenceVisitor.accept(reference);
+                return 0L;
+            }
+        };
+        Consumer<Object> referenceVisitor;
+        ArrayDeque<Object> referenceQueue;
+        IdentityHashMap<Object, Boolean> referenceSeen;
+        int referenceMax;
+        boolean referenceGroupWalk;
+        LuceneContext<?> luceneContext;
+        boolean duplicateLuceneContexts;
+
+        ValidationScratch(final PersistenceTypeHandlerManager<Binary> typeHandlers) {
+            this.typeHandlers = Objects.requireNonNull(typeHandlers, "typeHandlers");
+            this.refreshTypeDefinitions();
+        }
+
+        void refreshTypeDefinitions() {
+            this.typeRelevance.refresh(this.typeHandlers.typeDictionary());
+        }
+
+        void enqueueReference(final Object reference) {
+            countWork(this, this.referenceMax, this.referenceGroupWalk);
+            offer(reference, this, this.referenceQueue, this.referenceSeen);
+        }
+
+        void findLuceneContext(final Object reference) {
+            if (reference instanceof LuceneContext<?> context) {
+                if (this.luceneContext != null) this.duplicateLuceneContexts = true;
+                else this.luceneContext = context;
+            }
+        }
     }
 
     /// Reusable per-writer commit-type filter state; do not share across threads.
     static final class CommitPrefilterScratch {
-        /* Type relevance is immutable for one PersistenceTypeDictionary identity. */
+        /* This one-type cache is reset per commit because definitions can bind in place. */
         private PersistenceTypeDictionary dictionary;
+        private final TypeRelevance typeRelevance = new TypeRelevance();
         private long lastTypeId;
         private boolean hasLastType;
         private boolean lastTypeRelevant;
         private boolean touchesIndexes;
-        final EntityHeaders.EntityVisitor visitor = this::checkType;
+        /* The node registers the reserved mark root before Store startup, so
+         * its type id is stable before this writer accepts a commit. */
+        private long replicationMarkTypeId;
+        private boolean hasReplicationMarkType;
+        private long expectedObjectId;
+        private boolean containsObjectId;
+        final EntityHeaders.TypeIdVisitor visitor = this::checkType;
+        final EntityHeaders.EntityVisitor entityVisitor = this::checkEntity;
 
-        private void checkType(final long typeId, final long ignoredObjectId,
-                               final long ignoredOffset, final long ignoredLength) {
+        private void checkEntity(final long typeId, final long objectId) {
+            if (this.expectedObjectId >= 0L && objectId == this.expectedObjectId) this.containsObjectId = true;
+            this.checkType(typeId);
+        }
+
+        private void checkType(final long typeId) {
             if (this.touchesIndexes) return;
             if (!this.hasLastType || this.lastTypeId != typeId) {
                 final PersistenceTypeDefinition definition = this.dictionary == null
@@ -116,17 +264,17 @@ final class ClusterIndexValidation {
                 this.lastTypeId = typeId;
                 this.hasLastType = true;
                 this.lastTypeRelevant = definition == null || definition.type() == null ||
-                        INDEX_RELEVANT.get(definition.type());
+                this.typeRelevance.isRelevant(definition.type());
             }
             this.touchesIndexes = this.lastTypeRelevant;
         }
     }
 
-        /// One vector index group and the map that owns it.
+    /// One vector index group and the map that owns it.
     record VectorGroup(GigaMap<?> map, VectorIndices<?> vectors) {
     }
 
-        /// Rejects a Lucene context that stores files outside the Store graph.
+    /// Rejects a Lucene context that stores files outside the Store graph.
     ///
     /// @param context context to check
     /// @throws IllegalArgumentException if the context creates an external directory
@@ -136,7 +284,7 @@ final class ClusterIndexValidation {
         }
     }
 
-        /// Rejects any JVector configuration that replication cannot carry.
+    /// Rejects any JVector configuration that replication cannot carry.
     ///
     /// External directories never reach a reader, and background graph
     /// workers (eventual indexing, background optimization) cannot be
@@ -157,7 +305,7 @@ final class ClusterIndexValidation {
         }
     }
 
-        /// Validates all vector indexes already registered on a map.
+    /// Validates all vector indexes already registered on a map.
     ///
     /// This is useful after Store deserialization, when the index group was
     /// created by a persistence handler rather than by application code.
@@ -173,48 +321,31 @@ final class ClusterIndexValidation {
         validateVectorIndicesGroup(indices);
     }
 
-    /// Validates every index attached to one map.
+    /// Validates one map's registered index groups against the policy.
     ///
-    /// Every registered index group is enumerated: embedded Lucene and
-    /// in-graph vector groups are validated, the core bitmap group is
-    /// accepted as in-graph by construction, and any other group fails with
-    /// [IllegalArgumentException] — an unknown category may keep state the
-    /// replication cannot carry, so it fails closed instead of being assumed
-    /// safe. If group enumeration cannot be proved under JPMS, validation throws
-    /// [IllegalStateException] rather than assuming unknown state is safe.
+    /// Embedded Lucene and in-graph vector groups are accepted when valid;
+    /// bitmap indexes are in-graph by construction. Unknown groups and
+    /// incomplete enumeration fail closed.
     ///
-    /// @param map        map to validate
-    /// @param vectorSink optional destination collecting validated vector
-    ///                   groups for a later rebuild, or `null`
-    /// @throws IllegalArgumentException if any attached index uses external
-    ///                                  storage or belongs to an unknown category
-    /// @throws IllegalStateException    if index groups cannot be enumerated completely
-    static void validateMap(final GigaMap<?> map, final List<VectorGroup> vectorSink) {
-        validateMap(map, vectorSink, new ValidationScratch());
-    }
-
-        /// Validates one map's registered index groups against the policy.
-    ///
-    /// The scratch is passed in by the graph walk, which already owns one for
-    /// the whole scan.
-    ///
-    /// @param map        map whose groups to validate
-    /// @param vectorSink optional destination collecting validated vector
-    ///                   groups, or `null`
-    /// @param scratch    caller-owned validation scratch
+    /// @param map                  map whose groups to validate
+    /// @param vectorSink           optional destination collecting vector groups
+    /// @param scratch              caller-owned validation scratch
+    /// @param maxValidatedObjects bound for visited objects and entries
+    /// @throws IllegalArgumentException if an attached index is unsupported
+    /// @throws IllegalStateException if traversal exceeds the configured bound
     static void validateMap(final GigaMap<?> map, final List<VectorGroup> vectorSink,
-                             final ValidationScratch scratch) {
+                            final ValidationScratch scratch, final int maxValidatedObjects) {
         final GigaMap<?> checked = Objects.requireNonNull(map, "map");
         Objects.requireNonNull(scratch, "scratch");
         scratch.groups.clear();
         try {
-            collectIndexGroups(checked, scratch.groups);
+            collectIndexGroups(checked.index(), scratch, maxValidatedObjects);
             for (final IndexGroup<?> group : scratch.groups) {
                 if (group instanceof BitmapIndices) continue;
                 if (group instanceof LuceneIndex<?> lucene) {
-                    validateLuceneIndex(lucene);
+                    validateLuceneIndex(lucene, scratch);
                 } else if (group instanceof VectorIndices<?> vectors) {
-                    validateVectorIndicesGroup(vectors);
+                    validateVectorIndicesGroup(vectors, scratch, maxValidatedObjects);
                     if (vectorSink != null) vectorSink.add(new VectorGroup(checked, vectors));
                 } else {
                     throw new IllegalArgumentException(
@@ -227,39 +358,35 @@ final class ClusterIndexValidation {
         }
     }
 
-        /// Snapshots every index group registered on a map into `collected`.
+    /// Snapshots every index group registered on a map.
     ///
     /// The upstream index API exposes lookup by category but no group
-    /// enumeration, so the groups are located reflectively and read through
-    /// Store's offset-based memory accessor. Any denied access or unrecognized
-    /// layout fails closed because a partial list cannot prove replication safety.
+    /// enumeration. Serializer's handler supplies the references without
+    /// accessing Store internals.
     ///
-    /// @param map       map whose groups to snapshot
-    /// @param collected snapshot destination, cleared first
-    static void collectIndexGroups(final GigaMap<?> map, final ArrayList<IndexGroup<?>> collected) {
-        collected.clear();
-        final GigaIndices<?> indices = map.index();
-        final Field field = StoreIndexReflection.indexGroupsField(indices.getClass());
+    /// @param indices    map index component whose groups to snapshot
+    /// @param scratch    caller-owned traversal state
+    /// @param maxObjects traversal work bound
+    static void collectIndexGroups(final GigaIndices<?> indices,
+                                           final ValidationScratch scratch, final int maxValidatedObjects) {
+        scratch.groupQueue.clear();
+        scratch.groupSeen.clear();
+        scratch.groupWork = 0;
+        scratch.groupQueue.add(indices);
+        scratch.groupSeen.put(indices, Boolean.TRUE);
         try {
-            final Object value = XMemory.getObject(indices, XMemory.objectFieldOffset(field));
-            if (!(value instanceof Iterable<?> groups)) {
-                throw new IllegalStateException(
-                        "GigaMap indexGroups on %s has an unsupported layout"
-                                .formatted(indices.getClass().getName()));
-            }
-            for (final Object group : groups) {
-                if (!(group instanceof IndexGroup<?> indexGroup)) {
-                    throw new IllegalStateException(
-                            "GigaMap indexGroups on %s contains an unsupported element: %s"
-                                    .formatted(indices.getClass().getName(),
-                                            group == null ? "null" : group.getClass().getName()));
+            while (!scratch.groupQueue.isEmpty()) {
+                countGroupWork(scratch, maxValidatedObjects);
+                final Object current = scratch.groupQueue.poll();
+                if (current instanceof IndexGroup<?> group) {
+                    scratch.groups.add(group);
+                } else if (!(current instanceof GigaMap<?>)) {
+                    enqueueReachable(current, scratch, maxValidatedObjects, true);
                 }
-                collected.add(indexGroup);
             }
-        } catch (final RuntimeException denied) {
-            throw new IllegalStateException(
-                    "cannot enumerate GigaMap index groups on %s"
-                            .formatted(indices.getClass().getName()), denied);
+        } finally {
+            scratch.groupQueue.clear();
+            scratch.groupSeen.clear();
         }
     }
 
@@ -272,9 +399,9 @@ final class ClusterIndexValidation {
     /// they were registered directly, bypassing the facade registration methods.
     /// It stays cheap by design: attached GigaMap entity payload is never
     /// descended into (only index metadata is checked), the scan stops after a
-    /// bounded number of objects, and fields that cannot be read by the Store
-    /// memory accessor fail closed because an incomplete scan is not a proof of
-    /// safety. A violation fails closed with [IllegalArgumentException]. The
+    /// bounded number of objects, and unknown Serializer descriptions fail
+    /// closed because an incomplete scan is not a proof of safety. A violation
+    /// fails with [IllegalArgumentException]. The
     /// Merger traversal reuses caller-owned scratch instead of allocating per scan.
     ///
     /// @param root               Store root to validate
@@ -285,19 +412,10 @@ final class ClusterIndexValidation {
     ///                                  non-persisted vector index is reachable from the root
     /// @throws IllegalStateException    if a large index-relevant graph cannot be inspected completely
     static void validateGraph(final Object root, final int maxValidatedObjects,
-                              final List<VectorGroup> vectorSink) {
-        validateGraph(root, maxValidatedObjects, vectorSink, null);
-    }
-
-    static void validateGraph(final Object root, final int maxValidatedObjects,
-                              final List<VectorGroup> vectorSink, final Consumer<Object> visitedSink) {
-        validateGraph(root, maxValidatedObjects, vectorSink, visitedSink, new ValidationScratch());
-    }
-
-    static void validateGraph(final Object root, final int maxValidatedObjects,
                               final List<VectorGroup> vectorSink, final Consumer<Object> visitedSink,
                               final ValidationScratch scratch) {
         if (root == null) return;
+        scratch.refreshTypeDefinitions();
         scratch.seen.clear();
         scratch.queue.clear();
         scratch.scanWork = 0;
@@ -314,14 +432,14 @@ final class ClusterIndexValidation {
                          * every reader batch pay for the whole data set. Objects
                          * whose class cannot reach index metadata were pruned
                          * before enqueueing, so only relevant objects count above. */
-                            validateMap(map, vectorSink, scratch);
-                    case LuceneIndex<?> lucene -> validateLuceneIndex(lucene);
+                            validateMap(map, vectorSink, scratch, maxValidatedObjects);
+                    case LuceneIndex<?> lucene -> validateLuceneIndex(lucene, scratch);
                     case LuceneContext<?> context -> validateLuceneContext(context);
-                    case VectorIndices<?> group -> validateVectorIndicesGroup(group);
+                    case VectorIndices<?> group ->
+                            validateVectorIndicesGroup(group, scratch, maxValidatedObjects);
                     case VectorIndex<?> index -> validateVectorConfiguration(index.configuration());
                     case VectorIndexConfiguration configuration -> validateVectorConfiguration(configuration);
-                case null, default -> enqueueReachable(current, scratch.queue, scratch.seen,
-                        scratch, maxValidatedObjects);
+                    case null, default -> enqueueReachable(current, scratch, maxValidatedObjects);
                 }
             }
         } finally {
@@ -331,7 +449,7 @@ final class ClusterIndexValidation {
         }
     }
 
-        /// Validates every Store root held by a storage connection.
+    /// Validates every Store root held by a storage connection.
     ///
     /// This is the reader materialization hook: it runs after a replicated batch
     /// is applied, so a writer that smuggled an external index past registration
@@ -345,19 +463,10 @@ final class ClusterIndexValidation {
     /// @throws IllegalArgumentException if any root violates the index policy
     /// @throws IllegalStateException    if a root cannot be inspected completely
     static void validateStorageRoots(final StorageConnection storage, final int maxValidatedObjects,
-                                     final List<VectorGroup> vectorSink) {
-        validateStorageRoots(storage, maxValidatedObjects, vectorSink, null);
-    }
-
-    static void validateStorageRoots(final StorageConnection storage, final int maxValidatedObjects,
-                                     final List<VectorGroup> vectorSink, final Consumer<Object> visitedSink) {
-        validateStorageRoots(storage, maxValidatedObjects, vectorSink, visitedSink, new ValidationScratch());
-    }
-
-    static void validateStorageRoots(final StorageConnection storage, final int maxValidatedObjects,
                                      final List<VectorGroup> vectorSink, final Consumer<Object> visitedSink,
                                      final ValidationScratch scratch) {
         final StorageConnection checked = Objects.requireNonNull(storage, "storage");
+        if (maxValidatedObjects <= 0) throw new IllegalArgumentException("maxValidatedObjects must be positive");
         checked.persistenceManager()
                 .viewRoots()
                 .iterateEntries((identifier, value) -> {
@@ -369,62 +478,102 @@ final class ClusterIndexValidation {
     static boolean commitTouchesIndexes(final Binary binary, final PersistenceTypeDictionary dictionary,
                                         final CommitPrefilterScratch scratch) {
         Objects.requireNonNull(scratch, "scratch");
-        if (scratch.dictionary != dictionary) {
-            scratch.dictionary = dictionary;
-            scratch.hasLastType = false;
-        }
+        bindDictionary(scratch, dictionary);
         scratch.touchesIndexes = false;
-        EntityHeaders.forEach(binary, scratch.visitor);
+        scratch.hasLastType = false;
+        EntityHeaders.forEachTypeId(binary, scratch.visitor);
         return scratch.touchesIndexes;
     }
 
-    static void validateVectorIndicesGroup(final VectorIndices<?> group) {
-        final List<KeyValue<String, ? extends VectorIndex<?>>> snapshot = new ArrayList<>();
-        for (final KeyValue<String, ? extends VectorIndex<?>> entry : group) snapshot.add(entry);
-        for (final KeyValue<String, ? extends VectorIndex<?>> entry : snapshot) {
-            validateVectorConfiguration(entry.value().configuration());
+    static int inspectWriterCommit(final Binary binary, final PersistenceTypeDictionary dictionary,
+                                   final CommitPrefilterScratch scratch, final long markObjectId) {
+        Objects.requireNonNull(scratch, "scratch");
+        bindDictionary(scratch, dictionary);
+        scratch.touchesIndexes = false;
+        scratch.hasLastType = false;
+        scratch.expectedObjectId = markObjectId;
+        scratch.containsObjectId = false;
+        if (dictionary == null) {
+            EntityHeaders.forEach(binary, scratch.entityVisitor);
+        } else if (scratch.hasReplicationMarkType) {
+            EntityHeaders.forEachWriterCommit(binary, scratch.entityVisitor, scratch.replicationMarkTypeId);
+        } else {
+            EntityHeaders.forEach(binary, scratch.entityVisitor);
         }
+        return (scratch.touchesIndexes ? ClusterStoreIndexes.COMMIT_TOUCHES_INDEXES : 0) |
+                (scratch.containsObjectId ? ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK : 0);
     }
 
-        /// Validates an attached Lucene index by reading back the context it was
-        /// registered with. The upstream index type exposes no public context
-        /// accessor, so this locates its `LuceneContext` field reflectively and
-        /// reads it through Store's offset-based memory accessor. If that layout
-        /// changes, validation fails closed rather than allowing an unverified
-        /// external directory.
+    private static void bindDictionary(final CommitPrefilterScratch scratch,
+                                        final PersistenceTypeDictionary dictionary) {
+        if (!scratch.typeRelevance.bind(dictionary)) return;
+        scratch.dictionary = dictionary;
+        scratch.hasLastType = false;
+        final PersistenceTypeDefinition mark = dictionary == null
+                ? null : dictionary.lookupTypeByName(ReplicationMark.class.getName());
+        scratch.hasReplicationMarkType = mark != null;
+        if (mark != null) scratch.replicationMarkTypeId = mark.typeId();
+    }
+
+    static void validateVectorIndicesGroup(final VectorIndices<?> group) {
+        validateVectorIndicesGroup(group, null, DEFAULT_MAX_VALIDATED_OBJECTS);
+    }
+
+    static void validateVectorIndicesGroup(
+            final VectorIndices<?> group,
+            final ValidationScratch scratch,
+            final int maximum) {
+        group.accessIndices(indices -> {
+            final long remaining = scratch == null ? maximum : maximum - (long) scratch.scanWork;
+            if (indices.size() > remaining) throw scanLimitExceeded(maximum);
+            indices.values().iterate(index -> {
+                if (scratch != null) countScanWork(scratch, maximum);
+                validateVectorConfiguration(index.configuration());
+            });
+        });
+    }
+
+    /// Validates an attached Lucene index using its registered Serializer handler.
     ///
     /// @param index attached Lucene index
     /// @throws IllegalArgumentException if the index uses an external directory
-    static void validateLuceneIndex(final LuceneIndex<?> index) {
-        final LuceneContext<?> context = luceneContext(index);
-        if (context == null) {
-            throw new IllegalArgumentException("Lucene index has no embedded context");
+    static void validateLuceneIndex(final LuceneIndex<?> index, final ValidationScratch scratch) {
+        scratch.luceneContext = null;
+        scratch.duplicateLuceneContexts = false;
+        LuceneContext<?> context = null;
+        boolean duplicate = false;
+        try {
+            iterateReferences(index, scratch, scratch.luceneContextVisitor);
+        } catch (final RuntimeException failure) {
+            throw new IllegalStateException(
+                    "cannot inspect Lucene context on %s".formatted(index.getClass().getName()), failure);
+        } finally {
+            context = scratch.luceneContext;
+            duplicate = scratch.duplicateLuceneContexts;
+            scratch.luceneContext = null;
+            scratch.duplicateLuceneContexts = false;
         }
+        if (duplicate) throw new IllegalStateException("Lucene index has multiple contexts");
+        if (context == null) throw new IllegalArgumentException("Lucene index has no embedded context");
         validateLuceneContext(context);
     }
 
-    static LuceneContext<?> luceneContext(final LuceneIndex<?> index) {
-        final Field field = StoreIndexReflection.luceneContextField(index.getClass());
-        try {
-            return (LuceneContext<?>) StoreIndexReflection.read(index, field);
-        } catch (final RuntimeException denied) {
-            throw new IllegalStateException(
-                    "cannot inspect Lucene context on %s"
-                            .formatted(index.getClass().getName()), denied);
-        }
+    static void enqueueReachable(final Object current, final ValidationScratch scratch,
+                                 final int maxValidatedObjects) {
+        enqueueReachable(current, scratch, maxValidatedObjects, false);
     }
 
-    static void enqueueReachable(final Object current, final ArrayDeque<Object> queue,
-                                 final IdentityHashMap<Object, Boolean> seen,
-                                 final ValidationScratch scratch, final int maxValidatedObjects) {
-        if (current == null) return;
-        if (isLeaf(current)) return;
+    private static void enqueueReachable(final Object current, final ValidationScratch scratch,
+                                         final int maxValidatedObjects, final boolean groupWalk) {
+        final var queue = groupWalk ? scratch.groupQueue : scratch.queue;
+        final var seen = groupWalk ? scratch.groupSeen : scratch.seen;
+        if (current == null || isLeaf(current)) return;
         final Class<?> type = current.getClass();
         if (type.isArray()) {
             if (!type.componentType().isPrimitive()) {
                 for (final Object element : (Object[]) current) {
-                    countScanWork(scratch, maxValidatedObjects);
-                    offer(element, queue, seen);
+                    countWork(scratch, maxValidatedObjects, groupWalk);
+                    offer(element, scratch, queue, seen);
                 }
             }
             return;
@@ -432,33 +581,33 @@ final class ClusterIndexValidation {
         switch (current) {
             case Iterable<?> iterable -> {
                 for (final Object element : iterable) {
-                    countScanWork(scratch, maxValidatedObjects);
-                    offer(element, queue, seen);
+                    countWork(scratch, maxValidatedObjects, groupWalk);
+                    offer(element, scratch, queue, seen);
                 }
                 return;
             }
             case Map<?, ?> map -> {
                 for (final Map.Entry<?, ?> entry : map.entrySet()) {
-                    countScanWork(scratch, maxValidatedObjects);
-                    countScanWork(scratch, maxValidatedObjects);
-                    offer(entry.getKey(), queue, seen);
-                    offer(entry.getValue(), queue, seen);
+                    countWork(scratch, maxValidatedObjects, groupWalk);
+                    countWork(scratch, maxValidatedObjects, groupWalk);
+                    offer(entry.getKey(), scratch, queue, seen);
+                    offer(entry.getValue(), scratch, queue, seen);
                 }
                 return;
             }
             case Map.Entry<?, ?> entry -> {
-                countScanWork(scratch, maxValidatedObjects);
-                countScanWork(scratch, maxValidatedObjects);
-                offer(entry.getKey(), queue, seen);
-                offer(entry.getValue(), queue, seen);
+                countWork(scratch, maxValidatedObjects, groupWalk);
+                countWork(scratch, maxValidatedObjects, groupWalk);
+                offer(entry.getKey(), scratch, queue, seen);
+                offer(entry.getValue(), scratch, queue, seen);
                 return;
             }
             case Optional<?> optional -> {
-                optional.ifPresent(value -> offer(value, queue, seen));
+                optional.ifPresent(value -> offer(value, scratch, queue, seen));
                 return;
             }
             case AtomicReference<?> reference -> {
-                offer(reference.get(), queue, seen);
+                offer(reference.get(), scratch, queue, seen);
                 return;
             }
             case Reference<?> reference -> {
@@ -475,7 +624,7 @@ final class ClusterIndexValidation {
                 if (referent instanceof GigaMap<?> || referent instanceof LuceneContext<?> ||
                     referent instanceof VectorIndex<?> || referent instanceof VectorIndexConfiguration ||
                     referent instanceof IndexGroup<?>) {
-                    offer(referent, queue, seen);
+                    offer(referent, scratch, queue, seen);
                 }
                 return;
             }
@@ -485,164 +634,83 @@ final class ClusterIndexValidation {
             default -> {
             }
         }
-        if (type.getPackageName().startsWith("java.")) {
-            /* Only the explicit wrappers above are safe to unwrap. Pruning an
-            * arbitrary JDK holder would turn an opaque reference to an
-            * external index into a false validation success. Stateless JDK
-            * implementation objects (for example Collections' comparators)
-            * carry no reachable graph and can be ignored; stateful holders
-            * fail closed. */
-            if (!StoreIndexReflection.reachableFields(type).isEmpty()) {
-                throw new IllegalStateException(
-                        "opaque java.* holder cannot be proven index-free: " + type.getName());
-            }
-            return;
+        /* Use Serializer's supported handler for JDK values too. It reports
+         * stored references without opening their implementation fields. */
+        scratch.referenceQueue = queue;
+        scratch.referenceSeen = seen;
+        scratch.referenceMax = maxValidatedObjects;
+        scratch.referenceGroupWalk = groupWalk;
+        try {
+            iterateReferences(current, scratch, scratch.enqueueReferenceVisitor);
+        } finally {
+            scratch.referenceQueue = null;
+            scratch.referenceSeen = null;
         }
-        for (final Field field : StoreIndexReflection.reachableFields(type)) {
-            try {
-                offer(XMemory.getObject(current, XMemory.objectFieldOffset(field)), queue, seen);
-            } catch (final RuntimeException denied) {
-                throw new IllegalStateException(
-                        "cannot inspect reachable field %s.%s during index validation"
-                                .formatted(field.getDeclaringClass().getName(), field.getName()), denied);
-            }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void iterateReferences(final Object source, final ValidationScratch scratch,
+                                          final Consumer<Object> visitor) {
+        scratch.referenceVisitor = visitor;
+        try {
+            final PersistenceTypeHandler<Binary, Object> handler =
+                    (PersistenceTypeHandler<Binary, Object>) (PersistenceTypeHandler<?, ?>)
+                            scratch.typeHandlers.ensureTypeHandler(source.getClass());
+            handler.iterateInstanceReferences(source, scratch.referenceWalker);
+        } finally {
+            scratch.referenceVisitor = null;
         }
+    }
+
+    private static boolean isLeaf(final Object value) {
+        return value != null && isLeafValue(value.getClass());
+    }
+
+    private static boolean isLeafValue(final Class<?> type) {
+        final String pkg = type.getPackageName();
+        return type == String.class || type == Byte.class || type == Short.class || type == Integer.class
+                || type == Long.class || type == Float.class || type == Double.class
+                || type == BigInteger.class || type == BigDecimal.class || type == Boolean.class
+                || type == Character.class || type == Class.class || type == UUID.class
+                || pkg.equals("java.time") || pkg.startsWith("java.time.");
     }
 
     static void countScanWork(final ValidationScratch scratch, final int maximum) {
-        if (++scratch.scanWork > maximum) {
-            throw new IllegalStateException(
-                    ("index validation exceeded %s objects and collection elements; raise " +
-                            NodeSettingsSource.EnvKeys.INDEX_VALIDATION_MAX_OBJECTS + " or narrow " +
-                            "the index-relevant graph")
-                            .formatted(maximum));
+        checkScanWork(++scratch.scanWork, maximum);
+    }
+
+    private static void checkScanWork(final int work, final int maximum) {
+        if (work > maximum) throw scanLimitExceeded(maximum);
+    }
+
+    private static IllegalStateException scanLimitExceeded(final int maximum) {
+        return new IllegalStateException(
+                ("index validation exceeded %s objects and collection elements; raise " +
+                        NodeConfig.Setting.INDEX_VALIDATION_MAX_OBJECTS.key() + " or narrow " +
+                        "the index-relevant graph")
+                        .formatted(maximum));
+    }
+
+    private static void countGroupWork(final ValidationScratch scratch, final int maximum) {
+        if (++scratch.groupWork > maximum) {
+            throw new IllegalStateException("index group enumeration exceeded %s objects".formatted(maximum));
         }
     }
 
-    private static void offer(final Object value, final ArrayDeque<Object> queue,
-                              final IdentityHashMap<Object, Boolean> seen) {
+    private static void countWork(final ValidationScratch scratch, final int maximum, final boolean groupWalk) {
+        if (groupWalk) countGroupWork(scratch, maximum);
+        else countScanWork(scratch, maximum);
+    }
+
+    private static void offer(final Object value, final ValidationScratch scratch,
+                              final ArrayDeque<Object> queue, final IdentityHashMap<Object, Boolean> seen) {
         if (value == null || isLeaf(value)) return;
         /* Prune objects whose class cannot reach index metadata before they
          * are enqueued: a root holding thousands of plain entities validates
          * without touching the object bound. Anything unprovable stays
          * relevant, so the prune can only skip provably index-free graphs. */
-        if (!isIndexRelevant(value.getClass())) return;
+        if (!scratch.typeRelevance.isRelevant(value.getClass())) return;
         if (seen.putIfAbsent(value, Boolean.TRUE) == null) queue.add(value);
     }
 
-        /// Reports whether instances of a class could reach index metadata.
-    ///
-    /// Results are cached per class; the analysis is deterministic, so
-    /// concurrent duplicate analyses are harmless. Metadata types themselves
-    /// are relevant; leaf values are not (they never reach this gate, but the
-    /// explicit branch keeps the analysis total). Interfaces, abstract types,
-    /// `Object`, JDK state, and reflection failures are all relevant: the walk
-    /// must inspect — or fail closed on — state it cannot prove index-free.
-    ///
-    /// @param type class to classify
-    /// @return `true` when its instances must be traversed
-    private static boolean isIndexRelevant(final Class<?> type) {
-        return INDEX_RELEVANT.get(type);
-    }
-
-    private static boolean isIndexMetadataType(final Class<?> type) {
-        return GigaMap.class.isAssignableFrom(type)
-                || GigaIndices.class.isAssignableFrom(type)
-                || IndexGroup.class.isAssignableFrom(type)
-                || LuceneIndex.class.isAssignableFrom(type)
-                || LuceneContext.class.isAssignableFrom(type)
-                || VectorIndices.class.isAssignableFrom(type)
-                || VectorIndex.class.isAssignableFrom(type)
-                || VectorIndexConfiguration.class.isAssignableFrom(type);
-    }
-
-    private static boolean analyzeIndexRelevant(final Class<?> type, final HashSet<Class<?>> inProgress) {
-        if (type.isPrimitive() || isLeafValue(type)) return false;
-        if (isIndexMetadataType(type)) return true;
-        if (type.isArray()) {
-            final Class<?> component = type.componentType();
-            return !component.isPrimitive() && analyzeIndexRelevant(component, inProgress);
-        }
-        if (type.isInterface() || Modifier.isAbstract(type.getModifiers())) return true;
-        if (type.getPackageName().startsWith("java.")) return true;
-        /* A non-final concrete type is an open hierarchy: a subclass may add
-         * index-bearing state, so pruning its fields here would hide them.
-         * Only final classes (and records, which are final) are safe to
-         * prove irrelevant by their field analysis. */
-        if (!Modifier.isFinal(type.getModifiers())) return true;
-        if (!inProgress.add(type)) return false;
-        try {
-            for (Class<?> cursor = type; cursor != null && cursor != Object.class; cursor = cursor.getSuperclass()) {
-                final Field[] fields;
-                try {
-                    fields = cursor.getDeclaredFields();
-                } catch (final RuntimeException denied) {
-                    return true;
-                }
-                for (final Field field : fields) {
-                    if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()) continue;
-                    final Class<?> fieldType = field.getType();
-                    if (isLeafValue(fieldType)) continue;
-                    if (isIndexMetadataType(fieldType)) return true;
-                    if (fieldType.isArray()) {
-                        final Class<?> component = fieldType.componentType();
-                        if (!component.isPrimitive() && analyzeIndexRelevant(component, inProgress)) return true;
-                        continue;
-                    }
-                    if (fieldType.isInterface() || Modifier.isAbstract(fieldType.getModifiers())
-                        || fieldType.getPackageName().startsWith("java.")
-                        || analyzeIndexRelevant(fieldType, inProgress)) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        } finally {
-            inProgress.remove(type);
-        }
-    }
-
-        /// Reports whether a class is an immutable value with no reachable
-    /// index metadata.
-    ///
-    /// @param type class to classify
-    /// @return `true` for scalar, enum, class token, UUID, and `java.time` values
-    static boolean isLeafValue(final Class<?> type) {
-        final String pkg = type.getPackageName();
-        return type == String.class
-                || type == Byte.class
-                || type == Short.class
-                || type == Integer.class
-                || type == Long.class
-                || type == Float.class
-                || type == Double.class
-                || type == BigInteger.class
-                || type == BigDecimal.class
-                || type == Boolean.class
-                || type == Character.class
-                || isStatelessEnum(type)
-                || type == Class.class
-                || type == UUID.class
-                /* Immutable `java.time` value types: their fields are
-                 * primitives, strings, or other immutable `java.time` types,
-                 * so they provably cannot reach index metadata. Without this,
-                 * a realistic entity graph with date/time fields would stay
-                 * relevant and could exhaust the validation bound. */
-                || pkg.equals("java.time")
-                || pkg.startsWith("java.time.");
-    }
-
-    private static boolean isStatelessEnum(final Class<?> type) {
-        return type.isEnum() && Arrays.stream(type.getDeclaredFields())
-                .allMatch(field -> Modifier.isStatic(field.getModifiers()));
-    }
-
-    /// Reports whether one value is an immutable leaf, without a second type
-    /// dispatch: the object form is exactly the class form.
-    ///
-    /// @param value value to classify
-    /// @return `true` for leaf values
-    static boolean isLeaf(final Object value) {
-        return value != null && isLeafValue(value.getClass());
-    }
 }

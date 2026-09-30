@@ -36,11 +36,11 @@ import static java.lang.System.Logger.Level.WARNING;
 final class AeronRuntime implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(AeronRuntime.class.getName());
     private static final long STALE_DRIVER_RETRY_DELAY_MILLIS = 100L;
-    /// Matches the upstream rejection of a mark file whose semantic version never
+    /// Matches the Aeron 1.53.1 rejection of a mark file whose semantic version never
     /// matched this build, as produced by [ArchiveMarkFile] validation.
     private static final Pattern REJECTED_MARK_VERSION = Pattern.compile(
             "mark file \\((.+?)\\) major version (\\d+) does not match software: \\d+");
-    /// Matches the upstream rejection of a mark file whose last owner still appears alive.
+    /// Matches the Aeron 1.53.1 rejection of a mark file whose last owner still appears alive.
     private static final Pattern ACTIVE_MARK_FILE = Pattern.compile("active mark file detected: (.+)");
 
     private final AeronSettings settings;
@@ -85,7 +85,7 @@ final class AeronRuntime implements AutoCloseable {
     /// retrying while a previously crashed instance still owns the driver or archive
     /// mark files.
     ///
-    /// A writer acquires its lease before start, so this directory has a single
+    /// NodeLifecycle acquires the Store-local writer lock before start, so this directory has a single
     /// launcher at a time and two crash leftovers can be recovered here:
     /// <ul>
     /// <li>A never-signaled archive mark file (major version 0) left by a writer
@@ -179,7 +179,7 @@ final class AeronRuntime implements AutoCloseable {
     /// that still reads major version 0. Aeron rejects that file on every future launch,
     /// permanently bricking the archive directory: no archive data is lost, but no writer
     /// can start either. Major version 0 can only mean never signaled: signalReady only
-    /// ever writes a positive version, and the writer lease plus this node's private
+    /// ever writes a positive version, and the Store-local process lock plus this node's private
     /// directory make a live concurrent Archive in this directory unreachable. The mark
     /// file carries liveness and error state, never recordings, so removal is safe; a
     /// positive but different major is a real format mismatch and fails closed. The
@@ -325,7 +325,7 @@ final class AeronRuntime implements AutoCloseable {
 
         /// Rejects a path that reaches its directory through a symbolic-link
     /// component. Checking only the final path is insufficient: a link in a
-    /// parent component can redirect driver, Archive, or checkpoint files outside
+    /// parent component can redirect driver or Archive files outside
     /// the operator-owned directory after validation. Missing components are
     /// ignored and are created only after this check.
     private static void rejectSymbolicLinkComponents(final Path path) throws IOException {
@@ -357,23 +357,20 @@ final class AeronRuntime implements AutoCloseable {
 
     private void start(final Runnable beforeDriverLaunch) {
         ensurePrivateDirectory(this.settings.topology().directories().aeronDirectory(), this.settings.productionMode());
-        final Path checkpointParent = this.settings.topology().directories().checkpointPath().toAbsolutePath().getParent();
-        if (checkpointParent == null) throw new IllegalArgumentException("Aeron checkpoint path must have a parent directory");
-        ensurePrivateDirectory(checkpointParent, this.settings.productionMode());
-        final boolean embeddedWriter = this.settings.topology().role().isWriter() && !this.settings.archivePolicy().externalArchive();
-        if (embeddedWriter) ensurePrivateDirectory(this.settings.topology().directories().archiveDirectory(), this.settings.productionMode());
+        final boolean writer = this.settings.topology().role().isWriter();
+        if (writer) ensurePrivateDirectory(this.settings.topology().directories().archiveDirectory(), this.settings.productionMode());
         final MediaDriver.Context media = new MediaDriver.Context()
                 .aeronDirectoryName(this.settings.topology().directories().aeronDirectory().toString())
                 .driverTimeoutMs(this.settings.timeouts().driverTimeoutMillis())
                 .threadingMode(this.settings.threadingMode())
                 .mtuLength(this.settings.replication().mtuLength())
                 .publicationTermBufferLength(this.settings.replication().termLength())
-                .spiesSimulateConnection(embeddedWriter && !explicitlyDisablesSpySimulation(this.settings.topology().channels().live()))
+                .spiesSimulateConnection(writer && !explicitlyDisablesSpySimulation(this.settings.topology().channels().live()))
                 .errorHandler(this.errorHandler)
                 .dirDeleteOnStart(false)
                 .dirDeleteOnShutdown(false);
         beforeDriverLaunch.run();
-        if (embeddedWriter) {
+        if (writer) {
             final Archive.Context archiveContext = new Archive.Context()
                     .aeronDirectoryName(this.settings.topology().directories().aeronDirectory().toString())
                     .archiveDir(this.settings.topology().directories().archiveDirectory().toFile())

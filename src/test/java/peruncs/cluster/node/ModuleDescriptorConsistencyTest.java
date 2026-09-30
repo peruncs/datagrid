@@ -1,8 +1,7 @@
 package peruncs.cluster.node;
 
-
 import org.junit.jupiter.api.Test;
-import peruncs.cluster.node.replication.ReplicationMetrics;
+import peruncs.cluster.api.ReplicationStatus;
 
 import java.lang.module.ModuleDescriptor;
 import java.net.URISyntaxException;
@@ -10,7 +9,9 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.HashSet;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -27,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ModuleDescriptorConsistencyTest {
     private static Path classesDirectory() {
         try {
-            return Paths.get(ReplicationMetrics.class.getProtectionDomain()
+            return Paths.get(ReplicationStatus.class.getProtectionDomain()
                     .getCodeSource().getLocation().toURI());
         } catch (final URISyntaxException failure) {
             throw new IllegalStateException("cannot locate the compiled classes directory", failure);
@@ -110,7 +111,7 @@ class ModuleDescriptorConsistencyTest {
     }
 
     /// Exactly one application facade is exported; transport, Store adapter,
-    /// backup, checkpoint, and index packages remain implementation details.
+    /// backup, position, and index packages remain implementation details.
     @Test
     void exportsOnlyTheApplicationFacade() {
         final Set<String> exports = descriptor().exports().stream()
@@ -139,7 +140,7 @@ class ModuleDescriptorConsistencyTest {
         /* Every public class of this module's non-exported packages is
          * forbidden in exported signatures; package-private types cannot
          * cross packages, so only public ones can leak. */
-        final Set<String> forbiddenTypes = new java.util.HashSet<>();
+        final Set<String> forbiddenTypes = new HashSet<>();
         try (Stream<Path> moduleClasses = Files.walk(classes)) {
             moduleClasses.filter(path -> path.toString().endsWith(".class"))
                     .filter(path -> !path.toString().endsWith("module-info.class"))
@@ -152,7 +153,7 @@ class ModuleDescriptorConsistencyTest {
                         if (exportedPackages.contains(packageName)) return;
                         try {
                             final Class<?> type = Class.forName(binaryName, false,
-                                    ReplicationMetrics.class.getClassLoader());
+                                    ReplicationStatus.class.getClassLoader());
                             if (java.lang.reflect.Modifier.isPublic(type.getModifiers())) {
                                 forbiddenTypes.add(binaryName);
                             }
@@ -162,7 +163,7 @@ class ModuleDescriptorConsistencyTest {
                     });
         }
 
-        final Set<String> violations = new java.util.TreeSet<>();
+        final Set<String> violations = new TreeSet<>();
         for (final String exportedPackage : exportedPackages) {
             final Path packageDirectory = classes.resolve(exportedPackage.replace('.', '/'));
             try (Stream<Path> entries = Files.list(packageDirectory)) {
@@ -171,7 +172,7 @@ class ModuleDescriptorConsistencyTest {
                             .replace(".class", "").replace('/', '.');
                     final Class<?> type;
                     try {
-                        type = Class.forName(binaryName, false, ReplicationMetrics.class.getClassLoader());
+                        type = Class.forName(binaryName, false, ReplicationStatus.class.getClassLoader());
                     } catch (final ClassNotFoundException unresolved) {
                         throw new IllegalStateException("cannot load " + binaryName, unresolved);
                     }
@@ -188,7 +189,7 @@ class ModuleDescriptorConsistencyTest {
     /// surface: methods (including inherited public ones), constructors,
     /// fields, and public nested types.
     private static Set<String> forbiddenSignatureReferences(final Class<?> exported, final Set<String> forbidden) {
-        final Set<String> found = new java.util.HashSet<>();
+        final Set<String> found = new HashSet<>();
         for (final java.lang.reflect.Method method : exported.getMethods()) {
             if (isOurMember(method.getDeclaringClass())) {
                 checkType(method.getReturnType(), forbidden, found, method);

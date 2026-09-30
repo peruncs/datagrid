@@ -4,7 +4,6 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.errors.CorruptReplicationDataException;
-import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelopeTestSupport;
@@ -19,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
 ///
 /// A poison frame carrying a higher token but an invalid sequence or checksum
 /// must fail without lifting the floor: the floor persists through
-/// checkpointed cursors, so an early adoption would make the poison durable
+/// Store marks, so an early adoption would make the poison durable
 /// across restarts. Data chunks adopt their token at commit time, when the
 /// assembled transaction validates as a whole.
 class TransactionAssemblerFencingTest {
@@ -27,6 +26,10 @@ class TransactionAssemblerFencingTest {
     private static final long EPOCH = 17;
 
     private static TransactionAssembler assembler(final StorageBinaryDataReceiver receiver) {
+        return assembler(receiver, -1L);
+    }
+
+    private static TransactionAssembler assembler(final StorageBinaryDataReceiver receiver, final long initialSequence) {
         return TransactionAssemblerTestSupport.New(
                 AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1)                        .termLength(64 * 1024)
                         .chunkSize(256)
@@ -34,6 +37,7 @@ class TransactionAssemblerFencingTest {
                         .build(),
                 CLUSTER,
                 EPOCH,
+                initialSequence,
                 receiver);
     }
 
@@ -51,6 +55,7 @@ class TransactionAssemblerFencingTest {
 
     private static void accept(final TransactionAssembler assembler, final byte[] bytes) {
         assembler.onFragment(new UnsafeBuffer(bytes), 0, bytes.length, null);
+        if (assembler.deliveryBarrierFull()) assembler.flushDeliveries();
     }
 
         /// Verifies a poison frame with a higher token fails without lifting the floor.
@@ -91,7 +96,7 @@ class TransactionAssemblerFencingTest {
             assertEquals(1, receiver.dataCalls);
             final byte[] stale = frame(AeronReplicationEnvelope.Kind.STORE_BINARY, 5L, 1L,
                     data, data.length, 0);
-            final var failure = assertThrows(ReseedRequiredException.class, () -> accept(assembler, stale));
+            final var failure = assertThrows(CorruptReplicationDataException.class, () -> accept(assembler, stale));
             assertTrue(failure.getMessage().contains("stale writer fencing token"),
                     "stale token must fail closed, was: %s".formatted(failure.getMessage()));
         } finally {
@@ -115,7 +120,34 @@ class TransactionAssemblerFencingTest {
             assertEquals(0, receiver.dataCalls, "an abort from the new writer must not apply old staged bytes");
             final byte[] stale = frame(AeronReplicationEnvelope.Kind.STORE_BINARY, 5L, 1L,
                     data, data.length, 0);
-            assertThrows(ReseedRequiredException.class, () -> accept(assembler, stale));
+            assertThrows(CorruptReplicationDataException.class, () -> accept(assembler, stale));
+        } finally {
+            assembler.dispose();
+        }
+    }
+
+    @Test
+    void resumedReaderSkipsEveryFrameThroughTheStoreMark() {
+        final CountingReceiver receiver = new CountingReceiver();
+        final TransactionAssembler assembler = assembler(receiver, 4L);
+        try {
+            assembler.startingFencingToken(5L);
+            final byte[] staleData = frame(AeronReplicationEnvelope.Kind.STORE_BINARY, 1L, 4L,
+                    new byte[]{1, 2}, 2, 0);
+            staleData[80] ^= 1; // the mark makes even a damaged duplicate irrelevant
+            accept(assembler, staleData);
+            final byte[] staleCommit = frame(AeronReplicationEnvelope.Kind.COMMIT, 1L, 4L,
+                    new byte[0], 2, 0);
+            staleCommit[80] ^= 1;
+            accept(assembler, staleCommit);
+            assertEquals(4L, assembler.lastResolvedSequence());
+            assertEquals(0, receiver.dataCalls);
+            assertNull(assembler.failure());
+
+            accept(assembler, frame(AeronReplicationEnvelope.Kind.ABORT, 5L, 5L,
+                    new byte[0], 0, 0));
+            assertEquals(5L, assembler.lastResolvedSequence());
+            assertNull(assembler.failure());
         } finally {
             assembler.dispose();
         }

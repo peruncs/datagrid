@@ -10,6 +10,8 @@ public enum ReplicationState {
     LIVE,
     /// The node is running with a degraded replication dependency.
     DEGRADED,
+    /// A local writer commit is durable in Store and awaits its COMMIT marker.
+    REPLICATION_SUSPENDED,
     /// The node must be reseeded before it can become live.
     RESEED_REQUIRED,
     /// The node has no replication transport configured.

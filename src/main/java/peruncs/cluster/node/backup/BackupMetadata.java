@@ -1,8 +1,6 @@
 package peruncs.cluster.node.backup;
 
-import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.storage.ReplicationCursor;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 
 import java.util.Comparator;
 import java.util.Objects;
@@ -41,6 +39,8 @@ public record BackupMetadata(
         long epoch,
         long recordingId,
         long logicalSequence,
+        long fencingToken,
+        long recordingPosition,
         UUID nodeId,
         UUID backupId,
         long digest) {
@@ -70,8 +70,9 @@ public record BackupMetadata(
         if (timestamp < 0L) {
             throw new IllegalArgumentException("timestamp must not be negative");
         }
-        if (epoch < UNKNOWN || recordingId < UNKNOWN || logicalSequence < UNKNOWN) {
-            throw new IllegalArgumentException("epoch, recordingId, and logicalSequence must be -1 when unknown");
+        if (epoch < UNKNOWN || recordingId < UNKNOWN || logicalSequence < UNKNOWN ||
+            fencingToken < UNKNOWN || recordingPosition < UNKNOWN) {
+            throw new IllegalArgumentException("replication identity values must be -1 when unknown");
         }
         Objects.requireNonNull(backupId, "backupId");
     }
@@ -80,35 +81,26 @@ public record BackupMetadata(
     ///
     /// The backup id is random, so two nodes publishing in the same
     /// millisecond still produce distinct archives. Generation fields come
-    /// from the cursor: the store generation directly, and the cluster,
-    /// epoch, recording, sequence, and node identities from an Aeron provider
-    /// position. An Aeron cursor without a decodable identity is rejected;
-    /// non-replicated cursors remain identity-free. The digest stays unknown
+    /// from the typed position. The digest stays unknown
     /// until the backend has archived the content.
     ///
     /// @param timestamp  backup creation time
     /// @param manualSlot whether the backup uses the manual slot
-    /// @param cursor     replication cursor stored with the backup, or `null`
+    /// @param position   replication boundary stored in the backup identity, or `null`
     /// @return new backup metadata with a random backup id
-    public static BackupMetadata create(final long timestamp, final boolean manualSlot, final ReplicationCursor cursor) {
-        final AeronReplicationCursor aeron = decodeAeron(cursor);
-        if (cursor != null && "aeron".equalsIgnoreCase(cursor.transport()) && aeron == null) {
-            throw new IllegalArgumentException(
-                    "an Aeron backup cursor must contain a decodable provider identity");
-        }
-        if (aeron != null && (aeron.clusterId() == null || aeron.storeGeneration() == null)) {
-            throw new IllegalArgumentException(
-                    "an Aeron backup cursor must contain cluster and Store-generation identity");
-        }
+    public static BackupMetadata create(final long timestamp, final boolean manualSlot, final ReplicationPosition position) {
+        final boolean replicated = position != null && position.clusterId() != null;
         return new BackupMetadata(
                 timestamp,
                 manualSlot,
-                aeron == null ? null : aeron.clusterId(),
-                aeron == null ? (cursor == null ? null : cursor.storeGeneration()) : aeron.storeGeneration(),
-                aeron == null ? UNKNOWN : aeron.epoch(),
-                aeron == null ? UNKNOWN : aeron.recordingId(),
-                cursor == null || cursor.logicalSequence() < 0L ? UNKNOWN : cursor.logicalSequence(),
-                aeron == null ? null : aeron.nodeId(),
+                replicated ? position.clusterId() : null,
+                replicated ? position.storeGeneration() : null,
+                replicated ? position.epoch() : UNKNOWN,
+                replicated ? position.recordingId() : UNKNOWN,
+                replicated && position.sequence() >= 0L ? position.sequence() : UNKNOWN,
+                replicated ? position.fencingToken() : UNKNOWN,
+                replicated ? position.prepareStartPosition() : UNKNOWN,
+                replicated ? position.nodeId() : null,
                 UUID.randomUUID(),
                 UNKNOWN);
     }
@@ -120,7 +112,8 @@ public record BackupMetadata(
     BackupMetadata withDigest(final long digest) {
         return new BackupMetadata(
                 this.timestamp, this.manualSlot, this.clusterId, this.storeGeneration,
-                this.epoch, this.recordingId, this.logicalSequence, this.nodeId, this.backupId, digest);
+                this.epoch, this.recordingId, this.logicalSequence, this.fencingToken,
+                this.recordingPosition, this.nodeId, this.backupId, digest);
     }
 
         /// Returns the comparison identity of this backup.
@@ -147,95 +140,15 @@ public record BackupMetadata(
         return configured.matches(this.identity());
     }
 
-        /// Verifies that archived metadata and its stored cursor describe one boundary.
-    ///
-    /// The configured-identity check alone cannot catch a corrupt or mixed
-    /// archive: when recording is unconfigured, metadata and manifest can
-    /// disagree about recording, and the outer cursor can disagree with its
-    /// encoded Aeron position about generation or sequence. All three must
-    /// agree before local files are touched. A sequence of `-1` in the
-    /// metadata is unknown and is not compared.
-    ///
-    /// @param metadata selected backup metadata
-    /// @param cursor   replication cursor archived with that backup
-    /// @throws NodeException when metadata and cursor disagree
-    public static void requireConsistentWithCursor(final BackupMetadata metadata, final ReplicationCursor cursor) {
-        Objects.requireNonNull(metadata, "metadata");
-        Objects.requireNonNull(cursor, "cursor");
-        if (!"aeron".equalsIgnoreCase(cursor.transport())) {
-            final var generation = metadata.storeGeneration();
-            if (!Objects.equals(generation, cursor.storeGeneration())) {
-                throw new NodeException(
-                        "backup metadata store generation %s disagrees with archived cursor generation %s"
-                                .formatted(generation, cursor.storeGeneration()));
-            }
-            requireSequenceAgreement(metadata, cursor);
-            return;
-        }
-        final AeronReplicationCursor aeron;
-        try {
-            if (!cursor.hasProviderPosition()) {
-                throw new NodeException("Aeron backup cursor carries no provider position");
-            }
-            aeron = AeronReplicationCursor.decode(cursor.providerPositionBytes());
-        } catch (final RuntimeException unreadable) {
-            throw new NodeException("Aeron backup cursor provider position is undecodable", unreadable);
-        }
-        if (!Objects.equals(metadata.clusterId(), aeron.clusterId())) {
-            throw new NodeException(
-                    "backup metadata cluster %s disagrees with archived cursor cluster %s"
-                            .formatted(metadata.clusterId(), aeron.clusterId()));
-        }
-        final var generation = metadata.storeGeneration();
-        final var aeronGeneration = aeron.storeGeneration();
-        final var cursorGeneration = cursor.storeGeneration();
-        if (!Objects.equals(generation, aeronGeneration) ||
-            !Objects.equals(generation, cursorGeneration) ||
-            !Objects.equals(aeronGeneration, cursorGeneration)) {
-            throw new NodeException(
-                    "backup metadata generation %s disagrees with archived cursor generation %s/%s"
-                            .formatted(generation, aeronGeneration, cursorGeneration));
-        }
-        if (metadata.epoch() != aeron.epoch()) {
-            throw new NodeException(
-                    "backup metadata epoch %s disagrees with archived cursor epoch %s"
-                            .formatted(metadata.epoch(), aeron.epoch()));
-        }
-        if (metadata.recordingId() != aeron.recordingId()) {
-            throw new NodeException(
-                    "backup metadata recording %s disagrees with archived cursor recording %s"
-                            .formatted(metadata.recordingId(), aeron.recordingId()));
-        }
-        if (cursor.logicalSequence() != aeron.sequence()) {
-            throw new NodeException(
-                    "archived cursor sequence %s disagrees with encoded Aeron sequence %s"
-                            .formatted(cursor.logicalSequence(), aeron.sequence()));
-        }
-        requireSequenceAgreement(metadata, cursor);
-    }
-
-    private static void requireSequenceAgreement(final BackupMetadata metadata, final ReplicationCursor cursor) {
-        if (metadata.logicalSequence() != UNKNOWN && metadata.logicalSequence() != cursor.logicalSequence()) {
-            throw new NodeException(
-                    "backup metadata sequence %s disagrees with archived cursor sequence %s"
-                            .formatted(metadata.logicalSequence(), cursor.logicalSequence()));
-        }
-    }
-
-        /// Extracts the Aeron identity from a cursor on a best-effort basis.
-    ///
-    /// @param cursor cursor to inspect, or `null`
-    /// @return decoded Aeron identity, or `null` when the cursor carries none
-    private static AeronReplicationCursor decodeAeron(final ReplicationCursor cursor) {
-        if (cursor == null || !cursor.hasProviderPosition() ||
-            !"aeron".equalsIgnoreCase(cursor.transport())) {
+    /// Returns the stored Archive boundary used by retention, when present.
+    ReplicationPosition retentionBoundary() {
+        if (this.clusterId == null || this.nodeId == null || this.storeGeneration == null ||
+            this.epoch < 0L || this.recordingId < 0L || this.logicalSequence < 0L ||
+            this.fencingToken <= 0L || this.recordingPosition < 0L) {
             return null;
         }
-        try {
-            return AeronReplicationCursor.decode(cursor.providerPositionBytes());
-        } catch (final RuntimeException unreadable) {
-            return null;
-        }
+        return new ReplicationPosition(this.clusterId, this.storeGeneration, this.epoch,
+                this.recordingId, this.logicalSequence, this.recordingPosition, this.fencingToken, this.nodeId);
     }
 
         /// The node identity a backup is checked against.
@@ -261,28 +174,23 @@ public record BackupMetadata(
             return new Identity(null, null, UNKNOWN, UNKNOWN);
         }
 
-                /// Derives the identity from a replication cursor.
+                /// Derives the identity from a replication position.
         ///
-        /// The store generation comes from the cursor directly; the cluster,
-        /// epoch, and recording come from an Aeron provider position when the
-        /// cursor carries a decodable one. Anything unavailable stays unknown.
+        /// The store generation, cluster, epoch, and recording come from the
+        /// typed position. Anything unavailable stays unknown.
         ///
-        /// @param cursor cursor to inspect, or `null`
-        /// @return node identity, unknown where the cursor says nothing
-        public static Identity of(final ReplicationCursor cursor) {
-            final AeronReplicationCursor aeron = decodeAeron(cursor);
-            return new Identity(
-                    aeron == null ? null : aeron.clusterId(),
-                    aeron == null ? (cursor == null ? null : cursor.storeGeneration()) : aeron.storeGeneration(),
-                    aeron == null ? UNKNOWN : aeron.epoch(),
-                    aeron == null ? UNKNOWN : aeron.recordingId());
+        /// @param position position to inspect, or `null`
+        /// @return node identity, unknown where the position says nothing
+        public static Identity of(final ReplicationPosition position) {
+            return position == null ? unknown() : new Identity(
+                    position.clusterId(), position.storeGeneration(), position.epoch(), position.recordingId());
         }
 
                 /// Fills unknown dimensions from a fallback identity.
         ///
         /// Known dimensions of this identity win; only unknown ones are taken
         /// from the fallback. Used to merge the replication provider's view
-        /// with the durable local cursor.
+        /// with the durable local position.
         ///
         /// @param fallback fallback identity
         /// @return merged identity

@@ -12,7 +12,9 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Arrays;
 import java.util.Comparator;
+import java.util.List;
 import java.util.regex.Pattern;
 
 /// Version-checked mutations used only by Archive corruption tests.
@@ -29,7 +31,7 @@ public final class ArchiveArtifactMutator {
     /// @param recordingId Archive recording to list segments for
     /// @return recording segments ordered by base position
     /// @throws IOException when the directory cannot be listed or holds no matching segments
-    public static java.util.List<Path> segments(final Path archiveDirectory, final long recordingId)
+    public static List<Path> segments(final Path archiveDirectory, final long recordingId)
             throws IOException {
         try (var files = Files.list(archiveDirectory)) {
             final var matches = files.filter(path ->
@@ -121,7 +123,7 @@ public final class ArchiveArtifactMutator {
         CLUSTER_ID(48, 16),
         /// The writer fencing token.
         FENCING_TOKEN(64, 8),
-        /// The deployment wire nonce.
+        /// The redundant public cluster-id-derived framing value.
         WIRE_NONCE(72, 8),
         /// The stored header CRC32C.
         HEADER_CRC(80, 4);
@@ -146,13 +148,13 @@ public final class ArchiveArtifactMutator {
         /// Zero-fills the whole field.
         ZERO {
             void apply(final byte[] bytes, final HeaderField field) {
-                java.util.Arrays.fill(bytes, field.offset, field.offset + field.length, (byte) 0);
+                Arrays.fill(bytes, field.offset, field.offset + field.length, (byte) 0);
             }
         },
         /// Sticky-bits: fills the whole field with ones.
         STICKY {
             void apply(final byte[] bytes, final HeaderField field) {
-                java.util.Arrays.fill(bytes, field.offset, field.offset + field.length, (byte) 0xFF);
+                Arrays.fill(bytes, field.offset, field.offset + field.length, (byte) 0xFF);
             }
         },
         /// Increments the field's first byte.

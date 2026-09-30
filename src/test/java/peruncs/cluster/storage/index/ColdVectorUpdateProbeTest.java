@@ -68,7 +68,7 @@ class ColdVectorUpdateProbeTest {
             for (int round = 0; round < 30; round++) {
                 final Article entity = cold.articles.get(id);
                 entity.vector = new float[]{round + 0.5f, 1.0f, 0.0f};
-                ClusterStoreIndexes.refreshImportedIndexes(connection);
+                ClusterStoreIndexes.refreshImportedIndexes(connection, ClusterIndexTestSupport.typeHandlers());
             }
             final VectorIndices<Article> vectors = cold.articles.index().get(VectorIndices.Category());
             assertFalse(vectors.get("probe-vectors")

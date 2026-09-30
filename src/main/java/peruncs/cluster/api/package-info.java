@@ -1,12 +1,11 @@
 /// Application-facing API of one Eclipse Store replication node.
 ///
-/// Applications open a [ClusterNode] with [NodeOptions],
+/// Applications start a [ClusterNode] with [ClusterStorageFoundation],
 /// receive a [ClusterStorageManager] — a StorageManager-compatible facade
 /// with documented role, root, coordination, and lifecycle restrictions — and
-/// join graph access through [GraphBoundary]. Aeron, backup archive, cursor,
-/// checkpoint, and Store-adapter types are implementation details; node
-/// configuration enters programmatically through [NodeSettingsSource], with
-/// the environment as the default source.
+/// join graph access through [GraphBoundary]. Aeron, backup archive,
+/// replication-metadata, and Store-adapter types are implementation details; node
+/// configuration enters through [NodeConfig] or its environment parser.
 ///
 /// Deviations from plain Store: application imports are rejected outright,
 /// persistence failures with uncertain durable outcome latch the graph
@@ -22,6 +21,6 @@
 /// [ReplicationState] is the single lifecycle
 /// definition shared by the internals — there is no second parallel state
 /// enum to drift, and no free-form transport id: Aeron is the only transport,
-/// and a node without replication simply reports no replication metrics.
+/// and a node without replication reports `NOT_CONFIGURED` with unknown
+/// metric sentinels.
 package peruncs.cluster.api;
-

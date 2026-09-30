@@ -2,6 +2,7 @@ package peruncs.cluster.storage.index;
 
 import org.eclipse.serializer.concurrency.LockedExecutor;
 import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.types.PersistenceTypeHandlerManager;
 import org.eclipse.store.gigamap.jvector.VectorIndex;
 import org.eclipse.store.gigamap.jvector.VectorIndexConfiguration;
 import org.eclipse.store.gigamap.jvector.VectorIndices;
@@ -12,11 +13,15 @@ import org.eclipse.store.gigamap.lucene.LuceneContext;
 import org.eclipse.store.gigamap.lucene.LuceneIndex;
 import org.eclipse.store.gigamap.types.GigaMap;
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.cluster.errors.CorruptReplicationDataException;
 import peruncs.cluster.storage.binary.StorageBinaryDataMerger;
 
+import java.nio.ByteBuffer;
 import java.util.Objects;
+import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.function.ToIntFunction;
 
 /// Keeps clustered text and vector search inside the Store object graph and
 /// registers the index types safe to carry in the replicated Store graph.
@@ -32,8 +37,8 @@ import java.util.function.Supplier;
 ///
 /// The facade only assembles index configurations and routes enforcement
 /// calls. The validation policy lives in [ClusterIndexValidation], the reader
-/// refresh/rebuild lifecycle in [ClusterIndexMaintenance], and the upstream
-/// reflective field layout in [StoreIndexReflection]; those types are
+/// refresh/rebuild lifecycle in [ClusterIndexMaintenance], and the temporary
+/// JVector invalidation bridge in [StoreIndexReflection]; those types are
 /// package-private because they are implementation seams, not application
 /// API.
 ///
@@ -52,10 +57,27 @@ import java.util.function.Supplier;
 /// See [ClusterIndexValidation] for what the scan covers and why it fails
 /// closed.
 public final class ClusterStoreIndexes {
+    /// Writer scan flag: the Store commit changes a type that can reach an index.
+    public static final int COMMIT_TOUCHES_INDEXES = 1;
+    /// Writer scan flag: the Store commit contains the reserved replication mark object id.
+    public static final int COMMIT_HAS_REPLICATION_MARK = 1 << 1;
+    /// Writer target is being used before the guarded application manager is installed.
+    public static final int COMMIT_BOOTSTRAP = 1 << 2;
         /* Registration check-then-act must not lock on the foreign index object:
          * any other code synchronizing on it could deadlock with registration,
          * and nothing else honors that monitor. One executor guards both. */
     private static final LockedExecutor REGISTRATION = LockedExecutor.New();
+
+    /// Checks Serializer framing before the upstream materializer walks direct-memory addresses.
+    ///
+    /// The scanner stays package-private; this narrow bridge lets the materializer
+    /// enforce the boundary without exporting scanner internals across packages.
+    ///
+    /// @param buffer normalized direct Store bytes
+    /// @throws CorruptReplicationDataException if the framing is malformed
+    public static void validateEntityFraming(final ByteBuffer buffer) {
+        EntityHeaders.validateFraming(buffer);
+    }
 
     /// Runs a validation while excluding concurrent index registration.
     public static void withRegistrationRead(final Runnable validation) {
@@ -238,19 +260,23 @@ public final class ClusterStoreIndexes {
 
     /// Validates every index attached to one map.
     ///
-    /// Every registered index group is enumerated: embedded Lucene and
+    /// Every registered index group is enumerated through Serializer's type handlers: embedded Lucene and
     /// in-graph vector groups are validated, the core bitmap group is
     /// accepted as in-graph by construction, and any other group fails with
-    /// [IllegalArgumentException]. If group enumeration cannot be proved
-    /// under JPMS, validation throws [IllegalStateException] rather than
+    /// [IllegalArgumentException]. If group enumeration cannot be proved,
+    /// validation throws [IllegalStateException] rather than
     /// assuming unknown state is safe.
     ///
-    /// @param map map to validate
+    /// @param map         map to validate
+    /// @param typeHandlers Store handler manager used to walk registered references
     /// @throws IllegalArgumentException if any attached index uses external
     ///                                  storage or belongs to an unknown category
     /// @throws IllegalStateException    if index groups cannot be enumerated completely
-    public static void validateMap(final GigaMap<?> map) {
-        withRegistrationRead(() -> ClusterIndexValidation.validateMap(map, null));
+    public static void validateMap(final GigaMap<?> map,
+                                   final PersistenceTypeHandlerManager<Binary> typeHandlers) {
+        final var scratch = new ClusterIndexValidation.ValidationScratch(typeHandlers);
+        withRegistrationRead(() -> ClusterIndexValidation.validateMap(
+                map, null, scratch, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS));
     }
 
     /// Enforcement entry point: scans a Store root object graph and rejects any
@@ -267,9 +293,11 @@ public final class ClusterStoreIndexes {
     /// @throws IllegalArgumentException if an external Lucene directory reference or a
     ///                                  non-persisted vector index is reachable from the root
     /// @throws IllegalStateException    if a large index-relevant graph cannot be inspected completely
-    public static void validateGraph(final Object root) {
+    public static void validateGraph(final Object root,
+                                     final PersistenceTypeHandlerManager<Binary> typeHandlers) {
+        final var scratch = new ClusterIndexValidation.ValidationScratch(typeHandlers);
         withRegistrationRead(() -> ClusterIndexValidation.validateGraph(
-                root, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null));
+                root, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null, null, scratch));
     }
 
         /// Validates every Store root held by a storage connection.
@@ -283,29 +311,36 @@ public final class ClusterStoreIndexes {
     /// @param storage storage connection owning the materialized graph
     /// @throws IllegalArgumentException if any root violates the index policy
     /// @throws IllegalStateException    if a root cannot be inspected completely
-    public static void validateStorageRoots(final StorageConnection storage) {
-        validateStorageRoots(storage, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS);
+    public static void validateStorageRoots(final StorageConnection storage,
+                                            final PersistenceTypeHandlerManager<Binary> typeHandlers) {
+        validateStorageRoots(storage, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, typeHandlers);
     }
 
     /// Validates every Store root using an explicit scan bound.
     ///
     /// @param storage    storage connection owning the materialized graph
     /// @param maxObjects maximum index-relevant objects and collection entries
-    public static void validateStorageRoots(final StorageConnection storage, final int maxObjects) {
+    public static void validateStorageRoots(final StorageConnection storage, final int maxObjects,
+                                            final PersistenceTypeHandlerManager<Binary> typeHandlers) {
         if (maxObjects <= 0) throw new IllegalArgumentException("maxObjects must be positive");
+        final var scratch = new ClusterIndexValidation.ValidationScratch(typeHandlers);
         withRegistrationRead(() -> ClusterIndexValidation.validateStorageRoots(
-                storage, maxObjects, null));
+                storage, maxObjects, null, null, scratch));
     }
 
     /// Creates a serialized writer validation callback with an explicit object bound.
     ///
     /// @param storage    current writer connection supplier
+    /// @param typeHandlers Store handler manager used to walk registered references
     /// @param maxObjects maximum index-relevant objects and collection entries
     /// @return validation callback
-    public static Runnable writerValidator(final Supplier<StorageConnection> storage, final int maxObjects) {
+    public static Runnable writerValidator(final Supplier<StorageConnection> storage,
+                                           final PersistenceTypeHandlerManager<Binary> typeHandlers,
+                                           final int maxObjects) {
         Objects.requireNonNull(storage, "storage");
         if (maxObjects <= 0) throw new IllegalArgumentException("maxObjects must be positive");
-        final ClusterIndexValidation.ValidationScratch scratch = new ClusterIndexValidation.ValidationScratch();
+        final ClusterIndexValidation.ValidationScratch scratch =
+                new ClusterIndexValidation.ValidationScratch(typeHandlers);
         return () -> {
             final StorageConnection connection = storage.get();
             if (connection != null) {
@@ -331,6 +366,21 @@ public final class ClusterStoreIndexes {
         };
     }
 
+    /// Scans each writer binary once for both index relevance and the reserved mark object id.
+    public static ToIntFunction<Binary> writerCommitScan(
+            final Supplier<StorageConnection> storage, final LongSupplier replicationMarkObjectId) {
+        Objects.requireNonNull(storage, "storage");
+        Objects.requireNonNull(replicationMarkObjectId, "replicationMarkObjectId");
+        final ClusterIndexValidation.CommitPrefilterScratch scratch = new ClusterIndexValidation.CommitPrefilterScratch();
+        return binary -> {
+            final StorageConnection connection = storage.get();
+            if (connection == null) return COMMIT_BOOTSTRAP;
+            final var dictionary = connection.persistenceManager().typeDictionary();
+            return ClusterIndexValidation.inspectWriterCommit(
+                    binary, dictionary, scratch, replicationMarkObjectId.getAsLong());
+        };
+    }
+
         /// Reader-side maintenance: retires cached search views before an import
     /// batch is materialized.
     ///
@@ -340,8 +390,9 @@ public final class ClusterStoreIndexes {
     /// rationale.
     ///
     /// @param storage storage connection owning the materialized graph
-    static void refreshImportedIndexes(final StorageConnection storage) {
-        refreshImportedIndexes(storage, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS);
+    static void refreshImportedIndexes(final StorageConnection storage,
+                                       final PersistenceTypeHandlerManager<Binary> typeHandlers) {
+        refreshImportedIndexes(storage, typeHandlers, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS);
     }
 
         /// Reader-side maintenance: retires cached search views before an import
@@ -353,9 +404,12 @@ public final class ClusterStoreIndexes {
     /// rationale.
     ///
     /// @param storage             storage connection owning the materialized graph
+    /// @param typeHandlers        Store handler manager used to walk registered references
     /// @param maxValidatedObjects object bound for the discovery scan
-    static void refreshImportedIndexes(final StorageConnection storage, final int maxValidatedObjects) {
-        ClusterIndexMaintenance.refreshImportedIndexes(storage, maxValidatedObjects);
+    static void refreshImportedIndexes(final StorageConnection storage,
+                                       final PersistenceTypeHandlerManager<Binary> typeHandlers,
+                                       final int maxValidatedObjects) {
+        ClusterIndexMaintenance.refreshImportedIndexes(storage, typeHandlers, maxValidatedObjects);
     }
 
 }

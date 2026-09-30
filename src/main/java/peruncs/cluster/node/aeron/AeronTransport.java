@@ -1,26 +1,27 @@
 package peruncs.cluster.node.aeron;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.exceptions.PersistenceException;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
+import org.eclipse.serializer.persistence.types.PersistenceTypeHandlerManager;
+import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.types.StorageConnection;
-import peruncs.cluster.api.NodeSettingsSource;
+import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.node.CloseSequencer;
-import peruncs.cluster.node.NodeRole;
 import peruncs.cluster.node.backup.BackupMetadata;
-import peruncs.cluster.node.replication.*;
-import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.node.replication.ClusterReplicationTransport;
+import peruncs.cluster.node.replication.ReplicationHealth;
+import peruncs.cluster.node.replication.ReplicationLogRetention;
+import peruncs.cluster.node.replication.ReplicationPositionProvider;
+import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
-import peruncs.cluster.storage.io.AtomicFileWriter;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
@@ -34,6 +35,8 @@ import java.util.function.UnaryOperator;
 /// lifecycle state.
 public final class AeronTransport implements ClusterReplicationTransport {
     private final AeronSettings settings;
+    private final ReplicationMark replicationMark;
+    private volatile PersistenceTypeHandlerManager<Binary> typeHandlers;
     /// Shared lifecycle state synchronized by every owner; also the monitor.
     private final AeronTransportShared shared;
     private final AeronRuntimeOwner runtimeOwner;
@@ -48,25 +51,23 @@ public final class AeronTransport implements ClusterReplicationTransport {
     /// Ordered retryable close stages, built once; each readiness check reads live fields.
     private final CloseSequencer closeSequencer;
 
-    /// Creates a transport with settings read from the node properties.
+    /// Creates a transport from the immutable node configuration.
     ///
-    /// @param properties node configuration
-    public AeronTransport(final NodeSettingsSource properties) {
-        this.settings = AeronSettings.fromEnvironment(properties);
-        final Path leaseDirectoryPath = leaseDirectory(properties);
-        validateLeaseDirectory(this.settings, leaseDirectoryPath, properties);
+    /// @param config node configuration
+    public AeronTransport(final NodeConfig config) {
+        this.settings = AeronSettings.fromConfig(config);
+        this.replicationMark = new ReplicationMark(this.settings.topology().clusterId(),
+                this.settings.topology().identity().storeGeneration(), this.settings.topology().epoch(),
+                this.settings.topology().recordingId());
         this.shared = new AeronTransportShared(new AeronArchiveCapacity(this.settings));
         this.runtimeOwner = new AeronRuntimeOwner(this);
-        this.writerTransport = new AeronWriterTransport(this, leaseDirectoryPath,
-                properties.writerLeaseStalenessMillis(), properties.indexValidationMaxObjects());
+        this.writerTransport = new AeronWriterTransport(this, config.limits().maxValidatedIndexObjects());
         this.readerTransport = new AeronReaderTransport(this);
         this.retentionOwner = new AeronRetentionOwner(this);
         this.shared.installWatermarks(new WatermarkCollector(this.runtimeOwner::aeron, this.settings,
                 this.retentionOwner::retentionSupported, this.retentionOwner::liveRetention,
                 this.writerTransport::writerReady));
         this.closeSequencer = new CloseSequencer(this.closeStages());
-        /* Probe metadata durability before any synchronized runtime startup path. */
-        this.verifyMetadataStorage();
     }
 
     AeronSettings settings() {
@@ -101,81 +102,6 @@ public final class AeronTransport implements ClusterReplicationTransport {
         aeronTransport.runtimeOwner().stopDriver();
     }
 
-    /// Rejects a lease directory the Aeron runtime recreates or overwrites.
-    ///
-    /// The MediaDriver recreates its directory on every start, so a lease
-    /// stored inside the driver, archive, or checkpoint tree is deleted on the
-    /// next startup and the writer would appear fenced. Failing at wiring time
-    /// is clearer than a lost lease on the first write.
-    ///
-    /// @param settings       resolved Aeron settings
-    /// @param leaseDirectory resolved lease directory, or `null` when unset
-    private static void validateLeaseDirectory(final AeronSettings settings, final Path leaseDirectory,
-                                               final NodeSettingsSource properties) {
-        final boolean productionWriter = settings.productionMode() && settings.topology().role() == NodeRole.WRITER;
-        if (leaseDirectory == null) {
-            if (productionWriter) {
-                throw new IllegalArgumentException("production writer requires a pre-provisioned shared lease directory");
-            }
-            return;
-        }
-        if (productionWriter) {
-            if (!Boolean.parseBoolean(properties.replicationProperty("ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM"))) {
-                throw new IllegalArgumentException(
-                        "ECLIPSE_DATAGRID_AERON_SHARED_LEASE_FILESYSTEM=true is required for a production writer");
-            }
-            validateSharedLeaseFilesystem(leaseDirectory);
-        }
-        if (overlaps(leaseDirectory, settings.topology().directories().aeronDirectory()) ||
-            overlaps(leaseDirectory, settings.topology().directories().archiveDirectory()) ||
-            overlaps(leaseDirectory, settings.topology().directories().checkpointPath())) {
-            throw new IllegalArgumentException(
-                    "writer lease directory must not overlap the Aeron driver, archive, or checkpoint paths: lease=%s, driver=%s, archive=%s, checkpoint=%s".formatted(
-                            leaseDirectory, settings.topology().directories().aeronDirectory(), settings.topology().directories().archiveDirectory(), settings.topology().directories().checkpointPath()));
-        }
-    }
-
-    /* FileStore.type is only a fail-closed local-filesystem filter, not proof
-     * that two hosts mounted the same export or honor distributed locks. */
-    static void validateSharedLeaseFilesystem(final Path directory) {
-        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IllegalArgumentException("production writer lease directory must be pre-provisioned: " + directory);
-        }
-        try {
-            AtomicFileWriter.ensureNoSymbolicLinks(directory);
-            final String type = Files.getFileStore(directory).type();
-            if (!"nfs4".equalsIgnoreCase(type)) {
-                throw new IllegalArgumentException("production writer lease requires a supported shared filesystem (nfs4); found "
-                        + type + " at " + directory);
-            }
-            AtomicFileWriter.verify(directory.resolve(".datagrid-lease-probe"));
-        } catch (final IOException failure) {
-            throw new IllegalStateException("production writer lease filesystem validation failed: " + directory, failure);
-        }
-    }
-
-    private static boolean overlaps(final Path left, final Path right) {
-        return left.startsWith(right) || right.startsWith(left);
-    }
-
-    /// Resolves the shared directory holding the writer fencing lease.
-    ///
-    /// The lease must live where every writer of one cluster/generation can
-    /// see it, so it shares the backup volume: the one filesystem this
-    /// topology already treats as shared across machines. A writer without a
-    /// configured shared directory cannot fence, so the directory is required
-    /// for the writer role and absent for readers.
-    ///
-    /// @param properties node configuration
-    /// @return lease directory, or `null` when no shared backup volume is configured
-    private static Path leaseDirectory(final NodeSettingsSource properties) {
-        final String configured = properties.replicationProperty(
-                NodeSettingsSource.EnvKeys.BACKUP_PATH);
-        return configured == null || configured.isBlank()
-                ? null
-                : Paths.get(configured).toAbsolutePath().normalize();
-    }
-
     private static Throwable appendFailure(final Throwable current,
                                            final Throwable additional) {
         if (additional == null) return current;
@@ -187,30 +113,6 @@ public final class AeronTransport implements ClusterReplicationTransport {
         return CloseSequencer.append(current, normalized);
     }
 
-    private void verifyMetadataStorage() {
-        final Path parent = this.settings.topology().directories().checkpointPath().toAbsolutePath().getParent();
-        if (parent == null) throw new IllegalArgumentException("Aeron checkpoint path must have a parent directory");
-        if (Files.isSymbolicLink(this.settings.topology().directories().checkpointPath())) {
-            throw new IllegalArgumentException(
-                    "Aeron checkpoint path must not be a symbolic link: %s".formatted(this.settings.topology().directories().checkpointPath()));
-        }
-        /* Apply the same production permission policy before the capability probe
-         * creates any temporary metadata files.  Otherwise a non-POSIX filesystem
-         * would pass this early probe and fail only later during runtime startup. */
-        AeronRuntime.ensurePrivateDirectory(parent, this.settings.productionMode());
-        try {
-            AtomicFileWriter.verify(this.settings.topology().directories().checkpointPath());
-        } catch (final IOException failure) {
-            throw new IllegalStateException(
-                    "Aeron replication metadata storage does not support atomic replacement", failure);
-        }
-    }
-
-    @Override
-    public String id() {
-        return "aeron";
-    }
-
     @Override
     public BackupMetadata.Identity configuredBackupIdentity() {
         return new BackupMetadata.Identity(
@@ -219,17 +121,61 @@ public final class AeronTransport implements ClusterReplicationTransport {
     }
 
     @Override
-    public boolean hasAuthoritativeWriterState() {
-        if (!this.settings.topology().role().isWriter()) return false;
-        final Path checkpoint = this.settings.topology().directories().checkpointPath();
-        return existsOrFail(checkpoint) || existsOrFail(
-                checkpoint.resolveSibling("%s.inflight".formatted(checkpoint.getFileName())));
+    public void registerPersistentRoots(final EmbeddedStorageFoundation<?> foundation) {
+        if (this.replicationMark == null) return;
+        try {
+            foundation.getConnectionFoundation().getRootResolverProvider()
+                    .registerRoot(ReplicationMark.ROOT_ID, this.replicationMark);
+            this.typeHandlers = foundation.getConnectionFoundation().getTypeHandlerManager();
+        } catch (final PersistenceException failure) {
+            throw new NodeException("cannot register reserved Store root '%s'".formatted(ReplicationMark.ROOT_ID), failure);
+        }
     }
 
-    private static boolean existsOrFail(final Path path) {
-        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return true;
-        if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) return false;
-        throw new NodeException("Cannot determine whether writer recovery state exists at %s".formatted(path));
+    PersistenceTypeHandlerManager<Binary> typeHandlers() {
+        return Objects.requireNonNull(this.typeHandlers, "persistent roots must be registered before writer setup");
+    }
+
+    @Override
+    public ReplicationMark replicationMark() {
+        return this.replicationMark;
+    }
+
+    @Override
+    public void prepareReplicationCommit(final ReplicationMark mark) {
+        if (mark != this.replicationMark) {
+            throw new IllegalArgumentException("Store commit does not carry this transport's replication mark");
+        }
+        this.writerTransport.prepareReplicationCommit(mark);
+    }
+
+    @Override
+    public void cancelReplicationCommit(final ReplicationMark mark) {
+        if (mark != this.replicationMark) {
+            throw new IllegalArgumentException("Store commit does not carry this transport's replication mark");
+        }
+        this.writerTransport.cancelReplicationCommit(mark);
+    }
+
+    @Override
+    public void retryPendingCommit() {
+        this.writerTransport.retryPendingCommit();
+    }
+
+    @Override
+    public Duration pendingCommitRetryInterval() {
+        return this.writerTransport.pendingCommitRetryInterval();
+    }
+
+    @Override
+    public void ensureWriterMark(final StorageConnection storage) {
+        if (this.settings.topology().role().isWriter()) {
+            this.writerTransport.ensureStoreMark(this.replicationMark, storage);
+        }
+    }
+
+    ReplicationMark replicationMarkForWriter() {
+        return this.replicationMark;
     }
 
     /// Returns the replication publisher for the transport's single replication stream.
@@ -237,37 +183,31 @@ public final class AeronTransport implements ClusterReplicationTransport {
     /// The returned handle carries dictionaries and lifecycle control
     /// only: data publication is deliberately unavailable through it and
     /// flows exclusively through the persistence-target factory, where
-    /// local Store acceptance and checkpoint fencing are one serialized
-    /// operation. A second stream name is rejected — one transport owns
-    /// exactly one stream.
-    ///
-    /// @param streamName logical stream name, claimed on first use
+    /// local Store acceptance and replication fencing are one serialized
+    /// operation. One transport owns one stream.
     /// @return replication publisher
     @Override
-    public ReplicationPublisher distributor(final String streamName) {
-        return this.writerTransport.distributor(streamName);
+    public ReplicationPublisher distributor() {
+        return this.writerTransport.distributor();
     }
 
     @Override
     public UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
-            final String streamName, final ReplicationPublisher distributor,
+            final ReplicationPublisher distributor,
             final Supplier<StorageConnection> writerStorage) {
-        return this.writerTransport.persistenceTargetFactory(streamName, distributor, writerStorage);
+        return this.writerTransport.persistenceTargetFactory(distributor, writerStorage);
     }
 
     @Override
-    public ReplicationApplier client(
+    public ReplicationApplier clientFromMark(
             final StorageBinaryDataReceiver receiver,
-            final String streamName,
-            final CommitAppliedListener cursorListener,
-            final ReplicationCursor startingCursor
-    ) {
-        return this.readerTransport.client(receiver, streamName, cursorListener, startingCursor);
+            final ReplicationMark startingMark) {
+        return this.readerTransport.clientFromMark(receiver, startingMark);
     }
 
     @Override
-    public ReplicationPositionProvider positionProvider(final String streamName) {
-        return this.writerTransport.positionProvider(streamName);
+    public ReplicationPositionProvider positionProvider() {
+        return this.writerTransport.positionProvider();
     }
 
     @Override
@@ -295,7 +235,7 @@ public final class AeronTransport implements ClusterReplicationTransport {
                         () -> this.shared.capacity().available(this.settings.replication().maxTransactionBytes()),
                         this.writerTransport::writerReady,
                         () -> this.settings.topology().role().isWriter(),
-                        this.writerTransport::writerCheckpointState,
+                        this.writerTransport::writerState,
                         this.shared.capacity()::usableSpaceBytes,
                         () -> this.writerTransport.writerBoundary().position(),
                         () -> this.writerTransport.writerBoundary().sequence(),
@@ -338,12 +278,8 @@ public final class AeronTransport implements ClusterReplicationTransport {
     }
 
     /// Shuts the transport down in dependency order: reader, write
-    /// coordinator, writer, watermark channel, retention, the shared Aeron
-    /// runtime, and finally the writer fencing lease.
-    ///
-    /// The lease is released only after the publication path is fully
-    /// gone, so no successor can steal the token while this writer can
-    /// still offer. Each stage runs only after the previous one is fully
+    /// coordinator, writer, watermark channel, retention, and shared runtime.
+    /// Each stage runs only after the previous one is fully
     /// gone, and a stage that fails leaves the transport retryable instead
     /// of torn down beneath live threads — closing the runtime early would
     /// turn a retryable abort into a use-after-close. All failures are
@@ -357,13 +293,11 @@ public final class AeronTransport implements ClusterReplicationTransport {
             if (this.shared.closing()) {
                 throw new IllegalStateException("Aeron transport close is already in progress");
             }
-            /* A lease held without any other resource means writer startup
-             * failed after acquisition; it still shuts down on the full
-             * path below, never leaking its file and heartbeat thread. */
+            /* A started writer owns Archive resources; close those before
+             * NodeLifecycle releases the Store-local process lock. */
             if (!this.readerTransport.occupied() && !this.writerTransport.hasWriter() &&
                 !this.writerTransport.hasCoordinator() && !this.runtimeOwner.isStarted() &&
-                !this.retentionOwner.hasRetention() && !this.shared.watermarks().hasChannel() &&
-                !this.writerTransport.hasLease()) {
+                !this.retentionOwner.hasRetention() && !this.shared.watermarks().hasChannel()) {
                 this.shared.watermarks().discardDeferred();
                 this.shared.closed(true);
                 return;
@@ -381,22 +315,16 @@ public final class AeronTransport implements ClusterReplicationTransport {
         }
         synchronized (this.shared) {
             this.writerTransport.clearDistributor();
-            this.shared.clearStreamClaim();
             this.shared.watermarks().discardDeferred();
             this.shared.closed(true);
             this.shared.closing(false);
         }
     }
 
-    /// Declares the ordered release stages exactly as the dependency graph
-    /// requires them: reader, coordinator, writer, watermark channel,
-    /// retention, shared runtime, and finally the writer fencing lease.
+    /// Declares resource release in dependency order.
     ///
     /// A stage is skipped when its resource is already gone, so a retry
-    /// after a failed stage resumes without repeating completed work. The
-    /// lease is released only after the publication path is fully stopped,
-    /// so no successor can steal the token while this writer can still
-    /// offer.
+    /// after a failed stage resumes without repeating completed work.
     private List<CloseSequencer.Stage> closeStages() {
         return List.of(
                 CloseSequencer.stage("reader",
@@ -413,7 +341,7 @@ public final class AeronTransport implements ClusterReplicationTransport {
                         () -> !this.readerTransport.occupied() && !this.writerTransport.hasCoordinator() &&
                               this.writerTransport.hasWriter(),
                         this.writerTransport::closeWriterStage),
-                /* A reader can publish its final durable cursor from the polling
+                /* A reader can publish its final applied boundary from the polling
                  * thread. Stop that thread before flushing and closing the watermark
                  * publication. Likewise, keep the writer-side receiver alive until
                  * publication shutdown has completed. */
@@ -438,12 +366,7 @@ public final class AeronTransport implements ClusterReplicationTransport {
                               !this.writerTransport.hasCoordinator() &&
                               !this.retentionOwner.hasRetention() && !this.shared.watermarks().hasChannel() &&
                               this.runtimeOwner.isStarted(),
-                        this.runtimeOwner::close),
-                CloseSequencer.stage("writer-lease",
-                        () -> !this.readerTransport.occupied() && !this.writerTransport.hasWriter() &&
-                              !this.writerTransport.hasCoordinator() &&
-                              !this.runtimeOwner.isStarted(),
-                        this.writerTransport::closeLeaseStage)
+                        this.runtimeOwner::close)
         );
     }
 }

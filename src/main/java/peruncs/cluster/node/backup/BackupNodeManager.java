@@ -1,17 +1,14 @@
 package peruncs.cluster.node.backup;
 
 import org.eclipse.store.storage.types.StorageController;
-import peruncs.cluster.api.BackupInfo;
-import peruncs.cluster.api.BackupSlot;
-import peruncs.cluster.api.BackupStatus;
+import peruncs.cluster.api.*;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.node.CloseSequencer;
 import peruncs.cluster.node.StorageNodeControl;
-import peruncs.cluster.node.replication.ReplicationMetrics;
-import peruncs.cluster.node.store.StorageUsageGauge;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.function.LongSupplier;
 
 import static java.lang.System.Logger.Level.INFO;
 import static org.eclipse.serializer.util.X.notNull;
@@ -32,25 +29,22 @@ public final class BackupNodeManager implements StorageNodeControl, BackupNodeCo
     /// @param storageBackupTaskExecutor backup task executor
     /// @param dataClient                replication data client
     /// @param storageController         storage controller
-    /// @param storageUsageGauge    storage space reader
-    /// @param replicationTransport      selected transport id for monitoring
+    /// @param storageSizeBytes     supplier for the latest disk-space snapshot
+    /// @param replicationEnabled        whether this node has replication
     /// @return backup manager
     public static BackupNodeManager create(
             final StorageBackupTaskExecutor storageBackupTaskExecutor,
             final ReplicationApplier dataClient,
             final StorageController storageController,
-            final StorageUsageGauge storageUsageGauge,
-            final String replicationTransport
+            final LongSupplier storageSizeBytes,
+            final boolean replicationEnabled
     ) {
-        if (replicationTransport == null || replicationTransport.isBlank()) {
-            throw new IllegalArgumentException("replicationTransport must not be blank");
-        }
         return new BackupNodeManager(
                 notNull(storageBackupTaskExecutor),
                 notNull(dataClient),
                 notNull(storageController),
-                notNull(storageUsageGauge),
-                replicationTransport
+                notNull(storageSizeBytes),
+                replicationEnabled
         );
     }
 
@@ -59,23 +53,22 @@ public final class BackupNodeManager implements StorageNodeControl, BackupNodeCo
     private final StorageBackupTaskExecutor tasks;
     private final ReplicationApplier dataClient;
     private final StorageController storageController;
-    private final StorageUsageGauge storageUsageGauge;
-    private final String replicationTransport;
-    private volatile boolean closed;
+    private final LongSupplier storageSizeBytes;
+    private final boolean replicationEnabled;
     private boolean clientDisposed;
 
     private BackupNodeManager(
             final StorageBackupTaskExecutor storageBackupTaskExecutor,
             final ReplicationApplier dataClient,
             final StorageController storageController,
-            final StorageUsageGauge storageUsageGauge,
-            final String replicationTransport
+            final LongSupplier storageSizeBytes,
+            final boolean replicationEnabled
     ) {
         this.tasks = storageBackupTaskExecutor;
         this.dataClient = dataClient;
         this.storageController = storageController;
-        this.storageUsageGauge = storageUsageGauge;
-        this.replicationTransport = replicationTransport;
+        this.storageSizeBytes = storageSizeBytes;
+        this.replicationEnabled = replicationEnabled;
     }
 
     /// Borrows this manager as the storage control view; the manager keeps
@@ -86,21 +79,19 @@ public final class BackupNodeManager implements StorageNodeControl, BackupNodeCo
         return this;
     }
 
-    /// Reports no metrics at all for a node without replication; the
-    /// exported status then carries no placeholder values.
     @Override
-    public ReplicationMetrics replicationMetrics() {
-        if ("none".equalsIgnoreCase(this.replicationTransport)) {
-            return null;
-        }
-        return StorageNodeControl.super.replicationMetrics();
+    public boolean isWriter() {
+        return false;
     }
 
     @Override
-    public long currentSequence() {
-        /* A backup node is an active reader; report its applied cursor
-         * instead of the -1 placeholder a non-replicated node would use. */
-        return this.dataClient.currentSequence();
+    public ReplicationStatus replicationStatus() {
+        if (!this.replicationEnabled) return ReplicationStatus.notConfigured();
+        final long applied = this.dataClient.currentSequence();
+        final ReplicationState state = this.isHealthy() ? ReplicationState.LIVE
+                : this.isReady() ? ReplicationState.STARTING : ReplicationState.FAILED;
+        return new ReplicationStatus(state, Math.max(-1L, applied), -1L, -1L, -1L, -1L,
+                Math.max(-1L, applied));
     }
 
     @Override
@@ -146,7 +137,7 @@ public final class BackupNodeManager implements StorageNodeControl, BackupNodeCo
 
     @Override
     public long readStorageSizeBytes() throws NodeException {
-        return this.storageUsageGauge.readUsedDiskSpaceBytes();
+        return this.storageSizeBytes.getAsLong();
     }
 
     @Override
@@ -160,11 +151,7 @@ public final class BackupNodeManager implements StorageNodeControl, BackupNodeCo
     /// active backup, so a failed close never permanently strands the
     /// client while a backup holds it.
     @Override
-    public synchronized void close() {
-        if (this.closed && this.clientDisposed) {
-            return;
-        }
-        this.closed = true;
+    public void close() {
         LOGGER.log(INFO, "Closing BackupNodeManager.");
         Throwable failure = null;
         try {

@@ -3,8 +3,6 @@ package peruncs.cluster.node.backup;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.node.replication.ReplicationCursorStore;
-import peruncs.cluster.storage.ReplicationCursor;
 import peruncs.cluster.storage.io.AtomicFileWriter;
 
 import java.io.ByteArrayOutputStream;
@@ -53,30 +51,12 @@ class BackupArchiveTest {
         writeArchive(archive,
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/data", "payload"),
-                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
                 new Entry(StorageBackupBackend.READY_ENTRY, ""));
 
         BackupArchive.extractArchive(
                 root.resolve("extracted"), archive, true, BackupArchiveLimits.defaults());
 
         assertEquals("payload", Files.readString(root.resolve("extracted").resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
-    }
-
-    /// Verifies the cursor manifest reads directly from the archive without extracting the Store payload.
-    @Test
-    void readsCursorManifestWithoutExtractingStorage(@TempDir final Path root) throws Exception {
-        final ReplicationCursor expected = new ReplicationCursor("test", null, 9L, "0405");
-        final Path archive = root.resolve("cursor.zip");
-        writeArchive(archive,
-                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
-                new Entry(StorageBackupBackend.MANIFEST_ENTRY, ReplicationCursorStore.encode(expected)),
-                new Entry(StorageBackupBackend.READY_ENTRY, (String) null));
-
-        assertEquals(expected, ReplicationCursorStore.decode(
-                BackupArchive.readManifest(archive,
-                        BackupArchiveLimits.defaults().maxExtractedBytes(),
-                        BackupArchiveLimits.defaults().maxArchiveEntries())));
-        assertFalse(Files.exists(root.resolve("extracted")));
     }
 
     /// Verifies an archive with duplicate entries is rejected and leaves no Store payload behind.
@@ -91,28 +71,6 @@ class BackupArchiveTest {
                         extracted, archive, true, BackupArchiveLimits.defaults()));
         AtomicFileWriter.cleanup(extracted, null);
         assertFalse(Files.exists(extracted.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
-    }
-
-    /// Verifies an archive missing its manifest is rejected when reading the cursor.
-    @Test
-    void rejectsMissingManifest(@TempDir final Path root) throws Exception {
-        final Path archive = root.resolve("missing-manifest.zip");
-        writeArchive(archive, new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null));
-
-        assertThrows(NodeException.class, () -> BackupArchive.readManifest(
-                archive, BackupArchiveLimits.defaults().maxExtractedBytes(),
-                BackupArchiveLimits.defaults().maxArchiveEntries()));
-    }
-
-    /// Verifies a manifest larger than the manifest bound is rejected.
-    @Test
-    void rejectsManifestLargerThanLimit(@TempDir final Path root) throws Exception {
-        final Path archive = root.resolve("large-manifest.zip");
-        writeArchive(archive, new Entry(StorageBackupBackend.MANIFEST_ENTRY, new byte[(1 << 20) + 1]));
-
-        assertThrows(NodeException.class, () -> BackupArchive.readManifest(
-                archive, BackupArchiveLimits.defaults().maxExtractedBytes(),
-                BackupArchiveLimits.defaults().maxArchiveEntries()));
     }
 
     /// Verifies a malformed backup file name is not recognized and its metadata parsing fails.
@@ -130,19 +88,17 @@ class BackupArchiveTest {
                 "123.MANUAL.38F5081FA27C4682AC01943D9DB25170.C5537F6F32824C38BAC12D2BC4D76659.5.42.7.B9A38329F6904FCC9B825E6908C30D9F.ZIP"));
     }
 
-    /// Verifies an archive declaring more bytes than the extraction budget is rejected for both extraction and manifest reads.
+    /// Verifies an archive declaring more bytes than the extraction budget is rejected.
     @Test
     void rejectsArchiveDeclaringMoreThanBudget(@TempDir final Path root) throws Exception {
         final Path archive = root.resolve("lying.zip");
         writeRawStoredArchive(archive,
                 new RawEntry(StorageBackupBackend.STORAGE_ENTRY + "/data", "tiny", 2_000_000_000L),
-                new RawEntry(StorageBackupBackend.MANIFEST_ENTRY, "manifest", 8L),
                 new RawEntry(StorageBackupBackend.READY_ENTRY, "", 0L));
 
         final Path extracted = root.resolve("extracted");
         assertThrows(NodeException.class, () -> BackupArchive.extractArchive(
                 extracted, archive, true, BackupArchiveLimits.of(1024L)));
-        assertThrows(NodeException.class, () -> BackupArchive.readManifest(archive, 1024L, 8));
         assertFalse(Files.exists(extracted.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
 
@@ -152,7 +108,6 @@ class BackupArchiveTest {
         final Path archive = root.resolve("overrun.zip");
         writeRawStoredArchive(archive,
                 new RawEntry(StorageBackupBackend.STORAGE_ENTRY + "/data", "hello", 2L),
-                new RawEntry(StorageBackupBackend.MANIFEST_ENTRY, "manifest", 8L),
                 new RawEntry(StorageBackupBackend.READY_ENTRY, "", 0L));
 
         assertThrows(NodeException.class, () -> BackupArchive.extractArchive(
@@ -165,7 +120,6 @@ class BackupArchiveTest {
         final Path archive = root.resolve("underflow.zip");
         writeRawStoredArchive(archive,
                 new RawEntry(StorageBackupBackend.STORAGE_ENTRY + "/data", "tiny", 5L),
-                new RawEntry(StorageBackupBackend.MANIFEST_ENTRY, "manifest", 8L),
                 new RawEntry(StorageBackupBackend.READY_ENTRY, "", 0L));
 
         assertThrows(NodeException.class, () -> BackupArchive.extractArchive(
@@ -179,7 +133,6 @@ class BackupArchiveTest {
         writeArchive(archive,
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/data", "payload"),
-                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
                 new Entry(StorageBackupBackend.READY_ENTRY, ""));
 
         final Path tight = root.resolve("tight");
@@ -198,30 +151,32 @@ class BackupArchiveTest {
         Files.createDirectories(export.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("sub"));
         Files.writeString(export.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data"), "payload");
         Files.writeString(export.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("sub").resolve("nested"), "nested");
-        Files.writeString(export.resolve(StorageBackupBackend.MANIFEST_ENTRY), "manifest");
         Files.writeString(export.resolve(StorageBackupBackend.READY_ENTRY), "");
 
         final long before = BackupArchive.contentDigestOfDirectory(export);
         final Path archive = root.resolve("backup.zip");
-        BackupArchive.compressStorage(export, archive);
+        final BackupMetadata identity = BackupMetadata.create(1L, false, null);
+        final long writtenDigest = BackupArchive.compressStorage(export, archive, identity);
 
-        assertEquals(before, BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.defaults()),
+        assertEquals(before, writtenDigest, "compression must hash the same sorted Store payload");
+        assertEquals(writtenDigest, BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.defaults()),
                 "identical content must digest identically before and after archiving");
+        assertEquals(writtenDigest, BackupArchive.readIdentity(archive).digest(),
+                "the identity sidecar must carry the digest calculated during compression");
     }
 
-    /// Verifies storage-payload detection distinguishes full backups from manifest-only archives.
+    /// Verifies storage-payload detection rejects archives without Store data.
     @Test
     void reportsStoragePayloadPresence(@TempDir final Path root) throws Exception {
         final Path full = root.resolve("full.zip");
         writeArchive(full,
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
-                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
                 new Entry(StorageBackupBackend.READY_ENTRY, ""));
         assertTrue(BackupArchive.containsStoragePayload(full, BackupArchiveLimits.defaults().maxArchiveEntries()));
 
-        final Path manifestOnly = root.resolve("manifest-only.zip");
-        writeArchive(manifestOnly, new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"));
-        assertFalse(BackupArchive.containsStoragePayload(manifestOnly, BackupArchiveLimits.defaults().maxArchiveEntries()));
+        final Path empty = root.resolve("empty.zip");
+        writeArchive(empty, new Entry(StorageBackupBackend.READY_ENTRY, ""));
+        assertFalse(BackupArchive.containsStoragePayload(empty, BackupArchiveLimits.defaults().maxArchiveEntries()));
     }
 
     /// Verifies the archive digest honors the configured entry budget.
@@ -229,12 +184,11 @@ class BackupArchiveTest {
     void digestHonorsTheEntryBudget(@TempDir final Path root) throws Exception {
         final Path archive = root.resolve("many-entries.zip");
         writeArchive(archive,
-                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/one", "1"),
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/two", "2"));
 
         assertThrows(NodeException.class, () -> BackupArchive.contentDigestOfArchive(
-                archive, BackupArchiveLimits.of(1L << 30, 2)));
+                archive, BackupArchiveLimits.of(1L << 30, 1)));
         assertTrue(BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.defaults()) >= 0L);
     }
 
@@ -244,23 +198,10 @@ class BackupArchiveTest {
         final Path archive = root.resolve("unknown-sizes.zip");
         writeRawStoredArchive(archive,
                 new RawEntry(StorageBackupBackend.STORAGE_ENTRY + "/data", "payload", -1L),
-                new RawEntry(StorageBackupBackend.MANIFEST_ENTRY, "manifest", -1L),
                 new RawEntry(StorageBackupBackend.READY_ENTRY, "", -1L));
 
         assertThrows(NodeException.class,
                 () -> BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.of(1024L, 8)));
-    }
-
-    /// Verifies the digest rejects an archive whose manifest exceeds the manifest bound.
-    @Test
-    void digestRejectsAnOversizedManifest(@TempDir final Path root) throws Exception {
-        final Path archive = root.resolve("oversized-manifest.zip");
-        writeArchive(archive,
-                new Entry(StorageBackupBackend.MANIFEST_ENTRY, new byte[BackupArchive.MAX_MANIFEST_BYTES + 1]),
-                new Entry(StorageBackupBackend.STORAGE_ENTRY + "/data", "payload"));
-
-        assertThrows(NodeException.class,
-                () -> BackupArchive.contentDigestOfArchive(archive, BackupArchiveLimits.defaults()));
     }
 
     /// Verifies an explicit entry budget bounds extraction independently of the byte budget.
@@ -271,7 +212,6 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/one", "1"),
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/two", "2"),
-                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
                 new Entry(StorageBackupBackend.READY_ENTRY, ""));
 
         assertThrows(NodeException.class, () -> BackupArchive.extractArchive(
@@ -294,7 +234,6 @@ class BackupArchiveTest {
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/", (String) null),
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/data", "first"),
                 new Entry(StorageBackupBackend.STORAGE_ENTRY + "/data", "second"),
-                new Entry(StorageBackupBackend.MANIFEST_ENTRY, "manifest"),
                 new Entry(StorageBackupBackend.READY_ENTRY, (String) null)
         };
         final ByteArrayOutputStream bytes = new ByteArrayOutputStream();

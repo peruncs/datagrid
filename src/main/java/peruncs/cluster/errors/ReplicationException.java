@@ -4,7 +4,9 @@ package peruncs.cluster.errors;
 ///
 /// Extends [NodeException] so every typed replication failure reaches the
 /// same application-facing failure boundary as startup and storage errors.
-public class ReplicationException extends NodeException {
+public sealed class ReplicationException extends NodeException permits CorruptReplicationDataException,
+        GraphInvalidatedException, ReaderWriteRejectedException, ReplicationUnavailableException,
+        ReplicationPendingException, ReseedRequiredException, WriteRejectedException {
     /// Creates an exception with a message.
     ///
     /// @param message diagnostic message

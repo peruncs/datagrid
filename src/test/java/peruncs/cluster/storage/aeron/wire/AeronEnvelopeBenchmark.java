@@ -11,7 +11,7 @@ import java.util.UUID;
 /// Run from the module test class path with
 /// `java ... AeronEnvelopeBenchmark --iterations=5000 --sizes=65536,1048576 --chunk-size=16384`. The output reports chunk count, throughput, bytes copied,
 /// and (when the JVM exposes it) bytes allocated by the benchmark thread. Archive
-/// offers and forced checkpoint writes remain a separate environment benchmark.
+/// offers and Store-mark commits require a live cluster benchmark.
 public final class AeronEnvelopeBenchmark {
     private AeronEnvelopeBenchmark() {
     }

@@ -14,17 +14,21 @@ import org.eclipse.store.storage.types.StorageConfiguration;
 import org.eclipse.store.storage.types.StorageConnection;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.storage.StorageGraphCoordinator;
+import peruncs.cluster.storage.index.ClusterIndexTestSupport;
 
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -45,10 +49,22 @@ class StorageBinaryDataMergerTest {
     }
 
     private static BinaryPersistenceFoundation<?> foundation() {
+        final var typeHandlers = ClusterIndexTestSupport.typeHandlers();
         return (BinaryPersistenceFoundation<?>) Proxy.newProxyInstance(
                 BinaryPersistenceFoundation.class.getClassLoader(),
                 new Class<?>[]{BinaryPersistenceFoundation.class},
-                (proxy, method, args) -> defaultValue(method.getReturnType()));
+                (proxy, method, args) -> method.getName().equals("getTypeHandlerManager")
+                        ? typeHandlers : defaultValue(method.getReturnType()));
+    }
+
+    private static Binary ownedBinary(final StorageBinaryDataMerger merger, final int bufferCount) {
+        final ByteBuffer[] buffers = new ByteBuffer[bufferCount];
+        for (int index = 0; index < bufferCount; index++) {
+            final ByteBuffer buffer = merger.allocateNativeBuffer(Long.BYTES);
+            buffer.putLong(0x0102030405060708L + index);
+            buffers[index] = buffer;
+        }
+        return ChunksWrapper.New(buffers);
     }
 
     private static StorageConnection connection() {
@@ -95,7 +111,7 @@ class StorageBinaryDataMergerTest {
         /// A disposed merger refuses both data and dictionary updates.
     @Test
     void disposedMergerRejectsDataAndDictionary() {
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), (new StorageGraphCoordinator())::write, 0L, 1L, 60_000L));
 
         merger.dispose();
 
@@ -113,7 +129,7 @@ class StorageBinaryDataMergerTest {
          * the merger's wait/retry budget, not the Store materializer. The
          * post-batch validation still runs afterwards, hence the tolerant
          * connection. */
-        final ObjectGraphUpdateHandler blockingHandler = updater ->
+        final Consumer<Runnable> blockingHandler = updater ->
         {
             handlerEntered.countDown();
             try {
@@ -147,13 +163,13 @@ class StorageBinaryDataMergerTest {
     @Test
     void genuineFailureSaysFailedNotTimedOut() throws Exception {
         final IllegalStateException boom = new IllegalStateException("boom");
-        final ObjectGraphUpdateHandler failingHandler = updater ->
+        final Consumer<Runnable> failingHandler = updater ->
         {
             throw boom;
         };
         final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), tolerantConnection(), failingHandler, 0L, 1_000_000L, 60_000L));
         try {
-            merger.receiveDataOwned(binary(1));
+            merger.receiveDataOwned(ownedBinary(merger, 1));
             final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L);
             while (merger.failure() == null && System.nanoTime() < deadline) {
                 Thread.sleep(50L);
@@ -180,7 +196,7 @@ class StorageBinaryDataMergerTest {
          * the merger's wait/retry budget, not the Store materializer. The
          * post-batch validation still runs afterwards, hence the tolerant
          * connection. */
-        final ObjectGraphUpdateHandler slowHandler = updater ->
+        final Consumer<Runnable> slowHandler = updater ->
         {
             handlerEntered.countDown();
             try {
@@ -221,7 +237,7 @@ class StorageBinaryDataMergerTest {
     @Test
     void disposeRacingAcceptFailsCleanly() throws Exception {
         for (int iteration = 0; iteration < 8; iteration++) {
-            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
+            final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), (new StorageGraphCoordinator())::write, 0L, 1L, 60_000L));
             final AtomicReference<Throwable> unexpected = new AtomicReference<>();
             final CountDownLatch start = new CountDownLatch(1);
             final Thread disposing = Thread.ofVirtual().start(() ->
@@ -253,16 +269,17 @@ class StorageBinaryDataMergerTest {
         /// exactly once and reports the refusal.
     @Test
     void receiveDataOwnedOnDisposedMergerFailsCleanly() {
-        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()), 0L, 1L, 60_000L));
+        final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), (new StorageGraphCoordinator())::write, 0L, 1L, 60_000L));
+        final Binary owned = ownedBinary(merger, 2);
 
         merger.dispose();
 
         final ReplicationUnavailableException failure = assertThrows(
-                ReplicationUnavailableException.class, () -> merger.receiveDataOwned(binary(2)));
+                ReplicationUnavailableException.class, () -> merger.receiveDataOwned(owned));
         assertTrue(failure.getMessage().contains("disposed"),
                 "an owned delivery after disposal must report the disposal: " + failure.getMessage());
         assertEquals(0, failure.getSuppressed().length,
-                "a clean refusal must not carry a cleanup failure: " + java.util.Arrays.toString(failure.getSuppressed()));
+                "a clean refusal must not carry a cleanup failure: " + Arrays.toString(failure.getSuppressed()));
     }
 
         /// A dispose racing a live worker must fail retryably — never
@@ -294,14 +311,16 @@ class StorageBinaryDataMergerTest {
             final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(
                     new StorageBinaryDataMerger.Configuration(
                             foundation(), connection,
-                            ObjectGraphUpdateHandler.PerStore(new StorageGraphCoordinator()),
-                            0L, 1L, StorageBinaryDataMerger.MAX_CACHED_BYTES, 60_000L, 200L, 200L,
+                            (new StorageGraphCoordinator())::write,
+                            0L, 1L, StorageBinaryDataMerger.MAX_CACHED_BYTES,
+                            NodeConfig.Limits.DEFAULT_BUFFER_POOL_RETAINED_BYTES,
+                            60_000L, 200L, 200L,
                             StorageBinaryDataMerger.MAX_VALIDATED_INDEX_OBJECTS, null));
             /* The merger drives the deferred import on the delivery thread
              * while the queue is empty enough to accept work eagerly, so the
              * import must block a *separate* delivery thread for the dispose
              * to observe a busy worker. */
-            final Thread delivery = Thread.ofVirtual().start(() -> merger.receiveDataOwned(binary(1)));
+            final Thread delivery = Thread.ofVirtual().start(() -> merger.receiveDataOwned(ownedBinary(merger, 1)));
             assertTrue(importEntered.await(10, TimeUnit.SECONDS), "the Store import never started");
             final ReplicationUnavailableException failure = assertThrows(
                     ReplicationUnavailableException.class, merger::dispose,
@@ -417,7 +436,7 @@ class StorageBinaryDataMergerTest {
         }
         final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
         final AtomicBoolean handlerUsed = new AtomicBoolean();
-        final ObjectGraphUpdateHandler recording = updater ->
+        final Consumer<Runnable> recording = updater ->
         {
             handlerUsed.set(true);
             coordinator.write(updater);
@@ -449,7 +468,7 @@ class StorageBinaryDataMergerTest {
         }
         final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
         final CountDownLatch handlerEntered = new CountDownLatch(1);
-        final ObjectGraphUpdateHandler recording = updater ->
+        final Consumer<Runnable> recording = updater ->
         {
             handlerEntered.countDown();
             coordinator.write(updater);
@@ -512,13 +531,13 @@ class StorageBinaryDataMergerTest {
     @Test
     void multiBufferCommitsCoalesceByBytesNotBufferCount()  {
         final AtomicInteger handlerCalls = new AtomicInteger();
-        final ObjectGraphUpdateHandler counting = updater -> handlerCalls.incrementAndGet();
+        final Consumer<Runnable> counting = updater -> handlerCalls.incrementAndGet();
         final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(
                 StorageBinaryDataMergerTestSupport.configuration(
                         foundation(), connection(), counting, 60_000L, 64L << 20, 60_000L));
         try {
             for (int commit = 0; commit < 100; commit++) {
-                merger.receiveDataOwned(binary(3));
+                merger.receiveDataOwned(ownedBinary(merger, 3));
             }
             merger.awaitApplied();
 

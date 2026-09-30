@@ -3,7 +3,7 @@ package peruncs.cluster.node.backup;
 import peruncs.cluster.api.BackupInfo;
 import peruncs.cluster.api.BackupSlot;
 import peruncs.cluster.api.BackupStatus;
-import peruncs.cluster.node.NodeAssembly;
+import peruncs.cluster.node.NodeLifecycle;
 import peruncs.cluster.node.StorageNodeControl;
 
 import java.util.concurrent.CompletableFuture;
@@ -16,7 +16,7 @@ import java.util.concurrent.CompletableFuture;
 /// boundary inherit operations it may not drive. Like [StorageNodeControl],
 /// this view exposes exactly the operations a boundary needs and no
 /// `close()`: the assembly owns the manager and closes it on
-/// [NodeAssembly#close].
+/// [NodeLifecycle#close].
 ///
 /// @since 1.0
 public interface BackupNodeControl {

@@ -21,7 +21,7 @@ class AeronHealthTest {
         boolean capacityAvailable = true;
         boolean writerReady;
         boolean writerRole;
-        ReplicationState checkpoint;
+        ReplicationState replicationState;
         boolean clientRunning;
         boolean clientLive;
         RuntimeException clientFailure;
@@ -59,7 +59,7 @@ class AeronHealthTest {
                     () -> this.capacityAvailable,
                     writerReadyProbe,
                     () -> this.writerRole,
-                    () -> this.checkpoint,
+                    () -> this.replicationState,
                     () -> -1L, () -> -1L, () -> -1L, () -> -1L,
                     () -> this.watermarkFailed);
         }
@@ -150,7 +150,7 @@ class AeronHealthTest {
         assertEquals(3, fixture.writerReadyCalls.get(), "one snapshot per evaluation");
     }
 
-        /// A writer still publishing its first checkpoint is starting, not failed.
+    /// A writer with no resolved Store mark is starting, not failed.
     @Test
     void unreadyWriterIsStarting() {
         final Fixture fixture = new Fixture();
@@ -173,13 +173,13 @@ class AeronHealthTest {
         assertEquals(ReplicationState.DEGRADED, fixture.health().state());
     }
 
-        /// A terminal writer checkpoint wins over a ready publication.
+    /// A terminal writer state wins over a ready publication.
     @Test
-    void writerCheckpointReseedWins() {
+    void writerReseedRequiredStateWins() {
         final Fixture fixture = new Fixture();
         fixture.writerRole = true;
         fixture.writerReady = true;
-        fixture.checkpoint = ReplicationState.RESEED_REQUIRED;
+        fixture.replicationState = ReplicationState.RESEED_REQUIRED;
 
         assertEquals(ReplicationState.RESEED_REQUIRED, fixture.health().state());
     }

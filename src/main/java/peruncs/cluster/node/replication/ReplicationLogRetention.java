@@ -1,7 +1,7 @@
 package peruncs.cluster.node.replication;
 
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -22,19 +22,19 @@ public interface ReplicationLogRetention extends AutoCloseable {
         return true;
     }
 
-    /// Deletes only history proven safe by the provider's cursor/watermark rules.
+    /// Deletes only history proven safe by the provider's position/watermark rules.
     ///
-    /// @param cursor deletion boundary
+    /// @param position deletion boundary
     /// @return result of the bounded maintenance attempt
     /// @throws NodeException if deletion fails
-    MaintenanceResult deleteThrough(ReplicationCursor cursor) throws NodeException;
+    MaintenanceResult deleteThrough(ReplicationPosition position) throws NodeException;
 
     /// Records one durable, quorum-proven reader acknowledgement for a later aggregate
     /// retention request. Providers without reader-watermark support reject this
     /// operation explicitly.
     ///
-    /// @param cursor reader watermark
-    default void recordReaderWatermark(final ReplicationCursor cursor) {
+    /// @param position reader watermark
+    default void recordReaderWatermark(final ReplicationPosition position) {
         throw new UnsupportedOperationException("reader watermarks are unsupported by this transport");
     }
 

@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test;
 import peruncs.cluster.api.BackupInfo;
 import peruncs.cluster.api.BackupSlot;
 import peruncs.cluster.api.BackupStatus;
-import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 
 import java.lang.reflect.Proxy;
@@ -17,8 +17,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies that backup-node health reflects the replication reader state.
 class BackupNodeManagerTest {
-    private static final ReplicationCursor CURSOR =
-            new ReplicationCursor("test", null, 7L, "010203");
+    private static final ReplicationPosition CURSOR =
+            new ReplicationPosition(UUID.randomUUID(), UUID.randomUUID(), 1L, 1L, 7L, 1L, 1L, UUID.randomUUID());
 
     private static BackupNodeManager manager(final FakeClient client, final FakeTasks tasks) {
         final StorageController controller = (StorageController) Proxy.newProxyInstance(
@@ -37,7 +37,7 @@ class BackupNodeManagerTest {
                         default -> null;
                     };
                 });
-        return BackupNodeManager.create(tasks, client, controller, () -> 1L, "test");
+        return BackupNodeManager.create(tasks, client, controller, () -> 1L, true);
     }
 
     /// Verifies a backup node with a running replication reader reports healthy and ready.
@@ -140,7 +140,7 @@ class BackupNodeManagerTest {
         }
 
         @Override
-        public ReplicationCursor cursor() {
+        public ReplicationPosition position() {
             return CURSOR;
         }
 
@@ -174,7 +174,7 @@ class BackupNodeManagerTest {
         @Override
         public CompletableFuture<BackupInfo> runBackup(final BackupSlot slot) {
             return CompletableFuture.completedFuture(
-                    new BackupInfo(UUID.randomUUID(), Instant.now(), CURSOR.logicalSequence(), slot == BackupSlot.MANUAL));
+                    new BackupInfo(UUID.randomUUID(), Instant.now(), CURSOR.sequence(), slot == BackupSlot.MANUAL));
         }
 
         @Override

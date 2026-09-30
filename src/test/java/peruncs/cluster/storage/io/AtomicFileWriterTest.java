@@ -2,10 +2,13 @@ package peruncs.cluster.storage.io;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -13,21 +16,21 @@ import static org.junit.jupiter.api.Assertions.*;
 /// Tests atomic file store behavior.
 class AtomicFileWriterTest {
     private static void write(final java.nio.channels.FileChannel channel, final String value)
-            throws java.io.IOException {
+            throws IOException {
         final ByteBuffer buffer = StandardCharsets.UTF_8.encode(value);
         while (buffer.hasRemaining()) {
-            if (channel.write(buffer) == 0) throw new java.io.IOException("Test file write made no progress");
+            if (channel.write(buffer) == 0) throw new IOException("Test file write made no progress");
         }
     }
 
     private static void delete(final Path directory) throws Exception {
         try (var paths = Files.walk(directory)) {
-            paths.sorted(java.util.Comparator.reverseOrder()).forEach(path ->
+            paths.sorted(Comparator.reverseOrder()).forEach(path ->
             {
                 try {
                     Files.deleteIfExists(path);
-                } catch (final java.io.IOException failure) {
-                    throw new java.io.UncheckedIOException(failure);
+                } catch (final IOException failure) {
+                    throw new UncheckedIOException(failure);
                 }
             });
         }
@@ -36,14 +39,14 @@ class AtomicFileWriterTest {
         /// Verifies failed replacement leaves previous file intact.
     @Test
     void failedReplacementLeavesPreviousFileIntact() throws Exception {
-        final Path directory = Files.createTempDirectory("atomic-file-store-");
-        final Path file = directory.resolve("checkpoint");
+        final Path directory = Files.createTempDirectory("atomic-metadata-");
+        final Path file = directory.resolve("metadata");
         try {
             AtomicFileWriter.write(file, channel -> write(channel, "old"));
-            assertThrows(java.io.IOException.class, () -> AtomicFileWriter.write(file, channel ->
+            assertThrows(IOException.class, () -> AtomicFileWriter.write(file, channel ->
             {
                 write(channel, "new");
-                throw new java.io.IOException("injected crash before rename");
+                throw new IOException("injected crash before rename");
             }));
             assertEquals("old", Files.readString(file, StandardCharsets.UTF_8));
             try (var paths = Files.list(directory)) {
@@ -51,12 +54,12 @@ class AtomicFileWriterTest {
             }
         } finally {
             try (var paths = Files.walk(directory)) {
-                paths.sorted(java.util.Comparator.reverseOrder()).forEach(path ->
+                paths.sorted(Comparator.reverseOrder()).forEach(path ->
                 {
                     try {
                         Files.deleteIfExists(path);
-                    } catch (final java.io.IOException failure) {
-                        throw new java.io.UncheckedIOException(failure);
+                    } catch (final IOException failure) {
+                        throw new UncheckedIOException(failure);
                     }
                 });
             }
@@ -66,11 +69,11 @@ class AtomicFileWriterTest {
         /// Verifies crash during temporary write leaves previous file intact.
     @Test
     void crashDuringTemporaryWriteLeavesPreviousFileIntact() throws Exception {
-        final Path directory = Files.createTempDirectory("atomic-file-store-");
-        final Path file = directory.resolve("checkpoint");
+        final Path directory = Files.createTempDirectory("atomic-metadata-");
+        final Path file = directory.resolve("metadata");
         try {
             AtomicFileWriter.write(file, channel -> write(channel, "old"));
-            AtomicFileWriter.runWithTestHook((phase, ignored) ->
+            FaultInjection.runWithHook((phase, sequence, path) ->
             {
                 if ("DURING_FILE_WRITE".equals(phase)) throw new IllegalStateException("simulated crash");
             }, () -> assertThrows(IllegalStateException.class,
@@ -84,11 +87,11 @@ class AtomicFileWriterTest {
         /// Verifies crash after temporary force before rename leaves previous file intact.
     @Test
     void crashAfterTemporaryForceBeforeRenameLeavesPreviousFileIntact() throws Exception {
-        final Path directory = Files.createTempDirectory("atomic-file-store-");
-        final Path file = directory.resolve("checkpoint");
+        final Path directory = Files.createTempDirectory("atomic-metadata-");
+        final Path file = directory.resolve("metadata");
         try {
             AtomicFileWriter.write(file, channel -> write(channel, "old"));
-            AtomicFileWriter.runWithTestHook((phase, ignored) ->
+            FaultInjection.runWithHook((phase, sequence, path) ->
             {
                 if ("AFTER_TEMP_WRITE_BEFORE_RENAME".equals(phase)) throw new IllegalStateException("simulated crash");
             }, () -> assertThrows(IllegalStateException.class,
@@ -103,10 +106,10 @@ class AtomicFileWriterTest {
     @Test
     void crashAfterRenameLeavesTheNewCompleteFileVisible() throws Exception {
         final Path directory = Files.createTempDirectory("atomic-file-store-");
-        final Path file = directory.resolve("checkpoint");
+        final Path file = directory.resolve("metadata");
         try {
             AtomicFileWriter.write(file, channel -> write(channel, "old"));
-            AtomicFileWriter.runWithTestHook((phase, ignored) ->
+            FaultInjection.runWithHook((phase, sequence, path) ->
             {
                 if ("AFTER_RENAME_BEFORE_DIRECTORY_SYNC".equals(phase)) throw new IllegalStateException("simulated crash");
             }, () -> assertThrows(IllegalStateException.class,
@@ -128,7 +131,7 @@ class AtomicFileWriterTest {
         Files.writeString(source.resolve("data"), "new");
         Files.writeString(destination.resolve("data"), "old");
         try {
-            AtomicFileWriter.runWithTestHook((phase, ignored) -> {
+            FaultInjection.runWithHook((phase, sequence, path) -> {
                 if ("AFTER_STORAGE_RENAME_BEFORE_DIRECTORY_SYNC".equals(phase)) {
                     throw new IllegalStateException("simulated install failure");
                 }
@@ -153,8 +156,8 @@ class AtomicFileWriterTest {
         final Path link = directory.resolve("link");
         try {
             Files.createSymbolicLink(link, target);
-            assertThrows(java.io.IOException.class,
-                    () -> AtomicFileWriter.write(link.resolve("checkpoint"), channel -> write(channel, "data")));
+            assertThrows(IOException.class,
+                    () -> AtomicFileWriter.write(link.resolve("metadata"), channel -> write(channel, "data")));
         } finally {
             delete(directory);
             delete(target);
@@ -171,10 +174,10 @@ class AtomicFileWriterTest {
         final Path link = directory.resolve("link");
         try {
             Files.createSymbolicLink(link, target);
-            final Path secret = target.resolve("checkpoint");
+            final Path secret = target.resolve("metadata");
             Files.writeString(secret, "keep");
-            assertThrows(java.io.IOException.class,
-                    () -> AtomicFileWriter.delete(link.resolve("checkpoint")));
+            assertThrows(IOException.class,
+                    () -> AtomicFileWriter.delete(link.resolve("metadata")));
             assertTrue(Files.exists(secret), "a rejected delete must leave the link target untouched");
         } finally {
             delete(directory);
@@ -185,17 +188,17 @@ class AtomicFileWriterTest {
     @Test
     void deleteAllowsAReplacementWithANewIdentity() throws Exception {
         final Path directory = Files.createTempDirectory("atomic-file-delete-race-");
-        final Path file = directory.resolve("checkpoint");
+        final Path file = directory.resolve("metadata");
         final Path replacement = directory.resolve("replacement");
         try {
             Files.writeString(file, "old");
             Files.writeString(replacement, "new");
-            final boolean deleted = AtomicFileWriter.callWithTestHook((phase, ignored) -> {
+            final boolean deleted = FaultInjection.callWithHook((phase, sequence, path) -> {
                 if ("AFTER_REGULAR_DELETE".equals(phase)) {
                     try {
                         Files.move(replacement, file);
-                    } catch (final java.io.IOException failure) {
-                        throw new java.io.UncheckedIOException(failure);
+                    } catch (final IOException failure) {
+                        throw new UncheckedIOException(failure);
                     }
                 }
             }, () -> AtomicFileWriter.deleteRegularFile(file));

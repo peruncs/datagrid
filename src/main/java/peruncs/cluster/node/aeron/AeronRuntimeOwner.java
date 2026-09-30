@@ -5,7 +5,7 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.RecordingDescriptorConsumer;
 import io.aeron.exceptions.AeronException;
 import peruncs.cluster.storage.aeron.reader.AeronArchiveReader;
-import peruncs.cluster.storage.aeron.writer.CrashHook;
+import peruncs.cluster.storage.io.FaultInjection;
 
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -56,7 +56,7 @@ final class AeronRuntimeOwner {
             if (this.settings().topology().role().isWriter()) shared.capacity().invalidate();
             this.runtime = AeronRuntime.start(this.settings(), this::recordDriverFailure,
                     this::recordSubscriberFailure,
-                    () -> CrashHook.invoke("BEFORE_PUBLICATION_CONNECTED", -1L));
+                    () -> FaultInjection.invoke("BEFORE_PUBLICATION_CONNECTED", -1L));
             try {
                 this.facade.retentionOwner().ensureWatermarkChannel();
             } catch (final RuntimeException | Error failure) {
@@ -207,7 +207,7 @@ final class AeronRuntimeOwner {
 
     /// Reports the Archive's maximum recorded position for the recording.
     ///
-    /// Unlike [io.aeron.archive.client.AeronArchive#getRecordingPosition],
+    /// Unlike [AeronArchive#getRecordingPosition],
     /// this still answers for an inactive or stopped recording, so a
     /// temporarily stopped recording never reads as -1 (never recorded a
     /// byte). The gate therefore withholds only on genuinely unrecorded data.

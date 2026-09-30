@@ -1,7 +1,7 @@
 package peruncs.cluster.node.aeron;
 
 import peruncs.cluster.node.replication.ReplicationLogRetention;
-import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 
 /// Owns Archive retention for one transport: the retention controller, the
 /// reader-watermark fan-in that feeds it, and the degraded/unsupported views.
@@ -50,7 +50,7 @@ final class AeronRetentionOwner {
                     }
 
                     @Override
-                    public MaintenanceResult deleteThrough(final ReplicationCursor cursor) {
+                    public MaintenanceResult deleteThrough(final ReplicationPosition cursor) {
                         throw new UnsupportedOperationException(
                                 "Aeron Archive retention requires an embedded writer and configured retention readers");
                     }
@@ -99,17 +99,17 @@ final class AeronRetentionOwner {
                 settings().topology().epoch(), settings().replication()::termLength,
                 settings().archivePolicy()::segmentFileLength,
                 shared().watermarks()::available,
-                settings().topology().directories().checkpointPath().resolveSibling(
-                        "%s.retention".formatted(settings().topology().directories().checkpointPath().getFileName())),
+                settings().topology().directories().archiveDirectory().resolveSibling(
+                        "%s.retention".formatted(settings().topology().directories().archiveDirectory().getFileName())),
                 AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
     }
 
     /// Reports whether this node can run Archive retention.
     ///
-    /// @return `true` when a writer with an embedded Archive has retention readers
+    /// @return `true` when a writer has configured retention readers
     boolean retentionSupported() {
         return !settings().archivePolicy().retentionReaders().isEmpty() &&
-               settings().topology().role().isWriter() && !settings().archivePolicy().externalArchive();
+               settings().topology().role().isWriter();
     }
 
     /// Returns the live retention controller for the watermark fan-in.

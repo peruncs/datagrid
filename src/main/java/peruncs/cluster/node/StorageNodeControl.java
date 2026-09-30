@@ -1,9 +1,7 @@
 package peruncs.cluster.node;
 
-import peruncs.cluster.api.ReplicationState;
 import peruncs.cluster.api.ReplicationStatus;
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.node.replication.ReplicationMetrics;
 
 /// Protocol-neutral control and observability view of a node manager.
 ///
@@ -11,22 +9,14 @@ import peruncs.cluster.node.replication.ReplicationMetrics;
 /// embedding application's boundary adapters — receive this view instead of
 /// the manager: it exposes exactly the operations a boundary needs and no
 /// `close()`. Closing a borrowed manager would double-dispose resources the
-/// assembly still owns; only the assembly closes managers, on [NodeAssembly#close].
+/// assembly still owns; only the assembly closes managers, on [NodeLifecycle#close].
 ///
 /// @since 1.0
 public interface StorageNodeControl {
-    /// Internal unknown-value sentinel for the raw long metrics: the single
-    /// convention every hook uses, mapped to an empty [java.util.OptionalLong]
-    /// once at the exported [ReplicationStatus]
-    /// boundary.
-    long MISSING = -1L;
-
-    /// Reports whether this node owns the single writer role.
+    /// Reports whether this control is backed by the writer role.
     ///
-    /// @return `true` for the writer, `false` for readers and backup readers
-    default boolean isWriter() {
-        return false;
-    }
+    /// @return `true` for the writer
+    boolean isWriter();
 
         /// Starts periodic storage checks.
     void startStorageChecks();
@@ -53,77 +43,8 @@ public interface StorageNodeControl {
     /// @throws NodeException if the size cannot be read
     long readStorageSizeBytes() throws NodeException;
 
-        /// Monitoring hook; nodes without a replication stream return `-1`.
+    /// Returns replication state and positions sampled for this node.
     ///
-    /// @return current applied sequence
-    default long currentSequence() {
-        return MISSING;
-    }
-
-        /// Monitoring hook; nodes without a replication stream return `-1`.
-    ///
-    /// @return latest writer sequence
-    default long latestSequence() {
-        return MISSING;
-    }
-
-        /// Assembles the point-in-time replication observability values.
-    ///
-    /// The values are sampled independently and may be torn across a
-    /// transition; implementations that can snapshot their collaborators
-    /// consistently should override this method. Returns `null` when this
-    /// node runs without replication, so the exported status carries no
-    /// placeholder metrics.
-    ///
-    /// @return raw replication metrics, or `null` without replication
-    default ReplicationMetrics replicationMetrics() {
-        return new ReplicationMetrics(
-                this.currentSequence(),
-                this.latestSequence(),
-                this.replicationState(),
-                this.isReady(),
-                this.isHealthy(),
-                this.archiveUsableSpaceBytes(),
-                this.writerDurablePosition(),
-                this.writerDurableSequence(),
-                this.appliedSequence());
-    }
-
-        /// Monitoring hook for provider lifecycle state.
-    ///
-    /// @return replication state
-    default ReplicationState replicationState() {
-        if (this.isHealthy()) {
-            return ReplicationState.LIVE;
-        }
-        return this.isReady() ? ReplicationState.STARTING : ReplicationState.FAILED;
-    }
-
-        /// Monitoring hook for the selected provider's Archive capacity.
-    ///
-    /// @return usable archive space in bytes
-    default long archiveUsableSpaceBytes() {
-        return MISSING;
-    }
-
-        /// Monitoring hook for the writer's last durable recording position.
-    ///
-    /// @return durable recording position
-    default long writerDurablePosition() {
-        return MISSING;
-    }
-
-        /// Monitoring hook for the writer's last durable sequence.
-    ///
-    /// @return durable sequence
-    default long writerDurableSequence() {
-        return MISSING;
-    }
-
-        /// Monitoring hook for the reader's last applied sequence.
-    ///
-    /// @return applied sequence
-    default long appliedSequence() {
-        return MISSING;
-    }
+    /// @return one immutable status; nodes without replication return `NOT_CONFIGURED`
+    ReplicationStatus replicationStatus();
 }

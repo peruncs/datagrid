@@ -3,7 +3,7 @@ package peruncs.cluster.storage.aeron.reader;
 import io.aeron.FragmentAssembler;
 import io.aeron.Subscription;
 import org.eclipse.serializer.typing.Disposable;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.config.AeronRetryPolicy;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
@@ -106,18 +106,17 @@ public final class ReplicationApplierAeron implements Disposable {
         return this.assembler.lastResolvedSequence();
     }
 
-    /// Snapshots the current replay boundary. The fencing token is fixed at
+    /// Snapshots the current replication position. The fencing token is fixed at
     /// one because low-level UDP tests run a single unfenced writer.
     ///
-    /// @param nodeId reader node identity for the cursor
-    /// @param storeGeneration Store generation for the cursor
+    /// @param nodeId reader node identity for the position
+    /// @param storeGeneration Store generation for the position
     /// @param recordingId Archive recording the position refers to
-    /// @return cursor at the last resolved sequence and position
-    public AeronReplicationCursor cursor(final UUID nodeId, final UUID storeGeneration, final long recordingId) {
+    /// @return last resolved replication position
+    public ReplicationPosition position(final UUID nodeId, final UUID storeGeneration, final long recordingId) {
         final CursorSnapshot snapshot = this.assembler.cursorSnapshot();
-        return new AeronReplicationCursor(
-                this.assembler.clusterId(), nodeId, storeGeneration, this.assembler.epoch(), 1L, recordingId,
-                snapshot.position(), snapshot.sequence());
+        return new ReplicationPosition(this.assembler.clusterId(), storeGeneration, this.assembler.epoch(),
+                recordingId, snapshot.sequence(), snapshot.position(), 1L, nodeId);
     }
 
     /// Returns the latched terminal failure, if the reader failed.

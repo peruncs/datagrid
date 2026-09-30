@@ -4,7 +4,7 @@ package peruncs.cluster.errors;
 ///
 /// The stable message prefix makes the required operator action visible in
 /// logs even when the exception class is hidden by a process or RPC boundary.
-public class ReseedRequiredException extends ReplicationException {
+public final class ReseedRequiredException extends ReplicationException {
     private static final String PREFIX = "RESEED_REQUIRED: ";
 
     /// Creates the exception with a message.

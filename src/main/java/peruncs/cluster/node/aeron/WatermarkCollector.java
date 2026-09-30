@@ -2,7 +2,7 @@ package peruncs.cluster.node.aeron;
 
 import io.aeron.Aeron;
 import peruncs.cluster.storage.Crc32C;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
+import peruncs.cluster.storage.aeron.position.AeronReaderWatermark;
 import peruncs.cluster.storage.aeron.reader.CursorSnapshot;
 
 import java.lang.System.Logger;
@@ -39,7 +39,7 @@ final class WatermarkCollector {
      * so the scratch is confined to that thread for the channel's life. */
     private final Crc32C.Context crcScratch = new Crc32C.Context();
     private final AtomicLong rejectedWatermarks = new AtomicLong();
-    /* A reader can publish its last durable cursor while the writer is still
+    /* A reader can publish its last applied boundary while the writer is still
      * recovering its Archive recording. Keep one watermark value per reader
      * until the writer boundary exists instead of dropping that acknowledgement. */
     private final ConcurrentHashMap<UUID, AeronReaderWatermark> deferredWatermarks = new ConcurrentHashMap<>();

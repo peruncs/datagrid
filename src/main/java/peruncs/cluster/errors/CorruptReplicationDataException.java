@@ -1,7 +1,7 @@
 package peruncs.cluster.errors;
 
 /// Reports invalid replication bytes or metadata.
-public class CorruptReplicationDataException extends ReplicationException {
+public final class CorruptReplicationDataException extends ReplicationException {
     /// Creates the exception with a message.
     ///
     /// @param message diagnostic message

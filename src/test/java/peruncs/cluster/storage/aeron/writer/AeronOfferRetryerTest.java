@@ -4,7 +4,6 @@ import io.aeron.Publication;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.errors.ReplicationUnavailableException;
-import peruncs.cluster.errors.WriterFencedException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.config.AeronRetryPolicy;
 
@@ -26,7 +25,7 @@ class AeronOfferRetryerTest {
                 () -> now.getAndAdd(1_000_000_000L));
 
         final var failure = assertThrows(ReplicationUnavailableException.class,
-                () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64, () -> true));
+                () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64));
         assertTrue(failure.getMessage().startsWith("Aeron offer timed out"),
                 () -> "unexpected failure: " + failure.getMessage());
     }
@@ -38,7 +37,7 @@ class AeronOfferRetryerTest {
                 (buffer, offset, length) -> 42L,
                 AeronReplicationConfiguration.defaults());
 
-        assertEquals(42L, retryer.offer(new UnsafeBuffer(new byte[64]), 64, () -> true));
+        assertEquals(42L, retryer.offer(new UnsafeBuffer(new byte[64]), 64));
     }
 
     /// Full-jitter spacing must keep a persistent back-pressure loop from
@@ -65,7 +64,7 @@ class AeronOfferRetryerTest {
                         return Publication.BACK_PRESSURED;
                     }, configuration);
             assertThrows(ReplicationUnavailableException.class,
-                    () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64, () -> true));
+                    () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64));
             attempts = attemptsCounter.get();
         }
         /* Each retry parks uniform in [0, cap); reaching 30 attempts would
@@ -75,57 +74,6 @@ class AeronOfferRetryerTest {
         assertTrue(attempts > 1, "the deadline must allow retries before it expires");
     }
 
-    /// Verifies the ownership callback failure is reported as fencing, not timeout.
-    @Test
-    void ownershipLossIsReportedAsWriterFenced() {
-        final AeronOfferRetryer retryer = new AeronOfferRetryer(
-                (buffer, offset, length) -> Publication.BACK_PRESSURED,
-                AeronReplicationConfiguration.defaults());
-
-        final WriterFencedException failure = assertThrows(WriterFencedException.class,
-                () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64, () -> false));
-        assertTrue(failure.getMessage().contains("lease lost"), failure::getMessage);
-    }
-
-    /// Back pressure releases the lease claim before the next publication attempt.
-    @Test
-    void claimsOwnershipSeparatelyForEachRetry() {
-        final AtomicInteger attempts = new AtomicInteger();
-        final AtomicInteger claims = new AtomicInteger();
-        final AeronOfferRetryer retryer = new AeronOfferRetryer(
-                (buffer, offset, length) -> attempts.incrementAndGet() < 3
-                        ? Publication.BACK_PRESSURED : 42L,
-                AeronReplicationConfiguration.defaults());
-        final WriterLeaseGate gate = new WriterLeaseGate() {
-            @Override
-            public boolean isValid() { return true; }
-
-            @Override
-            public long offerUnderOwnership(final OwnedOffer offer) {
-                claims.incrementAndGet();
-                return offer.offer(() -> true);
-            }
-        };
-        assertEquals(42L, retryer.offerGated(new UnsafeBuffer(new byte[64]), 64, gate,
-                Long.MAX_VALUE));
-        assertEquals(3, attempts.get());
-        assertEquals(attempts.get(), claims.get());
-    }
-
-    /// The lease's terminal budget can end retries before the general offer timeout.
-    @Test
-    void terminalBudgetOverridesGeneralOfferTimeout() {
-        final AtomicLong now = new AtomicLong();
-        final AtomicInteger attempts = new AtomicInteger();
-        final AeronOfferRetryer retryer = new AeronOfferRetryer(
-                (buffer, offset, length) -> {
-                    attempts.incrementAndGet();
-                    return Publication.BACK_PRESSURED;
-                }, AeronReplicationConfiguration.defaults(), () -> now.getAndAdd(1_000_000L));
-        assertThrows(ReplicationUnavailableException.class, () -> retryer.offerGated(
-                new UnsafeBuffer(new byte[64]), 64, WriterLeaseGate.alwaysValid(), 1_000L));
-        assertEquals(1, attempts.get());
-    }
 
     /// Verifies the default retry policy preserves the historical idle, jitter, and probe pacing.
     @Test

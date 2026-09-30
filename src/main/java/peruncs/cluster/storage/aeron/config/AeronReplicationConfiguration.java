@@ -7,7 +7,7 @@ import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
 import java.util.Objects;
 
-/// Immutable framing, delivery, and durability limits shared by one writer and
+/// Immutable framing, delivery, and retry limits shared by one writer and
 /// its readers.
 ///
 /// Both sides must use the same values to interpret the stream. Construction
@@ -24,7 +24,6 @@ import java.util.Objects;
 /// @param recordedPositionTimeoutNanos bounded wait for the Archive to report a recorded position
 /// @param recordingStopTimeoutNanos  bounded wait for an Archive recording to stop
 /// @param readerStopTimeoutNanos     bounded wait for a reader to stop at a resolved boundary
-/// @param liveWithholdTimeoutNanos   maximum time a live terminal marker may wait for Archive durability
 /// @param reconnectTimeoutNanos      maximum duration of one Archive reconnect incident
 /// @param readerFragmentsPerPoll     fragments a reader consumes per poll call while replaying
 /// @param readerBarrierMaxTransactions maximum resolved transactions the reader may stage into one
@@ -42,7 +41,6 @@ public record AeronReplicationConfiguration(
         long recordedPositionTimeoutNanos,
         long recordingStopTimeoutNanos,
         long readerStopTimeoutNanos,
-        long liveWithholdTimeoutNanos,
         long reconnectTimeoutNanos,
         int readerFragmentsPerPoll,
         int readerBarrierMaxTransactions,
@@ -61,32 +59,21 @@ public record AeronReplicationConfiguration(
     public static final int MAX_SUPPORTED_TRANSACTION_BYTES = AeronReplicationEnvelope.MAX_TRANSACTION_PAYLOAD_BYTES;
         /// Default fragments consumed per reader poll; a replay backlog drains in a few polls instead of thousands.
     public static final int DEFAULT_READER_FRAGMENTS_PER_POLL = 256;
-        /// Default reader durability-barrier window in transactions.
-    ///
-    /// Resolved transactions are staged into one barrier — one Store import,
-    /// one materialization pass, one uncertainty-marker write, and one forced
-    /// cursor write per barrier instead of per transaction. A backlog replay
-    /// therefore amortizes its fsyncs and index maintenance over the window,
-    /// while an idle or live poll flushes immediately, so live-tail latency is
-    /// unchanged apart from one extra poll cycle. The persisted state after a
-    /// crash is identical: mid-barrier crashes are covered by the uncertainty
-    /// marker, completed barriers by the forced cursor.
+    /// Default number of resolved transactions staged per reader barrier.
     public static final int DEFAULT_READER_BARRIER_MAX_TRANSACTIONS = 64;
         /// Default barrier idle-flush delay in nanoseconds.
     ///
-    /// A staged but unflushed barrier publishes its cursor once polling has
+    /// A staged but unflushed barrier publishes its progress once polling has
     /// been idle this long: live-tail transactions gain at most this much
-    /// cursor latency (bounded additionally by one poll cycle), while a replay
+    /// latency (bounded additionally by one poll cycle), while a replay
     /// backlog — whose fragments keep arriving faster — accumulates whole
-    /// barriers and pays one import, one marker write, and one cursor fsync
-    /// per barrier rather than per transaction.
+    /// barriers and pays one import and index-maintenance pass per barrier.
     public static final long DEFAULT_READER_BARRIER_IDLE_FLUSH_NANOS = 2_000_000L;
     private static final long DEFAULT_OFFER_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDING_START_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDING_STOP_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_READER_STOP_TIMEOUT_NANOS = 30_000_000_000L;
-    private static final long DEFAULT_LIVE_WITHHOLD_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECONNECT_TIMEOUT_NANOS = 30_000_000_000L;
 
         /// Validates every framing, timeout, and delivery limit.
@@ -119,7 +106,7 @@ public record AeronReplicationConfiguration(
         }
         if (offerTimeoutNanos <= 0 || recordingStartTimeoutNanos <= 0 ||
             recordedPositionTimeoutNanos <= 0 || recordingStopTimeoutNanos <= 0 ||
-            readerStopTimeoutNanos <= 0 || liveWithholdTimeoutNanos <= 0 || reconnectTimeoutNanos <= 0) {
+            readerStopTimeoutNanos <= 0 || reconnectTimeoutNanos <= 0) {
             throw new IllegalArgumentException("all Aeron timeouts must be positive");
         }
         if (readerFragmentsPerPoll <= 0) {
@@ -177,7 +164,6 @@ public record AeronReplicationConfiguration(
         private long recordedPositionTimeoutNanos = DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS;
         private long recordingStopTimeoutNanos = DEFAULT_RECORDING_STOP_TIMEOUT_NANOS;
         private long readerStopTimeoutNanos = DEFAULT_READER_STOP_TIMEOUT_NANOS;
-        private long liveWithholdTimeoutNanos = DEFAULT_LIVE_WITHHOLD_TIMEOUT_NANOS;
         private long reconnectTimeoutNanos = DEFAULT_RECONNECT_TIMEOUT_NANOS;
         private int readerFragmentsPerPoll = DEFAULT_READER_FRAGMENTS_PER_POLL;
         private int readerBarrierMaxTransactions = DEFAULT_READER_BARRIER_MAX_TRANSACTIONS;
@@ -269,15 +255,6 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-        /// Sets the maximum time a live terminal marker may wait for Archive durability.
-        ///
-        /// @param value wait in nanoseconds
-        /// @return this builder
-        public Builder liveWithholdTimeoutNanos(final long value) {
-            this.liveWithholdTimeoutNanos = value;
-            return this;
-        }
-
         /// Sets the maximum duration of one Archive reconnect incident.
         ///
         /// @param value wait in nanoseconds
@@ -300,15 +277,11 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the reader durability-barrier window in transactions.
+        /// Sets the reader delivery-barrier window in transactions.
         ///
-        /// Larger windows amortize reader-side import fsyncs, index
-        /// maintenance, marker writes, and cursor fsyncs over a bigger batch,
-        /// which is what dominates backlog replay. A value of `1` restores the
-        /// strict per-transaction barrier. The window only delays durability
-        /// bookkeeping while polling is busy; an idle poll flushes immediately,
-        /// and the uncertainty-marker protocol keeps the crash contract
-        /// identical regardless of the value.
+        /// Larger windows amortize reader-side materialization and index
+        /// maintenance over a bigger batch. A value of `1` restores the
+        /// per-transaction barrier. An idle poll still flushes immediately.
         ///
         /// @param value maximum staged transactions per barrier; must be positive
         /// @return this builder
@@ -321,7 +294,7 @@ public record AeronReplicationConfiguration(
         ///
         /// The poller flushes a staged barrier when the window is full, when it
         /// stops, or when polling has been idle this long; at the live tail a
-        /// single transaction therefore gains at most this much cursor latency
+        /// single transaction therefore gains at most this much progress latency
         /// (plus one poll cycle), while a backlog that drips slower than this
         /// still joints into full barriers.
         ///
@@ -357,7 +330,6 @@ public record AeronReplicationConfiguration(
                     this.recordedPositionTimeoutNanos,
                     this.recordingStopTimeoutNanos,
                     this.readerStopTimeoutNanos,
-                    this.liveWithholdTimeoutNanos,
                     this.reconnectTimeoutNanos,
                     this.readerFragmentsPerPoll,
                     this.readerBarrierMaxTransactions,

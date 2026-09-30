@@ -1,8 +1,12 @@
 package peruncs.cluster.node;
 
+import peruncs.cluster.api.NodeConfig;
+import peruncs.cluster.storage.ReplicationRetry;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -17,27 +21,25 @@ import static org.eclipse.serializer.util.X.notNull;
 /// start the scheduler last; close stops future runs and releases the
 /// threads. A slow run skips later ticks instead of overlapping itself.
 /// A task that throws is logged and the
-/// remaining tasks keep running; a task that fails [#FAILURE_THRESHOLD]
+/// remaining tasks keep running; a task that fails the configured threshold
 /// consecutive runs degrades [#failure()] so readiness reports the node
 /// instead of hiding the repeated failure. Each task clears only its own
 /// failure after it recovers. A fatal [Error] never clears.
 final class NodeMaintenanceScheduler implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(NodeMaintenanceScheduler.class.getName());
-    /// Consecutive task failures before health degrades.
-    static final int FAILURE_THRESHOLD = 3;
-    private static final long CLOSE_TIMEOUT_MILLIS = 5_000L;
-
     private final ScheduledThreadPoolExecutor scheduler;
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final AtomicReference<Error> fatalFailure = new AtomicReference<>();
     private final ConcurrentHashMap<String, RuntimeException> degradedFailures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> consecutiveFailures = new ConcurrentHashMap<>();
     private final List<ScheduledTask> pending = new ArrayList<>();
+    private final NodeConfig.Operations operations;
     private boolean started;
     private volatile boolean closing;
     private volatile boolean closed;
 
-    private NodeMaintenanceScheduler() {
+    private NodeMaintenanceScheduler(final NodeConfig.Operations operations) {
+        this.operations = Objects.requireNonNull(operations, "operations");
         final AtomicInteger threadCount = new AtomicInteger();
         this.scheduler = new ScheduledThreadPoolExecutor(1, task ->
                 Thread.ofPlatform()
@@ -51,7 +53,11 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
     ///
     /// @return a scheduler ready for task submission
     static NodeMaintenanceScheduler create() {
-        return new NodeMaintenanceScheduler();
+        return create(NodeConfig.Operations.DEFAULT);
+    }
+
+    static NodeMaintenanceScheduler create(final NodeConfig.Operations operations) {
+        return new NodeMaintenanceScheduler(operations);
     }
 
     private void runGuarded(final ScheduledTask scheduled) {
@@ -66,7 +72,7 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
             final int failures = this.consecutiveFailures
                     .computeIfAbsent(scheduled.name(), ignored -> new AtomicInteger())
                     .incrementAndGet();
-            if (failures >= FAILURE_THRESHOLD) {
+            if (failures >= this.operations.maintenanceFailureThreshold()) {
                 this.degradedFailures.put(scheduled.name(), failure);
             }
         } catch (final Error failure) {
@@ -85,7 +91,9 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
     /// @return failure requiring health degradation, or `null`
     Throwable failure() {
         final Error fatal = this.fatalFailure.get();
-        return fatal != null ? fatal : this.degradedFailures.values().stream().findFirst().orElse(null);
+        if (fatal != null) return fatal;
+        for (final RuntimeException failure : this.degradedFailures.values()) return failure;
+        return null;
     }
 
         /// Registers one periodic task. Tasks must be scheduled before start.
@@ -172,13 +180,16 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
         this.scheduler.shutdownNow();
         this.workers.shutdownNow();
         try {
-            final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLOSE_TIMEOUT_MILLIS);
-            final boolean schedulerStopped = this.scheduler.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+            final long timeoutMillis = this.operations.maintenanceCloseTimeout().toMillis();
+            final long deadline = ReplicationRetry.deadlineNanos(TimeUnit.MILLISECONDS.toNanos(timeoutMillis));
+            final boolean schedulerStopped = this.scheduler.awaitTermination(
+                    timeoutMillis, TimeUnit.MILLISECONDS);
             final boolean workersStopped = this.workers.awaitTermination(
-                    Math.max(0L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                    ReplicationRetry.remainingNanos(deadline), TimeUnit.NANOSECONDS);
             if (!schedulerStopped || !workersStopped) {
                 throw new IllegalStateException(
-                        "Node housekeeper workers did not stop within %s ms".formatted(CLOSE_TIMEOUT_MILLIS));
+                        "Node housekeeper workers did not stop within %s ms"
+                                .formatted(this.operations.maintenanceCloseTimeout().toMillis()));
             }
             synchronized (this) {
                 this.closed = true;

@@ -7,9 +7,10 @@ import org.eclipse.serializer.util.X;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageConnectionFoundation;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.errors.CorruptReplicationDataException;
-import peruncs.cluster.storage.index.EntityHeaders;
+import peruncs.cluster.storage.index.ClusterStoreIndexes;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.Objects;
 
 import static org.eclipse.serializer.memory.XMemory.getDirectByteBufferAddress;
@@ -58,7 +59,7 @@ final class StorageBinaryDataMaterializer {
                     throw new CorruptReplicationDataException("materializer requires direct buffers at position zero");
                 }
                 if (buffer.limit() == 0) continue;
-                EntityHeaders.validateFraming(buffer);
+                ClusterStoreIndexes.validateEntityFraming(buffer);
                 /* D-29 keeps Serializer's iterator as the materializer. PerunCS validates the
                  * framing first; this upstream API still requires the direct-buffer address. */
                 final long address = getDirectByteBufferAddress(buffer);
@@ -88,7 +89,7 @@ final class StorageBinaryDataMaterializer {
             materializer.materialize(this.loader);
         } finally {
             this.importedSource.end();
-            java.util.Arrays.fill(batch, null);
+            Arrays.fill(batch, null);
         }
     }
 

@@ -1,18 +1,19 @@
 package peruncs.cluster.storage.aeron.crashtest;
 
+import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /// Deterministic test barrier. In throw mode it turns a named seam into a
 /// controlled failure; in gate mode it blocks until the controller releases or
-/// the test times out. Production code only sees a package-private callback.
+/// the test times out. Production fault points are inert without a scoped hook.
 /// Gate mode is reserved for forked-child tests; an in-process test must use
 /// throw mode so the releasing thread cannot deadlock against a held writer
 /// monitor.
 ///
 /// The seam name is the same literal the production code passes to
-/// {@code CrashHook.invoke}, so there is exactly one spelling of every
+/// {@code FaultInjection.invoke}, so there is exactly one spelling of every
 /// boundary across the crash harness.
 public final class CrashBarrier implements AutoCloseable {
     private final CrashPoint point;
@@ -35,8 +36,9 @@ public final class CrashBarrier implements AutoCloseable {
         /// Callback adapter for writer fault seams.
     ///
     /// @param name reached seam name, ignored unless it is the armed point
-    /// @param sequence transaction sequence at the seam
-    public void reached(final String name, final long sequence) {
+    /// @param sequence transaction sequence at the seam, or `-1` for file operations
+    /// @param path filesystem path at the seam, or `null` for transport operations
+    public void reached(final String name, final long sequence, final Path path) {
         if (!this.point.name().equals(name)) return;
         if (this.throwOnReach) throw new SimulatedCrash(this.point, sequence);
         try {

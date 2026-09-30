@@ -3,39 +3,36 @@ package peruncs.cluster.node;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryAssembler;
 import org.eclipse.serializer.persistence.types.Unpersistable;
 import org.eclipse.serializer.reference.Lazy;
+import org.eclipse.serializer.reference.Swizzling;
 import org.eclipse.store.afs.nio.types.NioFileSystem;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.exceptions.StorageException;
 import org.eclipse.store.storage.types.*;
-import peruncs.cluster.api.BackupSlot;
-import peruncs.cluster.api.ClusterStorageManager;
-import peruncs.cluster.api.NodeSettingsSource;
-import peruncs.cluster.api.NodeSettingsSource.EnvKeys;
+import peruncs.cluster.api.*;
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.errors.ReplicationPositionUnavailableException;
+import peruncs.cluster.errors.ReaderWriteRejectedException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.errors.WrongRoleException;
+import peruncs.cluster.errors.internal.ReplicationPositionUnavailableException;
 import peruncs.cluster.node.backup.BackupNodeControl;
 import peruncs.cluster.node.backup.StorageBackupTaskExecutor;
+import peruncs.cluster.node.replication.ReplicationLogRetention;
 import peruncs.cluster.node.store.ClusterStorageManagers;
 import peruncs.cluster.node.store.DistributedStorage;
 import peruncs.cluster.node.store.NodeClose;
-import peruncs.cluster.node.store.StorageSizeValidation;
-import peruncs.cluster.node.replication.ReplicationLogRetention;
-import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.node.store.StorageUsageGauge;
+import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 import peruncs.cluster.storage.index.ClusterStoreIndexes;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.TimeUnit;
+import java.util.Objects;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import static java.lang.System.Logger.Level.ERROR;
 import static java.lang.System.Logger.Level.INFO;
@@ -52,10 +49,72 @@ import static java.lang.System.Logger.Level.INFO;
 /// is complete.
 ///
 /// @since 1.0
-final class NodeLifecycle implements NodeAssembly, Unpersistable {
-    /* Logger name deliberately stays on the public assembly type so log
-     * configuration keyed to NodeAssembly keeps working after the split. */
-    private static final System.Logger LOGGER = System.getLogger(NodeAssembly.class.getName());
+public final class NodeLifecycle implements AutoCloseable, Unpersistable {
+    private static final System.Logger LOGGER = System.getLogger(NodeLifecycle.class.getName());
+
+    /// Creates a builder for one node lifecycle.
+    ///
+    /// @return an empty builder
+    public static Builder create() {
+        return new Builder();
+    }
+
+    /// Starts a configured node behind the public application entry point.
+    ///
+    /// @param rootSupplier creates the Store root when needed
+    /// @param foundation optional Store tuning
+    /// @param settings optional node settings; the process environment is used when `null`
+    /// @param <T> root type
+    /// @return started node handle
+    public static <T> ClusterNode<T> startClusterNode(
+            final Supplier<? extends T> rootSupplier,
+            final EmbeddedStorageFoundation<?> foundation,
+            final NodeConfig config
+    ) {
+        return ClusterNodeHandle.start(rootSupplier, foundation, config);
+    }
+
+    /// Builds a lifecycle from its Store and settings inputs.
+    public static final class Builder {
+        private Supplier<Object> rootSupplier;
+        private EmbeddedStorageFoundation<?> embeddedStorageFoundation;
+        private NodeConfig nodeConfig;
+
+        /// Sets the root supplier.
+        ///
+        /// @param value creates the Store root when needed
+        /// @return this builder
+        public Builder setRootSupplier(final Supplier<Object> value) {
+            this.rootSupplier = value;
+            return this;
+        }
+
+        /// Sets Store tuning while the node retains ownership of its live file provider.
+        ///
+        /// @param value Store tuning
+        /// @return this builder
+        public Builder setEmbeddedStorageFoundation(final EmbeddedStorageFoundation<?> value) {
+            this.embeddedStorageFoundation = value;
+            return this;
+        }
+
+        /// Sets the node configuration source.
+        ///
+        /// @param value node settings
+        /// @return this builder
+        public Builder setNodeConfig(final NodeConfig value) {
+            this.nodeConfig = value;
+            return this;
+        }
+
+        /// Builds the single-use lifecycle.
+        ///
+        /// @return configured node lifecycle
+        public NodeLifecycle build() {
+            return new NodeLifecycle(
+                    new NodeCollaborators(this.rootSupplier, this.embeddedStorageFoundation, this.nodeConfig));
+        }
+    }
 
     private final NodeCollaborators assembly;
     private volatile boolean started;
@@ -65,6 +124,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
      * no-op, so the facade's shutdown() inside a close cannot recurse. */
     private Thread closer;
     private volatile Throwable closeFailure;
+    private volatile WriterProcessLock writerProcessLock;
     /* The complete-close trigger installed on the facade: {@link NodeClose}
      * binds the full teardown and the admission probe the facade consults on
      * every persistence entry. */
@@ -91,12 +151,17 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         this.assembly = assembly;
     }
 
-    @Override
+    /// Returns the role fixed when the lifecycle was created.
+    ///
+    /// @return configured node role
     public NodeRole nodeRole() {
         return this.assembly.nodeRole;
     }
 
-    @Override
+    /// Starts storage and returns its application-facing manager.
+    ///
+    /// @return started manager
+    /// @throws NodeException if startup fails
     public synchronized ClusterStorageManager<?> startStorageManager() throws NodeException {
         this.ensureOpen();
         /* This is the generic lifecycle entry used by development nodes and
@@ -114,13 +179,16 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         return manager;
     }
 
-    @Override
+    /// Returns the storage-node controls, starting the node if needed.
+    ///
+    /// @return storage-node controls
+    /// @throws NodeException if startup fails
     public synchronized StorageNodeControl storageNodeManager() throws NodeException {
         this.ensureOpen();
         /* The role managers exist only for production nodes: a dev node
          * starts without the replication collaborators the manager wraps, so
          * manufacturing one here would wrap half-built resources. */
-        if (!this.assembly.getNodeSettingsSource().isProdMode()) {
+        if (!this.assembly.getNodeConfig().productionMode()) {
             throw new WrongRoleException(
                     "a development node owns no storage node manager; status and checks are production-only");
         }
@@ -135,10 +203,13 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         return this.assembly.getStorageNodeManager();
     }
 
-    @Override
+    /// Returns backup-node controls, starting the node if needed.
+    ///
+    /// @return backup-node controls
+    /// @throws NodeException if startup fails
     public synchronized BackupNodeControl backupNodeManager() throws NodeException {
         this.ensureOpen();
-        if (!this.assembly.getNodeSettingsSource().isProdMode()) {
+        if (!this.assembly.getNodeConfig().productionMode()) {
             throw new WrongRoleException(
                     "a development node owns no backup node manager; status and checks are production-only");
         }
@@ -168,7 +239,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
             /* The role is captured once at assembly time and never
              * re-parsed: a custom settings source cannot split one startup
              * across roles by returning different values later. */
-            if (!this.assembly.getNodeSettingsSource().isProdMode()) {
+            if (!this.assembly.getNodeConfig().productionMode()) {
                 this.startDevNode();
             } else if (this.assembly.nodeRole == NodeRole.BACKUP_READER) {
                 this.startBackupNode();
@@ -192,7 +263,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     /// @throws NodeException if startup fails
     private void startBackupNode() throws NodeException {
         LOGGER.log(INFO, "Starting backup cluster node");
-        final var props = this.assembly.getNodeSettingsSource();
+        final NodeConfig config = this.assembly.getNodeConfig();
 
         this.assembly.getReplicationPositionProvider().init();
 
@@ -236,38 +307,19 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
          * storage, like a reader without a seed. */
         if (!installedUserUpload && NodeCollaborators.isMissingOrEmpty(storageRootPath)) {
             throw new ReseedRequiredException(
-                    "backup node has no local Store image at %s, no compatible backup, and no user upload; seed the Store directory with the writer's Store and its replication cursor before starting"
+                    "backup node has no local Store image at %s, no compatible backup, and no user upload; seed the Store directory with the writer's Store and replication mark before starting"
                             .formatted(storageRootPath));
         }
-        /* Same lost-cursor gate as replicated readers: existing Store
-         * files without their durable offset cursor cannot be resumed
-         * safely, because the backup node can no longer address the
-         * history those files represent. */
-        if (!installedUserUpload && this.assembly.usesAeronReplication() && !NodeCollaborators.isMissingOrEmpty(storageRootPath)) {
-            this.requireStoredCursorForExistingStore(storageRootPath);
-        }
-
-        if (installedUserUpload) {
-            final ReplicationCursor cursor;
-            try {
-                cursor = this.assembly.getReplicationPositionProvider().latest();
-            } catch (final ReplicationPositionUnavailableException failure) {
-                throw new NodeException(
-                        "Cannot bootstrap uploaded storage: replication transport does not expose a writer latest position",
-                        failure);
-            }
-            LOGGER.log(System.Logger.Level.DEBUG, "Set starting replication cursor to: %s".formatted(cursor));
-            this.assembly.getDurableCursorFile().set(cursor);
-        }
-
         final var embeddedStorageManager = this.prepareEmbeddedStorage(storageRootPath).start();
         this.assembly.embeddedStorageManager = embeddedStorageManager;
+        if (this.assembly.hasReplicationMark()) this.requireStoredMark(embeddedStorageManager, storageRootPath);
         this.initializeRoot(embeddedStorageManager, installedUserUpload);
         /* Same one-time policy scan as storage nodes: a seeded or uploaded
          * image with an external index registration is rejected before the
          * backup node serves or publishes anything. */
         ClusterStoreIndexes.validateStorageRoots(
-                embeddedStorageManager, props.indexValidationMaxObjects());
+                embeddedStorageManager, config.limits().maxValidatedIndexObjects(),
+                this.assembly.getEmbeddedStorageFoundation().getConnectionFoundation().getTypeHandlerManager());
 
         this.assembly.getReplicationPublisher().ignoreDistribution(false);
         this.queueWriterDictionary(embeddedStorageManager);
@@ -278,7 +330,8 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
          * so a DI container or try-with-resources owning the StorageManager
          * tears the whole node down in the sequencer's order. */
         this.assembly.clusterStorageManager = ClusterStorageManagers.readOnly(embeddedStorageManager,
-                this.nodeCloseTrigger, this.assembly.graphCoordinator);
+                this.nodeCloseTrigger, this.assembly.graphCoordinator,
+                this.assembly.getClusterReplicationTransport().replicationMark());
 
         this.assembly.getReplicationApplier().start();
         /* Eagerly create the manager so misconfiguration fails at startup.
@@ -286,29 +339,34 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
          * backupNodeManager(). */
         this.assembly.getBackupNodeManager();
 
+        final var usageGauge = this.assembly.getStorageUsageGauge();
+        usageGauge.measureNow();
+        maintenance.schedule("StorageUsageGauge", usageGauge::measureNow,
+                StorageUsageGauge.REFRESH_INTERVAL);
+
         final StorageConnection gcConnection = this.assembly.clusterStorageManager;
         maintenance.schedule("GcWorkaround", () ->
         {
             LOGGER.log(INFO, "Issuing GC and CC");
             gcConnection.issueFullCacheCheck();
             gcConnection.issueFullGarbageCollection();
-        }, NodeCollaborators.maintenanceInterval(props.gcIntervalMinutes(), EnvKeys.GC_INTERVAL_MINUTES, 30));
+        }, NodeCollaborators.maintenanceInterval(config.storage().gcInterval(), 30));
         maintenance.schedule(
                 "StorageBackup",
                 this.assembly.getStorageBackupTaskExecutor().createScheduledWork(),
-                NodeCollaborators.maintenanceInterval(props.backupIntervalMinutes(), EnvKeys.BACKUP_INTERVAL_MINUTES, 120)
+                config.backup().interval()
         );
 
         // storage nodes need an initial backup to start from
         if (mustPublishStarterBackup) {
             LOGGER.log(INFO, "Uploading starter backup for storage nodes");
             /* This is a bootstrap barrier. The storage nodes must not observe
-             * uploaded storage until its cursor and backup are durable. Keep
+                     * uploaded storage until its Store mark and backup are durable. Keep
              * the source upload until that boundary is safely published so a
              * failed bootstrap can retry from the same image. */
             awaitStarterBackup(
                     this.assembly.getStorageBackupTaskExecutor().runBackup(BackupSlot.SCHEDULED),
-                    props.backupCloseTimeoutMillis(), backend::deleteUserUploadedStorage);
+                    config.backup().closeTimeout().toMillis(), backend::deleteUserUploadedStorage);
         }
 
         maintenance.start();
@@ -325,8 +383,10 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
             throws NodeException {
         try {
             backup.get(timeoutMillis, TimeUnit.MILLISECONDS);
-        } catch (final TimeoutException | CancellationException failure) {
-            throw new NodeException("Starter backup failed; uploaded storage was kept", failure);
+        } catch (final TimeoutException timeout) {
+            throw new NodeException("Starter backup timed out; uploaded storage was kept", timeout);
+        } catch (final CancellationException cancelled) {
+            throw new NodeException("Starter backup was cancelled; uploaded storage was kept", cancelled);
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new NodeException("Interrupted while creating the starter backup; uploaded storage was kept", interrupted);
@@ -338,21 +398,24 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         deleteUserUpload.run();
     }
 
-    /// Starts a node that publishes storage data.
+    /// Starts a standalone Store or a replicated storage node.
     ///
     /// @throws NodeException if startup fails
     private void startStorageNode() throws NodeException {
         LOGGER.log(INFO, "Starting storage cluster node");
-        final var props = this.assembly.getNodeSettingsSource();
+        final NodeConfig config = this.assembly.getNodeConfig();
 
         final var storageParentPath = this.assembly.storageParentPath();
         final var storageRootPath = storageParentPath.resolve("storage");
+        final boolean writer = this.assembly.nodeRole.canWrite();
 
-        /* The position provider is initialized before restore selection:
-         * both startup paths resolve the backup identity the same way, and
-         * an uninitialized provider would silently degrade the identity on
-         * every writer start. */
-        this.assembly.getReplicationPositionProvider().init();
+        /* The lock protects the Store path, so acquire it before backup
+         * selection, Store opening, or the first Aeron runtime startup. */
+        if (writer) {
+            this.writerProcessLock = WriterProcessLock.acquire(storageRootPath);
+        } else {
+            this.assembly.getReplicationPositionProvider().init();
+        }
 
         // don't send messages generated by starting the storage and storing the empty root
         this.assembly.getReplicationPublisher().ignoreDistribution(true);
@@ -365,44 +428,25 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
             LOGGER.log(INFO, "Restored the newest compatible storage backup");
         } else {
             LOGGER.log(INFO, Files.exists(storageRootPath)
-                    ? "Resuming existing local storage and cursor"
+                    ? "Resuming existing local storage and Store mark"
                     : "Starting with local storage");
         }
         /* A reader owns no authoritative image: without a restored backup
          * or existing local Store files it could only manufacture an
          * independent root that later deltas cannot resolve against.
          * Fail fast before opening storage instead of diverging. */
-        if (!restored && !this.assembly.mayCreateRoot() && NodeCollaborators.isMissingOrEmpty(storageRootPath)) {
-            throw new ReseedRequiredException(
-                    "node role '%s' has no local Store image and no backup seed at %s; restore a compatible backup or seed the Store directory with its replication cursor before starting"
-                            .formatted(NodeRole.of(props).configName(), storageRootPath));
-        }
-        /* Lost-cursor gate, replicated readers only: Store files without
-         * their durable offset cursor cannot be resumed safely, because
-         * the reader can no longer address the history those files
-         * represent. Nodes without replication keep the Store-only seed
-         * flow above. */
-        if (!restored && !this.assembly.mayCreateRoot() && this.assembly.usesAeronReplication() &&
-            !NodeCollaborators.isMissingOrEmpty(storageRootPath)) {
-            this.requireStoredCursorForExistingStore(storageRootPath);
-        }
-
-        final var dataDistributor = this.assembly.getReplicationPublisher();
-        /* Pre-start root gate: the authoritative check in initializeRoot
-         * runs after the Store is opened, when rejecting a reader already
-         * leaves Store files behind. Re-check immediately before creating
-         * the Store so a rejected reader leaves no fresh image. */
         if (!this.assembly.mayCreateRoot() && NodeCollaborators.isMissingOrEmpty(storageRootPath)) {
             throw new ReseedRequiredException(
-                    "node role '%s' has no local Store image at %s; restore a compatible backup or seed the Store directory with its replication cursor before starting"
-                            .formatted(NodeRole.of(props).configName(), storageRootPath));
+                    "node role '%s' has no local Store image or compatible backup at %s; seed the Store directory with its replication mark before starting"
+                            .formatted(this.assembly.nodeRole.configName(), storageRootPath));
         }
+        final var dataDistributor = this.assembly.getReplicationPublisher();
+        final var replicationTransport = this.assembly.getClusterReplicationTransport();
         final var embeddedStorageFoundation = this.prepareEmbeddedStorage(storageRootPath);
         DistributedStorage.configureWriting(
                 embeddedStorageFoundation,
                 dataDistributor,
-                this.assembly.getClusterReplicationTransport().persistenceTargetFactory(
-                        props.replicationStreamName(),
+                replicationTransport.persistenceTargetFactory(
                         dataDistributor,
                         /* The writer's storage connection does not exist
                          * during wiring (root creation runs first); the
@@ -412,14 +456,28 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                 )
         );
 
-        final var embeddedStorageManager = embeddedStorageFoundation.start();
+        final EmbeddedStorageManager embeddedStorageManager;
+        try {
+            embeddedStorageManager = embeddedStorageFoundation.start();
+        } catch (final ReaderWriteRejectedException missingReaderSeed) {
+            if (!this.assembly.nodeRole.isWriter() && this.assembly.hasReplicationMark()) {
+                throw new ReseedRequiredException(
+                        "reader Store has no committed replication mark; restore a compatible backup or seed the Store directory with the writer's Store mark",
+                        missingReaderSeed);
+            }
+            throw missingReaderSeed;
+        }
         this.assembly.embeddedStorageManager = embeddedStorageManager;
+        if (!this.assembly.nodeRole.isWriter() && this.assembly.hasReplicationMark()) {
+            this.requireStoredMark(embeddedStorageManager, storageRootPath);
+        }
         this.initializeRoot(embeddedStorageManager, this.assembly.mayCreateRoot());
         /* One-time policy scan at Store start: a freshly deserialized or
          * seeded image containing an external index is rejected before
          * the node serves or publishes anything. */
         ClusterStoreIndexes.validateStorageRoots(
-                embeddedStorageManager, props.indexValidationMaxObjects());
+                embeddedStorageManager, config.limits().maxValidatedIndexObjects(),
+                this.assembly.getEmbeddedStorageFoundation().getConnectionFoundation().getTypeHandlerManager());
 
         final var limitGate = this.assembly.getStorageLimitGate();
         limitGate.updateUsage(this.assembly.getStorageUsageGauge().measureNow());
@@ -433,7 +491,6 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
          * raw Store import path and must never persist a locally originated
          * write. The application-facing read-only view rejects every write;
          * only the node-owned merger receives the raw manager. */
-        final boolean writer = NodeRole.of(props) == NodeRole.WRITER;
         /* The manager's shutdown() triggers this lifecycle's complete close —
          * see the backup node path above. */
         this.assembly.clusterStorageManager = writer
@@ -441,11 +498,20 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                         embeddedStorageManager,
                         limitGate::limitReached,
                         this.nodeCloseTrigger,
-                        this.assembly.graphCoordinator)
+                        this.assembly.graphCoordinator,
+                        replicationTransport.replicationMark(),
+                        replicationTransport::prepareReplicationCommit,
+                        replicationTransport::cancelReplicationCommit)
                 : ClusterStorageManagers.readOnly(
                         embeddedStorageManager,
                         this.nodeCloseTrigger,
-                        this.assembly.graphCoordinator);
+                        this.assembly.graphCoordinator,
+                        replicationTransport.replicationMark());
+
+        if (writer) {
+            replicationTransport.ensureWriterMark(this.assembly.clusterStorageManager);
+            this.assembly.getReplicationPositionProvider().init();
+        }
 
         this.assembly.getReplicationApplier().start();
 
@@ -460,32 +526,32 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
             LOGGER.log(INFO, "Issuing GC and CC");
             gcConnection.issueFullCacheCheck();
             gcConnection.issueFullGarbageCollection();
-        }, NodeCollaborators.maintenanceInterval(props.gcIntervalMinutes(), EnvKeys.GC_INTERVAL_MINUTES, 60));
+        }, NodeCollaborators.maintenanceInterval(config.storage().gcInterval(), 60));
+        final var usageGauge = this.assembly.getStorageUsageGauge();
+        maintenance.schedule("StorageUsageGauge", usageGauge::measureNow,
+                StorageUsageGauge.REFRESH_INTERVAL);
         maintenance.schedule(
                 "StorageLimitChecker",
-                limitGate.createScheduledWork(this.assembly.getStorageUsageGauge()),
-                Duration.ofMinutes(NodeCollaborators.requiredPositive(
-                        props.storageLimitCheckerIntervalMinutes(),
-                        EnvKeys.STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES
-                ))
+                limitGate.createScheduledWork(this.assembly.getStorageUsageGauge()::readUsedDiskSpaceBytes),
+                Objects.requireNonNull(config.storage().limitCheckInterval(),
+                        "PERUNCS_STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES is required")
         );
-        if (writer && this.assembly.usesAeronReplication()) {
+        if (writer && this.assembly.hasReplicationMark()) {
+            maintenance.schedule("PendingReplicationCommit", replicationTransport::retryPendingCommit,
+                    replicationTransport.pendingCommitRetryInterval());
+        }
+        if (writer && this.assembly.hasReplicationMark()) {
             maintenance.schedule("AeronArchiveRetention", () -> {
-                final var retention = this.assembly.getReplicationLogRetention();
-                if (retention.isSupported()) {
-                    try {
-                        final var result = retention.deleteThrough(
-                                this.assembly.getReplicationPositionProvider().latest());
-                        if (result.status() == ReplicationLogRetention.MaintenanceResult.Status.DELETED) {
-                            LOGGER.log(INFO, "Aeron Archive retention: %s", result.detail());
-                        }
-                    } catch (final ReplicationPositionUnavailableException unavailable) {
-                        LOGGER.log(System.Logger.Level.DEBUG,
-                                "Aeron Archive retention waits for the first durable writer position", unavailable);
+                try {
+                    final var result = replicationTransport.maintainRetention();
+                    if (result.status() == ReplicationLogRetention.MaintenanceResult.Status.DELETED) {
+                        LOGGER.log(INFO, "Aeron Archive retention: %s", result.detail());
                     }
+                } catch (final ReplicationPositionUnavailableException unavailable) {
+                    LOGGER.log(System.Logger.Level.DEBUG,
+                            "Aeron Archive retention waits for the first durable writer position", unavailable);
                 }
-            }, NodeCollaborators.maintenanceInterval(props.aeronRetentionIntervalMinutes(),
-                    EnvKeys.AERON_RETENTION_INTERVAL_MINUTES, 1));
+            }, config.aeron().retentionInterval());
         }
 
         maintenance.start();
@@ -495,8 +561,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     /// transaction. This covers types introduced by a rejected transaction whose
     /// incremental export was consumed before the writer crashed.
     private void queueWriterDictionary(final EmbeddedStorageManager storage) {
-        final NodeSettingsSource props = this.assembly.getNodeSettingsSource();
-        if (NodeRole.of(props) != NodeRole.WRITER) {
+        if (this.assembly.nodeRole != NodeRole.WRITER) {
             return;
         }
         final String dictionary = PersistenceTypeDictionaryAssembler.New().assemble(storage.typeDictionary());
@@ -527,6 +592,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                         StorageLiveFileProvider.New(NioFileSystem.New().ensureDirectory(storageRootPath))
                 )
                 .createConfiguration());
+        this.assembly.getClusterReplicationTransport().registerPersistentRoots(foundation);
         foundation.setExceptionHandler((throwable, channel) ->
         {
             try {
@@ -562,7 +628,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         }
         if (!allowCreate) {
             throw new ReseedRequiredException(
-                    "node role '%s' opened a Store without a root; seed the Store directory with its replication cursor before starting"
+                    "node role '%s' opened a Store without a root; seed the Store directory with its replication mark before starting"
                             .formatted(this.assembly.nodeRole.configName()));
         }
         LOGGER.log(System.Logger.Level.DEBUG, "Setting and storing new root from root supplier");
@@ -571,23 +637,18 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
         storage.storeRoot();
     }
 
-    /// Fails closed when existing Store files lost their durable offset cursor.
+    /// Fails closed when a replicated reader Store has no durable mark.
     ///
     /// @param storageRootPath Store directory known to hold files
-    /// @throws ReseedRequiredException when no usable stored cursor exists
-    private void requireStoredCursorForExistingStore(final Path storageRootPath) {
-        RuntimeException cursorFailure = null;
-        ReplicationCursor stored = null;
-        try {
-            stored = this.assembly.getDurableCursorFile().get();
-        } catch (final RuntimeException failure) {
-            cursorFailure = failure;
-        }
-        if (stored == null || stored.logicalSequence() < 0) {
+    /// @throws ReseedRequiredException when no committed boundary exists
+    private void requireStoredMark(final StorageConnection storage, final Path storageRootPath) {
+        final ReplicationMark mark = this.assembly.getClusterReplicationTransport().replicationMark();
+        final boolean markStored = mark != null && !Swizzling.isNotFoundId(
+                storage.persistenceManager().objectRegistry().lookupObjectId(mark));
+        if (!markStored || mark.sequence < 0L || mark.recordingId < 0L || mark.prepareStartPosition < 0L) {
             throw new ReseedRequiredException(
-                    "node role '%s' has Store files at %s but no durable replication cursor; restore a compatible backup or seed the Store directory with its replication cursor before starting"
-                            .formatted(this.assembly.nodeRole.configName(), storageRootPath),
-                    cursorFailure);
+                    "node role '%s' has Store files at %s but no committed replication mark; restore a compatible backup or seed the Store directory with the writer's Store mark before starting"
+                            .formatted(this.assembly.nodeRole.configName(), storageRootPath));
         }
     }
 
@@ -597,33 +658,26 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
     private void startDevNode() throws NodeException {
         LOGGER.log(INFO, "Starting dev cluster node");
         this.rejectProductionSettingsInDevMode();
-        final var properties = this.assembly.getNodeSettingsSource();
-        final String configuredStoragePath = properties.replicationProperty(  NodeSettingsSource.EnvKeys.STORAGE_PATH);
-        final var storage = configuredStoragePath == null || configuredStoragePath.isBlank()
-                ? this.assembly.getEmbeddedStorageFoundation().start()
-                : this.prepareEmbeddedStorage(this.assembly.storageParentPath().resolve("storage")).start();
+        final var storage = this.prepareEmbeddedStorage(this.assembly.storageParentPath().resolve("storage")).start();
         this.assembly.embeddedStorageManager = storage;
         this.initializeRoot(storage, true);
 
         this.assembly.clusterStorageManager = ClusterStorageManagers.guarding(
                 storage,
-                StorageSizeValidation.notReached(),
+                () -> false,
                 this.nodeCloseTrigger,
-                this.assembly.graphCoordinator
+                this.assembly.graphCoordinator,
+                null,
+                ignored -> {
+                }
         );
     }
 
     private void rejectProductionSettingsInDevMode() {
-        final var properties = this.assembly.getNodeSettingsSource();
-        final String configuredTransport = properties.replicationProperty( NodeSettingsSource.EnvKeys.REPLICATION_TRANSPORT);
-        final String selectedTransport = properties.replicationTransport();
-        final String configuredRole = properties.replicationRole();
-        final boolean transportConfigured = configuredTransport != null && !configuredTransport.isBlank()
-                || !"none".equalsIgnoreCase(selectedTransport);
-        if ((configuredRole != null && !configuredRole.isBlank())
-                || transportConfigured) {
+        if (this.assembly.getNodeConfig().replicationTransport() != NodeConfig.ReplicationTransport.NONE ||
+            this.assembly.hasReplicationMark()) {
             throw new NodeException("replication role or transport requires " +
-                    "ECLIPSE_DATAGRID_PROD_MODE=true");
+                    "PERUNCS_PROD_MODE=true");
         }
     }
 
@@ -724,7 +778,7 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                             () -> true,
                             () -> {
                                 this.nodeCloseTrigger.awaitAppIdle(Duration.ofMillis(
-                                        collaborators.getNodeSettingsSource().graphDrainTimeoutMillis()));
+                                        collaborators.getNodeConfig().timeouts().graphDrain().toMillis()));
                                 appDrained.set(true);
                             }))
                     /* 1. Stop new maintenance work before anything it uses. */
@@ -741,8 +795,8 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                             () -> collaborators.storageTaskExecutor.get().close()))
                     /* 3. Stop the replication reader/publisher before the
                      * Store: the reader must not deliver into a Store that
-                     * is shutting down, and the final cursor force needs the
-                     * Store still open. */
+                     * is shutting down, and pending imports must finish while
+                     * the Store remains open. */
                     .add(CloseSequencer.stage("replication transport",
                             afterAppDrain(appDrained, collaborators.replicationTransport::isInitialized),
                             () -> collaborators.replicationTransport.get().close()))
@@ -777,12 +831,6 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                     .add(CloseSequencer.stage("data merger",
                             afterAppDrain(appDrained, collaborators.dataMerger::isInitialized),
                             () -> collaborators.dataMerger.get().dispose()))
-                    .add(CloseSequencer.stage("applied listener",
-                            afterAppDrain(appDrained, collaborators.commitAppliedListener::isInitialized),
-                            () -> collaborators.commitAppliedListener.get().close()))
-                    .add(CloseSequencer.stage("stored cursor manager",
-                            afterAppDrain(appDrained, () -> !collaborators.commitAppliedListener.isInitialized() && collaborators.durableCursorFile != null),
-                            collaborators::closeDurableCursorFile))
                     .add(CloseSequencer.stage("graph drain",
                             appDrained::get,
                             collaborators.graphCoordinator::drain))
@@ -820,6 +868,12 @@ final class NodeLifecycle implements NodeAssembly, Unpersistable {
                                     throw new IllegalStateException(
                                             "Store did not complete shutdown; close must be retried");
                                 }
+                            }))
+                    .add(CloseSequencer.stage("writer process lock",
+                            () -> this.writerProcessLock != null,
+                            () -> {
+                                this.writerProcessLock.close();
+                                this.writerProcessLock = null;
                             }));
             sequencer.run("Failed to close node");
         } catch (final RuntimeException | Error closeFailure) {

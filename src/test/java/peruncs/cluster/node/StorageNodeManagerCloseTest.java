@@ -1,13 +1,17 @@
 package peruncs.cluster.node;
 
+import org.eclipse.store.storage.types.StorageController;
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.api.NodeRole;
+import peruncs.cluster.api.ReplicationState;
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.errors.ReplicationPositionUnavailableException;
+import peruncs.cluster.errors.internal.ReplicationPositionUnavailableException;
+import peruncs.cluster.node.replication.ReplicationHealth;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.cluster.node.store.StorageTaskExecutor;
-import peruncs.cluster.node.store.StorageUsageGauge;
-import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
+import peruncs.cluster.storage.StorageGraphCoordinator;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
 
@@ -18,8 +22,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/// Verifies close-once disposal for both fixed roles: every resource is
-/// released exactly once, and a failed close is never retried.
+/// Verifies close-once disposal for both fixed roles: completed releases are
+/// not repeated after a close failure and are skipped after success.
 class StorageNodeManagerCloseTest {
     private static final class CountingHandler implements InvocationHandler {
         final AtomicInteger disposeCalls = new AtomicInteger();
@@ -38,14 +42,22 @@ class StorageNodeManagerCloseTest {
                 }
                 case "latest" -> {
                     if (this.latestFailure != null) throw this.latestFailure;
-                    return new ReplicationCursor("test", UUID.randomUUID(), 5L, "");
+                    final UUID id = UUID.randomUUID();
+                    return new ReplicationPosition(id, id, 1L, 1L, 5L, 1L, 1L, id);
                 }
                 case "close" -> {
                     this.closeCalls.incrementAndGet();
                     return null;
                 }
-                case "cursor" -> {
-                    return new ReplicationCursor("test", UUID.randomUUID(), 5L, "");
+                case "isRunning" -> {
+                    return true;
+                }
+                case "replicationState" -> {
+                    return ReplicationState.LIVE;
+                }
+                case "position" -> {
+                    final UUID id = UUID.randomUUID();
+                    return new ReplicationPosition(id, id, 1L, 1L, 5L, 1L, 1L, id);
                 }
                 case "stopResult" -> {
                     return new ReplicationApplier.StopResult(
@@ -69,24 +81,35 @@ class StorageNodeManagerCloseTest {
     }
 
     private static StorageNodeManager manager(
-            final StorageNodeManager.Role role,
+            final NodeRole role,
             final CountingHandler distributor, final CountingHandler client,
             final CountingHandler health, final CountingHandler position) {
         return StorageNodeManager.create(new StorageNodeManager.Configuration(
                 tracked(ReplicationPublisher.class, distributor),
                 tracked(StorageTaskExecutor.class, new CountingHandler()),
                 tracked(ReplicationApplier.class, client),
-                tracked(StorageNodeHealthCheck.class, health),
-                tracked(StorageUsageGauge.class, new CountingHandler()),
+                healthCheck(health),
+                () -> -1L,
                 tracked(ReplicationPositionProvider.class, position),
-                "aeron",
-                role, new peruncs.cluster.storage.StorageGraphCoordinator()));
+                true,
+                role, new StorageGraphCoordinator()));
+    }
+
+    private static StorageNodeHealthCheck healthCheck(final CountingHandler handler) {
+        return StorageNodeHealthCheck.create(
+                tracked(StorageController.class, new CountingHandler()),
+                new ReplicationHealth() {
+                    @Override public boolean isReady() { return true; }
+                    @Override public boolean isHealthy() { return true; }
+                    @Override public void close() { handler.closeCalls.incrementAndGet(); }
+                },
+                () -> true);
     }
 
     private static StorageNodeManager reader(
             final CountingHandler distributor, final CountingHandler client,
             final CountingHandler health, final CountingHandler position) {
-        return manager(StorageNodeManager.Role.READER, distributor, client, health, position);
+        return manager(NodeRole.READER, distributor, client, health, position);
     }
 
         /// A close that fails mid-way stays retryable: the completed
@@ -122,21 +145,21 @@ class StorageNodeManagerCloseTest {
     }
 
         /// Any provider fault — unavailable boundary or transport failure —
-        /// reads as unknown (`-1`) so a metrics scrape never fails.
+        /// reads as an unknown sequence so a metrics scrape never fails.
     @Test
     void latestSequenceFaultsReadAsUnknown() {
         final CountingHandler position = new CountingHandler();
         position.latestFailure = new NodeException("writer boundary not readable");
         final StorageNodeManager transportFailure = reader(
                 new CountingHandler(), new CountingHandler(), new CountingHandler(), position);
-        assertEquals(-1L, transportFailure.latestSequence());
+        assertEquals(-1L, transportFailure.replicationStatus().latestSequence());
 
         final CountingHandler unavailable = new CountingHandler();
         unavailable.latestFailure = new ReplicationPositionUnavailableException(
                 "no writer boundary for this role");
         final StorageNodeManager boundaryMissing = reader(
                 new CountingHandler(), new CountingHandler(), new CountingHandler(), unavailable);
-        assertEquals(-1L, boundaryMissing.latestSequence());
+        assertEquals(-1L, boundaryMissing.replicationStatus().latestSequence());
     }
 
         /// An Error during close is rethrown even when a RuntimeException came first.
@@ -161,7 +184,7 @@ class StorageNodeManagerCloseTest {
         final CountingHandler health = new CountingHandler();
         final CountingHandler position = new CountingHandler();
         final StorageNodeManager manager =
-                manager(StorageNodeManager.Role.WRITER, distributor, client, health, position);
+                manager(NodeRole.WRITER, distributor, client, health, position);
 
         assertTrue(manager.isWriter());
         manager.close();

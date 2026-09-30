@@ -1,13 +1,13 @@
 package peruncs.cluster.node.backup;
 
-
 import org.junit.jupiter.api.Test;
-import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.test.ChildJava;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /// publication window:
 ///
 /// - mid-export, after a partial data file reached the workspace;
-/// - after the manifest write but before the ready marker;
+/// - after the Store export but before the ready marker;
 /// - after compression, while holding the publication lock, before the
 ///   atomic rename.
 ///
@@ -31,8 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /// cleaned, and that a subsequent complete backup is the one restore
 /// installs. Cells run under the `crashmatrix` failsafe profile.
 final class BackupCrashMatrixIT {
-    private static final ReplicationCursor CURSOR =
-            new ReplicationCursor("backup-crash", null, 9L, "0304");
+    private static final ReplicationPosition CURSOR = ReplicationPosition.NONE;
 
     /// Verifies a kill mid-export leaves no selectable backup on the volume.
     @Test
@@ -40,11 +39,11 @@ final class BackupCrashMatrixIT {
         this.assertKillCell("MID_EXPORT");
     }
 
-    /// Verifies a kill after the manifest write but before the ready marker
+    /// Verifies a kill after the Store export but before the ready marker
     /// leaves no selectable backup on the volume.
     @Test
     void killedBeforeReadyMarkerNeverBecomesSelectable() throws Exception {
-        this.assertKillCell("AFTER_MANIFEST_BEFORE_READY");
+        this.assertKillCell("AFTER_STORE_BACKUP_BEFORE_READY");
     }
 
     /// Verifies a kill with the compressed archive staged next to the volume,
@@ -80,7 +79,7 @@ final class BackupCrashMatrixIT {
                     "a killed export must not surface as an unreadable archive at point %s".formatted(point));
 
             final BackupMetadata complete = BackupMetadata.create(42L, false, CURSOR);
-            verifier.createBackup(new TestStorageConnection(), CURSOR, complete);
+            verifier.createBackup(new TestStorageConnection(), complete);
             final List<BackupMetadata> listed = verifier.listBackups();
             assertEquals(1, listed.size(), "exactly one complete backup must be selectable");
             assertEquals(complete.backupId(), listed.getFirst().backupId(),
@@ -128,7 +127,7 @@ final class BackupCrashMatrixIT {
     private static void deleteTree(final Path root) throws IOException {
         if (!Files.exists(root)) return;
         try (var paths = Files.walk(root)) {
-            for (final Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
+            for (final Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
                 Files.deleteIfExists(path);
             }
         }

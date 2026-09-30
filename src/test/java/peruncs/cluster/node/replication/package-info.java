@@ -1,2 +1,2 @@
-/// Tests for replication cursors, monitoring, and retention contracts.
+/// Tests for replication positions, monitoring, and retention contracts.
 package peruncs.cluster.node.replication;

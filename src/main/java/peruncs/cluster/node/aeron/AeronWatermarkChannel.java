@@ -7,8 +7,8 @@ import org.agrona.DirectBuffer;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
 import peruncs.cluster.storage.ReplicationRetry;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReaderWatermark;
 import peruncs.cluster.storage.aeron.config.AeronRetryPolicy;
+import peruncs.cluster.storage.aeron.position.AeronReaderWatermark;
 
 import java.util.Arrays;
 import java.util.Objects;
@@ -247,7 +247,7 @@ final class AeronWatermarkChannel implements AutoCloseable {
                              * Retaining across NOT_CONNECTED is what lets a
                              * subscriber that arrives later — a writer that
                              * starts after the reader published — still receive
-                             * the durable cursor with no further transaction
+                             * the persisted Store mark with no further transaction
                              * and no reader restart. Close discards a value
                              * that is still unconnected (see [#close]), so
                              * retaining here never fails a clean shutdown. */

@@ -1,6 +1,5 @@
 package peruncs.cluster.storage.binary;
 
-import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.types.StorageConnection;
@@ -14,40 +13,38 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/// Covers the importer failure contract: a failed import must propagate the
-/// original failure while still releasing the native copies it allocated, and
-/// release itself must tolerate every buffer shape the transport can hand over
-/// (nulls, empty channels, duplicates of already-released views).
+/// Covers pooled copies, empty import slots, and direct-import validation.
 class StorageBinaryDataImporterTest {
     @TempDir
     Path storagePath;
 
-    /// Verifies release tolerates nulls and empty views while rejecting an out-of-range length.
+    /// Verifies pool release tolerates nulls and empty views while rejecting an out-of-range length.
     @Test
-    void releaseFreesEverySlotUnconditionally() {
+    void releaseReturnsEveryOwnedSlotToItsPool() {
         /* Zero-capacity views have no caller-owned native memory. Non-empty
-         * slots must still own distinct addresses to avoid double-free. */
-        final ByteBuffer owned = XMemory.allocateDirectNative(64);
-        final ByteBuffer firstEmpty = ByteBuffer.allocateDirect(0);
-        final ByteBuffer secondEmpty = ByteBuffer.allocateDirect(0);
+        * slots must still own distinct addresses to avoid double-free. */
+        try (NativeBufferPool pool = new NativeBufferPool(64)) {
+            final ByteBuffer owned = pool.acquire(64);
+            final ByteBuffer firstEmpty = ByteBuffer.allocateDirect(0);
+            final ByteBuffer secondEmpty = ByteBuffer.allocateDirect(0);
 
-        assertDoesNotThrow(() -> StorageBinaryDataImporter.release(null));
-        assertDoesNotThrow(() -> StorageBinaryDataImporter.release(new ByteBuffer[0]));
-        assertDoesNotThrow(() -> StorageBinaryDataImporter.release(
-                new ByteBuffer[]{null, firstEmpty, secondEmpty, owned}));
-        assertDoesNotThrow(() -> StorageBinaryDataImporter.release(new ByteBuffer[]{null}, 1));
-        assertThrows(IllegalArgumentException.class,
-                () -> StorageBinaryDataImporter.release(new ByteBuffer[]{owned}, 2));
+            assertDoesNotThrow(() -> StorageBinaryDataImporter.release(null, pool));
+            assertDoesNotThrow(() -> StorageBinaryDataImporter.release(new ByteBuffer[0], pool));
+            assertThrows(NullPointerException.class,
+                    () -> StorageBinaryDataImporter.release(new ByteBuffer[0], null));
+            assertDoesNotThrow(() -> StorageBinaryDataImporter.release(
+                    new ByteBuffer[]{null, firstEmpty, secondEmpty, owned}, pool));
+            assertThrows(IllegalArgumentException.class,
+                    () -> StorageBinaryDataImporter.release(new ByteBuffer[]{owned}, 2, pool));
+        }
     }
 
     /// Verifies empty sources remain distinct for Store's identity-based import.
     @Test
     void emptySourcesGetDistinctDirectViews() {
-        try (EmbeddedStorageManager manager = EmbeddedStorage.start(new Root(), this.storagePath)) {
-            final StorageConnection connection = manager.createConnection();
-
-            final ByteBuffer[] owned = StorageBinaryDataImporter.importOwned(
-                    connection, new ByteBuffer[]{ByteBuffer.allocate(0), ByteBuffer.allocate(0)});
+        try (NativeBufferPool pool = new NativeBufferPool(64)) {
+            final ByteBuffer[] owned = StorageBinaryDataImporter.copyOwned(
+                    new ByteBuffer[]{ByteBuffer.allocate(0), ByteBuffer.allocate(0)}, pool);
             try {
                 assertEquals(2, owned.length);
                 assertNotNull(owned[0]);
@@ -58,45 +55,19 @@ class StorageBinaryDataImporterTest {
                 assertEquals(0, owned[1].capacity());
             } finally {
                 /* Each identity is distinct, but zero-capacity views own no native allocation. */
-                assertDoesNotThrow(() -> StorageBinaryDataImporter.release(owned));
+                assertDoesNotThrow(() -> StorageBinaryDataImporter.release(owned, pool));
             }
         }
     }
 
-    /// Verifies a null source entry fails the owned import with a null-pointer failure before touching storage.
+    /// Verifies a null source entry fails copying without masking its null-pointer failure.
     @Test
     void copyFailurePropagatesWithoutMasking() {
-        try (EmbeddedStorageManager manager = EmbeddedStorage.start(new Root(), this.storagePath)) {
-            final StorageConnection connection = manager.createConnection();
-
+        try (NativeBufferPool pool = new NativeBufferPool(64)) {
             /* A null entry fails while copying, before any import ran. */
-            assertThrows(NullPointerException.class, () -> StorageBinaryDataImporter.importOwned(
-                    connection, new ByteBuffer[]{ByteBuffer.allocateDirect(8), null}));
+            assertThrows(NullPointerException.class, () -> StorageBinaryDataImporter.copyOwned(
+                    new ByteBuffer[]{ByteBuffer.allocateDirect(8), null}, pool));
         }
-    }
-
-    /// Verifies an import failure still frees the allocated native copies while propagating the original failure unmasked.
-    @Test
-    void importFailureReleasesCopiesAndPropagatesTheOriginalFailure() {
-        /* Upstream import failures never surface through a real connection: the
-         * storage task records channel problems without rethrowing them to the
-         * importData caller. A failing stub is the only deterministic seam for
-         * this branch. */
-        final IllegalStateException boom = new IllegalStateException("boom");
-        final StorageConnection failing = (StorageConnection) Proxy.newProxyInstance(
-                getClass().getClassLoader(),
-                new Class<?>[]{StorageConnection.class},
-                (proxy, method, args) ->
-                {
-                    if (method.getName().equals("importData")) throw boom;
-                    return defaultValue(method.getReturnType());
-                });
-
-        final Throwable failure = assertThrows(IllegalStateException.class,
-                () -> StorageBinaryDataImporter.importOwned(
-                        failing, new ByteBuffer[]{ByteBuffer.allocate(16)}));
-        assertSame(boom, failure, "the original failure must propagate unmasked");
-        assertEquals(0, boom.getSuppressed().length, "cleanup of the native copies must not fail");
     }
 
     /// Verifies direct import validates heap, unnormalized, and null inputs without touching storage.

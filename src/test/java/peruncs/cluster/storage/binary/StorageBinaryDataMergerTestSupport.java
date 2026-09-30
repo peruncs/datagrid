@@ -1,10 +1,15 @@
 package peruncs.cluster.storage.binary;
 
 import org.eclipse.serializer.persistence.binary.types.BinaryPersistenceFoundation;
+import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.types.PersistenceTypeHandlerManager;
 import org.eclipse.store.storage.types.StorageConnection;
+import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.storage.StorageGraphCoordinator;
+import peruncs.cluster.storage.index.ClusterIndexTestSupport;
 
 import java.lang.reflect.Proxy;
+import java.util.function.Consumer;
 
 /// Proxy stand-ins for merger tests that exercise the merger's own state
 /// machine rather than Store behaviour.
@@ -13,10 +18,12 @@ final class StorageBinaryDataMergerTestSupport {
     }
 
     static BinaryPersistenceFoundation<?> foundation() {
+        final PersistenceTypeHandlerManager<Binary> typeHandlers = ClusterIndexTestSupport.typeHandlers();
         return (BinaryPersistenceFoundation<?>) Proxy.newProxyInstance(
                 BinaryPersistenceFoundation.class.getClassLoader(),
                 new Class<?>[]{BinaryPersistenceFoundation.class},
-                (proxy, method, args) -> defaultValue(method.getReturnType()));
+                (proxy, method, args) -> method.getName().equals("getTypeHandlerManager")
+                        ? typeHandlers : defaultValue(method.getReturnType()));
     }
 
     static StorageConnection connection() {
@@ -31,7 +38,7 @@ final class StorageBinaryDataMergerTestSupport {
     ///
     /// @param foundation               persistence foundation
     /// @param storage                  Store connection
-    /// @param objectGraphUpdateHandler graph update handler
+    /// @param graphUpdater             runs graph updates
     /// @param cachingTimeoutMs         coalescing delay
     /// @param cachedBytesLimit         soft backpressure threshold in bytes
     /// @param applyTimeoutMs           materialization wait budget
@@ -39,11 +46,11 @@ final class StorageBinaryDataMergerTestSupport {
     static StorageBinaryDataMerger.Configuration configuration(
             final BinaryPersistenceFoundation<?> foundation,
             final StorageConnection storage,
-            final ObjectGraphUpdateHandler objectGraphUpdateHandler,
+            final Consumer<Runnable> graphUpdater,
             final long cachingTimeoutMs,
             final long cachedBytesLimit,
             final long applyTimeoutMs) {
-        return configuration(foundation, storage, objectGraphUpdateHandler,
+        return configuration(foundation, storage, graphUpdater,
                 cachingTimeoutMs, cachedBytesLimit, applyTimeoutMs, null);
     }
 
@@ -51,7 +58,7 @@ final class StorageBinaryDataMergerTestSupport {
     ///
     /// @param foundation               persistence foundation
     /// @param storage                  Store connection
-    /// @param objectGraphUpdateHandler graph update handler
+    /// @param graphUpdater             runs graph updates
     /// @param cachingTimeoutMs         coalescing delay
     /// @param cachedBytesLimit         soft backpressure threshold in bytes
     /// @param applyTimeoutMs           materialization wait budget
@@ -60,7 +67,7 @@ final class StorageBinaryDataMergerTestSupport {
     static StorageBinaryDataMerger.Configuration configuration(
             final BinaryPersistenceFoundation<?> foundation,
             final StorageConnection storage,
-            final ObjectGraphUpdateHandler objectGraphUpdateHandler,
+            final Consumer<Runnable> graphUpdater,
             final long cachingTimeoutMs,
             final long cachedBytesLimit,
             final long applyTimeoutMs,
@@ -68,10 +75,11 @@ final class StorageBinaryDataMergerTestSupport {
         return new StorageBinaryDataMerger.Configuration(
                 foundation,
                 storage,
-                objectGraphUpdateHandler,
+                graphUpdater,
                 cachingTimeoutMs,
                 cachedBytesLimit,
                 StorageBinaryDataMerger.MAX_CACHED_BYTES,
+                NodeConfig.Limits.DEFAULT_BUFFER_POOL_RETAINED_BYTES,
                 applyTimeoutMs,
                 StorageBinaryDataMerger.DISPOSE_ORDERLY_TIMEOUT_MS,
                 StorageBinaryDataMerger.DISPOSE_INTERRUPT_TIMEOUT_MS,

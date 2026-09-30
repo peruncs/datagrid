@@ -7,6 +7,7 @@ import peruncs.cluster.node.replication.ReplicationHealth;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
@@ -31,7 +32,7 @@ final class AeronHealth implements ReplicationHealth {
     private final BooleanSupplier capacityAvailable;
     private final BooleanSupplier writerReady;
     private final BooleanSupplier writerRole;
-    private final Supplier<ReplicationState> checkpointState;
+    private final Supplier<ReplicationState> writerState;
     private final LongSupplier archiveUsableSpace;
     private final LongSupplier writerDurablePosition;
     private final LongSupplier writerDurableSequence;
@@ -42,12 +43,12 @@ final class AeronHealth implements ReplicationHealth {
      * supplier bug (not a transient network probe) surfaces at the default
      * log level; repeats stay at debug to keep a degraded-but-known node from
      * flooding the operator. */
-    private final java.util.Set<String> warnedProbes = ConcurrentHashMap.newKeySet();
+    private final Set<String> warnedProbes = ConcurrentHashMap.newKeySet();
 
     AeronHealth(final StorageControllerAdapter storage, final ReplicationApplier client,
                 final BooleanSupplier closed, final BooleanSupplier driverFailed, final BooleanSupplier capacityAvailable,
                 final BooleanSupplier writerReady, final BooleanSupplier writerRole,
-                final Supplier<ReplicationState> checkpointState, final LongSupplier archiveUsableSpace,
+                final Supplier<ReplicationState> writerState, final LongSupplier archiveUsableSpace,
                 final LongSupplier writerDurablePosition, final LongSupplier writerDurableSequence,
                 final LongSupplier appliedSequence, final BooleanSupplier watermarkFailed) {
         this.storage = Objects.requireNonNull(storage, "storage");
@@ -57,7 +58,7 @@ final class AeronHealth implements ReplicationHealth {
         this.capacityAvailable = Objects.requireNonNull(capacityAvailable, "capacityAvailable");
         this.writerReady = Objects.requireNonNull(writerReady, "writerReady");
         this.writerRole = Objects.requireNonNull(writerRole, "writerRole");
-        this.checkpointState = Objects.requireNonNull(checkpointState, "checkpointState");
+        this.writerState = Objects.requireNonNull(writerState, "writerState");
         this.archiveUsableSpace = Objects.requireNonNull(archiveUsableSpace, "archiveUsableSpace");
         this.writerDurablePosition = Objects.requireNonNull(writerDurablePosition, "writerDurablePosition");
         this.writerDurableSequence = Objects.requireNonNull(writerDurableSequence, "writerDurableSequence");
@@ -117,7 +118,7 @@ final class AeronHealth implements ReplicationHealth {
             final boolean writerIsReady = this.writerReady.getAsBoolean();
             return this.storage.isReady()
                    && !this.driverFailed.getAsBoolean() && this.capacityAvailable.getAsBoolean()
-                   && this.checkpointState.get() == null
+                   && this.writerState.get() == null
                    && (writerIsReady || this.client != null && this.client.failure() == null
                                        && this.client.isRunning() && (!requireLive || this.client.isLive()));
         } catch (final RuntimeException probeFailure) {
@@ -129,7 +130,7 @@ final class AeronHealth implements ReplicationHealth {
     /// Reports the replication lifecycle state.
     ///
     /// Writers have no reader client by design, so a missing client is
-    /// starting rather than failed; only driver, watermark, checkpoint, or
+    /// starting rather than failed; only driver, watermark, writer, or
     /// client failures report failed. A writer without Archive capacity
     /// reports degraded instead of failed so it stays scrutable while
     /// refusing new writes.
@@ -168,27 +169,26 @@ final class AeronHealth implements ReplicationHealth {
         if (this.writerRole.getAsBoolean()) {
             /* Writers intentionally have no reader client.  Treating that null client
              * as a failure made every healthy writer report FAILED, even though its
-             * publication and terminal checkpoint were ready. */
-            final ReplicationState checkpoint = this.checkpointState.get();
-            if (checkpoint == ReplicationState.RESEED_REQUIRED ||
-                checkpoint == ReplicationState.FAILED) {
-                return checkpoint;
+             * publication and writer boundary were ready. */
+            final ReplicationState state = this.writerState.get();
+            if (state == ReplicationState.RESEED_REQUIRED || state == ReplicationState.FAILED) {
+                return state;
             }
             if (!this.capacityAvailable.getAsBoolean()) return ReplicationState.DEGRADED;
             return this.writerReady.getAsBoolean()
                     ? ReplicationState.LIVE : ReplicationState.STARTING;
         }
-        final ReplicationState checkpoint = this.checkpointState.get();
-        if (checkpoint != null) return checkpoint;
+        final ReplicationState state = this.writerState.get();
+        if (state != null) return state;
         if (this.client == null) {
             /* A reader is not failed merely because the provider has not created its
              * subscription yet.  This is the normal state between provider creation
-             * and NodeAssembly's client wiring. */
+             * and NodeLifecycle's client wiring. */
             return ReplicationState.STARTING;
         }
         if (this.client.failure() instanceof ReseedRequiredException) {
-            /* The reader proved its durable cursor unusable or could not
-             * reattach within its reconnect budget; retrying the same cursor
+            /* The reader proved its Store mark unusable or could not
+             * reattach within its reconnect budget; retrying the same mark
              * would fail again, so report the typed reseed signal. */
             return ReplicationState.RESEED_REQUIRED;
         }

@@ -1,9 +1,9 @@
 package peruncs.cluster.storage.index;
 
+import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataIterator;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
-import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
@@ -20,9 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 class EntityHeadersTest {
     @Test
@@ -33,20 +31,78 @@ class EntityHeadersTest {
         buffer.flip();
         final List<Long> ids = new ArrayList<>();
 
-        EntityHeaders.forEach(buffer, (_, objectId, _, _) -> ids.add(objectId));
+        EntityHeaders.forEach(buffer, (_, objectId) -> ids.add(objectId));
 
         assertEquals(List.of(29L), ids);
     }
 
     @Test
-    void normalizesWrappedBinaryAtItsWrittenPosition() {
+    void typeOnlyScanReadsTheWriterPrefilterFieldAndStillChecksFraming() {
+        final ByteBuffer bytes = ByteBuffer.allocateDirect(8 + 24).order(ByteOrder.nativeOrder());
+        bytes.putLong(-8L).putLong(24L).putLong(17L).putLong(29L);
+        bytes.order(ByteOrder.BIG_ENDIAN);
+        final Binary binary = ChunksWrapper.New(bytes);
+        final List<Long> typeIds = new ArrayList<>();
+
+        final ByteBuffer normalized = bytes.duplicate();
+        normalized.position(0).limit(bytes.position()).order(ByteOrder.nativeOrder());
+        EntityHeaders.forEachTypeId(normalized, typeIds::add);
+        assertEquals(List.of(17L), typeIds);
+        typeIds.clear();
+        EntityHeaders.forEachTypeId(binary, typeIds::add);
+
+        assertEquals(List.of(17L), typeIds);
+
+        final ByteBuffer malformed = ByteBuffer.allocateDirect(24).order(ByteOrder.nativeOrder());
+        malformed.putLong(16L).putLong(17L).putLong(29L);
+        malformed.flip();
+        assertThrows(CorruptReplicationDataException.class,
+                () -> EntityHeaders.forEachTypeId(malformed, ignored -> { }));
+        malformed.position(malformed.limit());
+        assertThrows(CorruptReplicationDataException.class,
+                () -> EntityHeaders.forEachTypeId(ChunksWrapper.New(malformed), ignored -> { }));
+    }
+
+    @Test
+    void writerCommitScanChecksTheMarkAndIndexTypesInOnePass() {
+        final ByteBuffer bytes = ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());
+        bytes.putLong(24L).putLong(17L).putLong(29L);
+        bytes.putLong(24L).putLong(19L).putLong(31L);
+        bytes.order(ByteOrder.BIG_ENDIAN);
+        final Binary binary = ChunksWrapper.New(bytes);
+        final ClusterIndexValidation.CommitPrefilterScratch scratch =
+                new ClusterIndexValidation.CommitPrefilterScratch();
+
+        final int found = ClusterIndexValidation.inspectWriterCommit(binary, null, scratch, 31L);
+        assertEquals(ClusterStoreIndexes.COMMIT_TOUCHES_INDEXES | ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK,
+                found);
+        assertEquals(ClusterStoreIndexes.COMMIT_TOUCHES_INDEXES,
+                ClusterIndexValidation.inspectWriterCommit(binary, null, scratch, 32L));
+    }
+
+    @Test
+    void doesNotMisclassifyVisitorFailureAsCorruptFraming() {
+        final ByteBuffer buffer = ByteBuffer.allocateDirect(24).order(ByteOrder.nativeOrder());
+        buffer.putLong(24L).putLong(17L).putLong(29L).flip();
+
+        assertThrows(IndexOutOfBoundsException.class,
+                () -> EntityHeaders.forEach(buffer, (_, _) -> {
+                    throw new IndexOutOfBoundsException("visitor failure");
+                }));
+    }
+
+    @Test
+    void readsWrappedBinaryAtItsWrittenPositionWithoutChangingCallerState() {
         final ByteBuffer buffer = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
         buffer.putLong(24L).putLong(17L).putLong(29L);
+        buffer.order(ByteOrder.BIG_ENDIAN);
         final List<Long> ids = new ArrayList<>();
 
-        EntityHeaders.forEach(ChunksWrapper.New(buffer), (_, objectId, _, _) -> ids.add(objectId));
+        EntityHeaders.forEach(ChunksWrapper.New(buffer), (_, objectId) -> ids.add(objectId));
 
         assertEquals(List.of(29L), ids);
+        assertEquals(24, buffer.position());
+        assertEquals(ByteOrder.BIG_ENDIAN, buffer.order());
     }
 
     @Test
@@ -58,6 +114,20 @@ class EntityHeadersTest {
         assertInvalid(item(23L, 24));
         assertInvalid(item(25L, 24));
         assertInvalid(item(24L, 24 + 3));
+    }
+
+    @Test
+    void readsDirectBufferEntryPointsWithoutChangingCallerState() {
+        final ByteBuffer buffer = ByteBuffer.allocateDirect(24).order(ByteOrder.nativeOrder());
+        buffer.putLong(24L).putLong(17L).putLong(29L).flip();
+        buffer.order(ByteOrder.BIG_ENDIAN);
+        final List<Header> headers = new ArrayList<>();
+
+        EntityHeaders.validateFraming(buffer);
+        EntityHeaders.forEach(buffer, (typeId, objectId) -> headers.add(new Header(typeId, objectId)));
+        assertEquals(List.of(new Header(17L, 29L)), headers);
+        assertEquals(0, buffer.position());
+        assertEquals(ByteOrder.BIG_ENDIAN, buffer.order());
     }
 
     @Test
@@ -79,7 +149,7 @@ class EntityHeadersTest {
         final Binary binary = ChunksWrapper.New(buffer);
 
         final List<Header> actual = new ArrayList<>(count);
-        EntityHeaders.forEach(binary, (typeId, objectId, _, _) -> actual.add(new Header(typeId, objectId)));
+        EntityHeaders.forEach(binary, (typeId, objectId) -> actual.add(new Header(typeId, objectId)));
 
         /* Serializer owns the framing walk; PerunCS owns only the bounds-checked header scan.
          * This upstream iterator reports entity boundaries, while the expected list above
@@ -116,7 +186,11 @@ class EntityHeadersTest {
             @Override
             public void write(final Binary binary) {
                 final List<Header> headers = new ArrayList<>();
-                EntityHeaders.forEach(binary, (typeId, objectId, _, _) -> headers.add(new Header(typeId, objectId)));
+                EntityHeaders.forEach(binary, (typeId, objectId) -> headers.add(new Header(typeId, objectId)));
+                final List<Long> typeIds = new ArrayList<>(headers.size());
+                EntityHeaders.forEachTypeId(binary, typeIds::add);
+                assertEquals(headers.stream().map(Header::typeId).toList(), typeIds,
+                        "the writer pre-filter must read the real Store chunk type ids");
                 final List<Header> upstreamHeaders = new ArrayList<>();
                 final BinaryEntityRawDataIterator iterator = BinaryEntityRawDataIterator.New();
                 final boolean wrapped = binary instanceof ChunksWrapper;
@@ -180,7 +254,7 @@ class EntityHeadersTest {
             assertThrows(CorruptReplicationDataException.class, () -> EntityHeaders.validateFraming(buffer),
                     "mutation " + iteration);
             assertThrows(CorruptReplicationDataException.class,
-                    () -> EntityHeaders.forEach(buffer, (_, _, _, _) -> { }), "mutation " + iteration);
+                    () -> EntityHeaders.forEach(buffer, (_, _) -> { }), "mutation " + iteration);
         }
     }
 
@@ -193,6 +267,7 @@ class EntityHeadersTest {
     }
 
     private static void assertInvalid(final ByteBuffer buffer) {
+        buffer.order(ByteOrder.nativeOrder());
         assertThrows(CorruptReplicationDataException.class, () -> EntityHeaders.validateFraming(buffer));
     }
 

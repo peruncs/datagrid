@@ -5,10 +5,9 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.node.replication.ReplicationCursorStore;
-import peruncs.cluster.storage.ReplicationCursor;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.io.AtomicFileWriter;
+import peruncs.cluster.storage.io.FaultInjection;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -35,8 +34,6 @@ import static org.junit.jupiter.api.Assertions.*;
 /// Verifies filesystem archive publication, restore, listing, and deletion,
 /// including backup generations on one shared volume.
 class FilesystemVolumeBackupBackendTest {
-    private static final ReplicationCursor CURSOR =
-            new ReplicationCursor("test", null, 3L, "07");
     private static final UUID CLUSTER_ONE = UUID.randomUUID();
     private static final UUID GENERATION_ONE = UUID.randomUUID();
     private static final UUID NODE_ONE = UUID.randomUUID();
@@ -57,10 +54,17 @@ class FilesystemVolumeBackupBackendTest {
             final UUID backupId
     ) {
         return new BackupMetadata(timestamp, manualSlot, clusterId, storeGeneration,
-                epoch, recordingId, BackupMetadata.UNKNOWN, null, backupId, BackupMetadata.UNKNOWN);
+                epoch, recordingId, BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN,
+                null, backupId, BackupMetadata.UNKNOWN);
     }
 
-    private static ReplicationCursor aeronCursor(
+    private static BackupMetadata sameBackupId(final BackupMetadata metadata, final UUID backupId) {
+        return new BackupMetadata(metadata.timestamp(), metadata.manualSlot(), metadata.clusterId(),
+                metadata.storeGeneration(), metadata.epoch(), metadata.recordingId(), metadata.logicalSequence(),
+                metadata.fencingToken(), metadata.recordingPosition(), metadata.nodeId(), backupId, metadata.digest());
+    }
+
+    private static ReplicationPosition aeronCursor(
             final UUID clusterId,
             final UUID nodeId,
             final UUID generation,
@@ -68,16 +72,14 @@ class FilesystemVolumeBackupBackendTest {
             final long recordingId,
             final long sequence
     ) {
-        return ReplicationCursor.of("aeron", generation, sequence,
-                new AeronReplicationCursor(
-                        clusterId, nodeId, generation, epoch, 1L, recordingId, 0L, sequence).encode());
+        return new ReplicationPosition(clusterId, generation, epoch, recordingId, sequence,
+                0L, 1L, nodeId);
     }
 
     private static void createArchive(
             final Path volume,
             final String archiveName,
             final String data,
-            final ReplicationCursor cursor,
             final boolean metadata
     ) throws Exception {
         final Path source = Files.createTempDirectory(volume, ".archive-source-");
@@ -87,7 +89,6 @@ class FilesystemVolumeBackupBackendTest {
                 Files.writeString(source.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data"), data);
             }
             if (metadata) {
-                Files.write(source.resolve(StorageBackupBackend.MANIFEST_ENTRY), ReplicationCursorStore.encode(cursor));
                 Files.writeString(source.resolve(StorageBackupBackend.READY_ENTRY), "");
             }
             BackupArchive.compressStorage(source, volume.resolve(archiveName));
@@ -100,12 +101,6 @@ class FilesystemVolumeBackupBackendTest {
         try (OutputStream output = Files.newOutputStream(
                 volume.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE));
              ZipOutputStream zip = new ZipOutputStream(output)) {
-            /* The upload restore path validates the private archive copy it
-             * extracts: this fixture must look like an operator upload a
-             * valid node would accept. */
-            zip.putNextEntry(new ZipEntry(StorageBackupBackend.MANIFEST_ENTRY));
-            zip.write(ReplicationCursorStore.encode(CURSOR));
-            zip.closeEntry();
             zip.putNextEntry(new ZipEntry(StorageBackupBackend.STORAGE_ENTRY + "/data"));
             zip.write(data.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             zip.closeEntry();
@@ -118,8 +113,8 @@ class FilesystemVolumeBackupBackendTest {
         final BackupMetadata first = backup(100L, false, null, null,
                 BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, UUID.randomUUID());
         final BackupMetadata manual = backup(300L, true, CLUSTER_ONE, GENERATION_ONE, 5L, 42L, UUID.randomUUID());
-        createArchive(backupVolume, BackupArchive.toArchiveFileName(first), "one", CURSOR, true);
-        createArchive(backupVolume, BackupArchive.toArchiveFileName(manual), "manual", CURSOR, true);
+        createArchive(backupVolume, BackupArchive.toArchiveFileName(first), "one", true);
+        createArchive(backupVolume, BackupArchive.toArchiveFileName(manual), "manual", true);
         Files.createDirectories(backupVolume.resolve("400"));
         Files.writeString(backupVolume.resolve("123.evil.zip"), "not a backup");
         Files.writeString(backupVolume.resolve("500.zip.tmp"), "not a backup");
@@ -135,32 +130,29 @@ class FilesystemVolumeBackupBackendTest {
         assertNull(backend.getLastBackup(2));
     }
 
-    /// Verifies the manifest cursor reads back and restore installs the Store payload while refusing an occupied destination.
+    /// Verifies restore installs the Store payload while refusing an occupied destination.
     @Test
-    void readsManifestAndRestoresStorage(@TempDir final Path backupVolume, @TempDir final Path root)
+    void restoresStorage(@TempDir final Path backupVolume, @TempDir final Path root)
             throws Exception {
         final BackupMetadata backup = backup(10L, false, null, null,
                 BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, UUID.randomUUID());
-        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "payload", CURSOR, true);
+        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "payload", true);
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
         final Path destination = root.resolve("new");
 
-        assertEquals(CURSOR, backend.getCursorForBackup(backend.getLastBackup(0)));
-        assertEquals(CURSOR, backend.getCursorForBackup(backup));
         backend.restoreBackup(destination, backend.getLastBackup(0));
 
         assertEquals("payload", Files.readString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
-        assertFalse(Files.exists(destination.resolve(StorageBackupBackend.MANIFEST_ENTRY)));
         assertFalse(Files.exists(destination.resolve(StorageBackupBackend.READY_ENTRY)));
         assertThrows(NodeException.class,
                 () -> backend.restoreBackup(destination, backend.getLastBackup(0)));
     }
 
-    /// Verifies publishing a generation archive persists its identity and digest and its manifest decodes to the original cursor.
+    /// Verifies publishing a generation archive persists its identity, digest, and retention boundary.
     @Test
     void publishesAGenerationArchiveWithIdentityAndDigest(@TempDir final Path backupVolume) throws Exception {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
-        final ReplicationCursor cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
+        final ReplicationPosition cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
         final BackupMetadata metadata = BackupMetadata.create(11L, false, cursor);
 
         assertEquals(CLUSTER_ONE, metadata.clusterId());
@@ -168,8 +160,10 @@ class FilesystemVolumeBackupBackendTest {
         assertEquals(5L, metadata.epoch());
         assertEquals(42L, metadata.recordingId());
         assertEquals(NODE_ONE, metadata.nodeId());
+        assertEquals(1L, metadata.fencingToken());
+        assertEquals(0L, metadata.recordingPosition());
 
-        backend.createBackup(noOpStorageConnection(), cursor, metadata);
+        backend.createBackup(noOpStorageConnection(), metadata);
 
         final List<BackupMetadata> listed = backend.listBackups();
         assertEquals(1, listed.size());
@@ -181,22 +175,19 @@ class FilesystemVolumeBackupBackendTest {
         assertEquals(metadata.recordingId(), stored.recordingId());
         assertEquals(metadata.nodeId(), stored.nodeId());
         assertTrue(stored.digest() >= 0L, "published backup must carry a content digest");
+        assertEquals(cursor, backend.retentionBoundary(stored));
         final Path archive = backupVolume.resolve(BackupArchive.toArchiveFileName(stored));
         assertTrue(Files.isRegularFile(archive));
-        assertEquals(cursor, ReplicationCursorStore.decode(
-                BackupArchive.readManifest(archive,
-                        BackupArchiveLimits.defaults().maxExtractedBytes(),
-                        BackupArchiveLimits.defaults().maxArchiveEntries())));
     }
 
     /// Verifies generation-filtered lookup selects each generation's own latest backup even when the newest overall belongs elsewhere.
     @Test
     void mixedGenerationsSelectOnlyTheCompatibleBackup(@TempDir final Path backupVolume) {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
-        final ReplicationCursor oldCursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
-        final ReplicationCursor newCursor = aeronCursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L);
-        backend.createBackup(noOpStorageConnection(), oldCursor, BackupMetadata.create(100L, false, oldCursor));
-        backend.createBackup(noOpStorageConnection(), newCursor, BackupMetadata.create(200L, false, newCursor));
+        final ReplicationPosition oldCursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
+        final ReplicationPosition newCursor = aeronCursor(CLUSTER_TWO, UUID.randomUUID(), GENERATION_TWO, 9L, 77L, 11L);
+        backend.createBackup(noOpStorageConnection(), BackupMetadata.create(100L, false, oldCursor));
+        backend.createBackup(noOpStorageConnection(), BackupMetadata.create(200L, false, newCursor));
 
         assertEquals(2, backend.listBackups().size());
 
@@ -227,13 +218,13 @@ class FilesystemVolumeBackupBackendTest {
     @Test
     void concurrentPublicationYieldsDistinctArchives(@TempDir final Path backupVolume) throws Exception {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
-        final ReplicationCursor firstCursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
-        final ReplicationCursor secondCursor = aeronCursor(CLUSTER_ONE, UUID.randomUUID(), GENERATION_ONE, 5L, 42L, 7L);
+        final ReplicationPosition firstCursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
+        final ReplicationPosition secondCursor = aeronCursor(CLUSTER_ONE, UUID.randomUUID(), GENERATION_ONE, 5L, 42L, 7L);
 
         /* Both nodes publish in the same millisecond; the random backup id
          * still separates their archives. */
-        backend.createBackup(noOpStorageConnection(), firstCursor, BackupMetadata.create(100L, false, firstCursor));
-        backend.createBackup(noOpStorageConnection(), secondCursor, BackupMetadata.create(100L, false, secondCursor));
+        backend.createBackup(noOpStorageConnection(), BackupMetadata.create(100L, false, firstCursor));
+        backend.createBackup(noOpStorageConnection(), BackupMetadata.create(100L, false, secondCursor));
 
         final List<BackupMetadata> listed = backend.listBackups();
         assertEquals(2, listed.size());
@@ -253,37 +244,54 @@ class FilesystemVolumeBackupBackendTest {
     @Test
     void sameNamePublicationIsIdempotentOnlyForIdenticalContent(@TempDir final Path backupVolume) {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
-        final ReplicationCursor cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
+        final ReplicationPosition cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
         final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
 
-        backend.createBackup(noOpStorageConnection(), cursor, backup);
+        backend.createBackup(noOpStorageConnection(), backup);
         /* Retrying the same publication after a crash acknowledgement is safe. */
-        backend.createBackup(noOpStorageConnection(), cursor, backup);
+        backend.createBackup(noOpStorageConnection(), backup);
         assertEquals(1, backend.listBackups().size());
 
         /* The same backup id with a different replication position is a
          * conflicting publication and must fail instead of overwriting. */
-        final ReplicationCursor moved = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 8L);
+        final ReplicationPosition moved = new ReplicationPosition(
+                CLUSTER_ONE, GENERATION_ONE, 5L, 42L, 7L, 1L, 1L, NODE_ONE);
+        final BackupMetadata movedMetadata = sameBackupId(BackupMetadata.create(100L, false, moved), backup.backupId());
         assertThrows(NodeException.class,
-                () -> backend.createBackup(noOpStorageConnection(), moved, backup));
-        assertEquals(cursor, backend.getCursorForBackup(backup),
+                () -> backend.createBackup(noOpStorageConnection(), movedMetadata));
+        assertEquals(cursor, backend.retentionBoundary(backup),
                 "a conflicting publication must leave the durable archive untouched");
+    }
+
+    /// Published POSIX backup archives remain readable and writable only by their owner.
+    @Test
+    void publishedArchiveIsOwnerOnlyOnPosixVolumes(@TempDir final Path backupVolume) throws Exception {
+        Assumptions.assumeTrue(Files.getFileStore(backupVolume).supportsFileAttributeView("posix"));
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
+        final BackupMetadata backup = BackupMetadata.create(100L, false,
+                aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L));
+
+        backend.createBackup(noOpStorageConnection(), backup);
+
+        final Path archive = backupVolume.resolve(BackupArchive.toArchiveFileName(backup));
+        assertEquals(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+                Files.getPosixFilePermissions(archive));
     }
 
     /// ZIP digest work happens before the shared publication lock and the destination stamp is rechecked.
     @Test
     void rechecksDestinationAfterOffLockDigest(@TempDir final Path backupVolume) throws Exception {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
-        final ReplicationCursor cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
+        final ReplicationPosition cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
         final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
-        backend.createBackup(noOpStorageConnection(), cursor, backup);
+        backend.createBackup(noOpStorageConnection(), backup);
         final Path archive = backupVolume.resolve(BackupArchive.toArchiveFileName(backup));
         final CountDownLatch inspected = new CountDownLatch(1);
         final CountDownLatch continuePublish = new CountDownLatch(1);
         final AtomicInteger inspections = new AtomicInteger();
         final AtomicReference<Throwable> failure = new AtomicReference<>();
         final Thread publisher = Thread.ofVirtual().start(() ->
-                FilesystemVolumeBackupBackend.runWithTestHook((point, path) -> {
+                FaultInjection.runWithHook((point, sequence, path) -> {
                     if (point.equals("AFTER_EXISTING_PUBLICATION_INSPECTION")) {
                         if (inspections.incrementAndGet() == 1) {
                             inspected.countDown();
@@ -297,7 +305,7 @@ class FilesystemVolumeBackupBackendTest {
                     }
                 }, () -> {
                     try {
-                        backend.createBackup(noOpStorageConnection(), cursor, backup);
+                        backend.createBackup(noOpStorageConnection(), backup);
                     } catch (final Throwable publishFailure) {
                         failure.set(publishFailure);
                     }
@@ -325,13 +333,13 @@ class FilesystemVolumeBackupBackendTest {
             throws Exception {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
         /* Every publisher shares one backup id — hence one archive name — but
-         * carries different content: the replication position differs, so the
-         * manifest and the content digest differ too. */
+         * carries a different Archive position in the identity sidecar. */
         final UUID sharedBackupId = UUID.randomUUID();
         final int publishers = 8;
-        final List<ReplicationCursor> cursors = new ArrayList<>();
+        final List<ReplicationPosition> cursors = new ArrayList<>();
         for (int index = 0; index < publishers; index++) {
-            cursors.add(aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 100L + index));
+            cursors.add(new ReplicationPosition(
+                    CLUSTER_ONE, GENERATION_ONE, 5L, 42L, 100L, index, 1L, NODE_ONE));
         }
 
         final CountDownLatch gate = new CountDownLatch(1);
@@ -339,17 +347,16 @@ class FilesystemVolumeBackupBackendTest {
         final AtomicInteger conflicts = new AtomicInteger();
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             final List<Future<?>> futures = new ArrayList<>();
-            for (final ReplicationCursor cursor : cursors) {
+            for (final ReplicationPosition cursor : cursors) {
                 futures.add(executor.submit(() ->
                 {
-                    final BackupMetadata shared = new BackupMetadata(
-                            100L, false, CLUSTER_ONE, GENERATION_ONE, 5L, 42L, BackupMetadata.UNKNOWN,
-                            NODE_ONE, sharedBackupId, BackupMetadata.UNKNOWN);
+                    final BackupMetadata shared = sameBackupId(
+                            BackupMetadata.create(100L, false, cursor), sharedBackupId);
                     if (!gate.await(1, TimeUnit.MINUTES)) {
                         throw new AssertionError("timed out waiting for concurrent publication gate");
                     }
                     try {
-                        backend.createBackup(noOpStorageConnection(), cursor, shared);
+                        backend.createBackup(noOpStorageConnection(), shared);
                         published.incrementAndGet();
                     } catch (final NodeException conflict) {
                         conflicts.incrementAndGet();
@@ -367,7 +374,7 @@ class FilesystemVolumeBackupBackendTest {
         assertEquals(1, published.get(), "exactly one same-name publication must win");
         assertEquals(publishers - 1, conflicts.get(), "every loser must fail instead of overwriting");
         assertEquals(1, backend.listBackups().size());
-        final ReplicationCursor stored = backend.getCursorForBackup(backend.getLastBackup(0));
+        final ReplicationPosition stored = backend.retentionBoundary(backend.getLastBackup(0));
         assertTrue(cursors.contains(stored),
                 "the surviving archive must hold one publisher's content, not a mixture");
         try (var files = Files.list(backupVolume)) {
@@ -385,12 +392,12 @@ class FilesystemVolumeBackupBackendTest {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
         final UUID backupId = UUID.randomUUID();
         final BackupMetadata tampered = new BackupMetadata(50L, false, CLUSTER_ONE, GENERATION_ONE,
-                5L, 42L, BackupMetadata.UNKNOWN, NODE_ONE, backupId, 12345L);
+                5L, 42L, BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN,
+                NODE_ONE, backupId, 12345L);
         final Path source = Files.createTempDirectory(backupVolume, ".tampered-source-");
         try {
             Files.createDirectories(source.resolve(StorageBackupBackend.STORAGE_ENTRY));
             Files.writeString(source.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data"), "payload");
-            Files.write(source.resolve(StorageBackupBackend.MANIFEST_ENTRY), ReplicationCursorStore.encode(CURSOR));
             Files.writeString(source.resolve(StorageBackupBackend.READY_ENTRY), "");
             BackupArchive.writeIdentity(source.resolve(BackupArchive.BACKUP_IDENTITY_ENTRY), tampered);
             BackupArchive.compressStorage(source, backupVolume.resolve(BackupArchive.toArchiveFileName(tampered)));
@@ -403,22 +410,21 @@ class FilesystemVolumeBackupBackendTest {
         assertFalse(Files.exists(root.resolve("destination").resolve(StorageBackupBackend.STORAGE_ENTRY)));
     }
 
-    /// Verifies Store payload and cursor round-trip through a volume archive to a fresh destination.
+    /// Verifies Store payload round-trip through a volume archive to a fresh destination.
     @Test
-    void roundTripsStorageAndCursorThroughTheVolumeArchive(
+    void roundTripsStorageThroughTheVolumeArchive(
             @TempDir final Path backupVolume,
             @TempDir final Path root
     ) throws Exception {
         final BackupMetadata backup = backup(20L, false, null, null,
                 BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, UUID.randomUUID());
-        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "round-trip", CURSOR, true);
+        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "round-trip", true);
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
         final Path destination = root.resolve("destination");
 
         backend.restoreBackup(destination, backup);
 
         assertEquals("round-trip", Files.readString(destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
-        assertEquals(CURSOR, backend.getCursorForBackup(backend.getLastBackup(0)));
     }
 
     /// Verifies deleting a backup is idempotent and leaves the remaining archives listed.
@@ -428,8 +434,8 @@ class FilesystemVolumeBackupBackendTest {
                 BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, UUID.randomUUID());
         final BackupMetadata second = backup(10L, false, null, null,
                 BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, UUID.randomUUID());
-        createArchive(backupVolume, BackupArchive.toArchiveFileName(first), "nine", CURSOR, true);
-        createArchive(backupVolume, BackupArchive.toArchiveFileName(second), "ten", CURSOR, true);
+        createArchive(backupVolume, BackupArchive.toArchiveFileName(first), "nine", true);
+        createArchive(backupVolume, BackupArchive.toArchiveFileName(second), "ten", true);
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
 
         backend.deleteBackup(second);
@@ -457,9 +463,9 @@ class FilesystemVolumeBackupBackendTest {
                         && !"root".equals(System.getProperty("user.name", "")),
                 "requires POSIX file permissions and a non-root user");
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
-        final ReplicationCursor cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
+        final ReplicationPosition cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
         final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
-        backend.createBackup(noOpStorageConnection(), cursor, backup);
+        backend.createBackup(noOpStorageConnection(), backup);
         final Path archive = backupVolume.resolve(BackupArchive.toArchiveFileName(backup));
         final Set<PosixFilePermission> original = Files.getPosixFilePermissions(archive);
 
@@ -468,7 +474,7 @@ class FilesystemVolumeBackupBackendTest {
              * transient I/O failure, not evidence of a partial archive. */
             Files.setPosixFilePermissions(archive, Set.of());
             assertThrows(NodeException.class,
-                    () -> backend.createBackup(noOpStorageConnection(), cursor, backup));
+                    () -> backend.createBackup(noOpStorageConnection(), backup));
             assertTrue(Files.exists(archive, LinkOption.NOFOLLOW_LINKS),
                     "a transient read error must not delete the durable archive");
         } finally {
@@ -476,26 +482,26 @@ class FilesystemVolumeBackupBackendTest {
         }
 
         assertEquals(1, backend.listBackups().size());
-        assertEquals(cursor, backend.getCursorForBackup(backend.getLastBackup(0)));
+        assertEquals(cursor, backend.retentionBoundary(backend.getLastBackup(0)));
     }
 
     /// Verifies a conclusively truncated archive is replaced by a complete retry.
     @Test
     void incompleteArchiveIsReplacedByARetry(@TempDir final Path backupVolume) throws Exception {
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
-        final ReplicationCursor cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
+        final ReplicationPosition cursor = aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L);
         final BackupMetadata backup = BackupMetadata.create(100L, false, cursor);
-        backend.createBackup(noOpStorageConnection(), cursor, backup);
+        backend.createBackup(noOpStorageConnection(), backup);
 
         final Path archive = backupVolume.resolve(BackupArchive.toArchiveFileName(backup));
         try (FileChannel channel = FileChannel.open(archive, StandardOpenOption.WRITE)) {
             channel.truncate(Files.size(archive) / 2);
         }
 
-        backend.createBackup(noOpStorageConnection(), cursor, backup);
+        backend.createBackup(noOpStorageConnection(), backup);
 
         assertEquals(1, backend.listBackups().size());
-        assertEquals(cursor, backend.getCursorForBackup(backend.getLastBackup(0)),
+        assertEquals(cursor, backend.retentionBoundary(backend.getLastBackup(0)),
                 "the replacement archive must be complete and readable");
     }
 
@@ -509,7 +515,6 @@ class FilesystemVolumeBackupBackendTest {
         try {
             Files.createDirectories(source.resolve(StorageBackupBackend.STORAGE_ENTRY));
             Files.writeString(source.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data"), "payload");
-            Files.write(source.resolve(StorageBackupBackend.MANIFEST_ENTRY), ReplicationCursorStore.encode(CURSOR));
             Files.writeString(source.resolve(StorageBackupBackend.READY_ENTRY), "");
             BackupArchive.writeIdentity(source.resolve(BackupArchive.BACKUP_IDENTITY_ENTRY), planted);
             BackupArchive.compressStorage(source, backupVolume.resolve(BackupArchive.toArchiveFileName(published)));
@@ -587,7 +592,7 @@ class FilesystemVolumeBackupBackendTest {
     void listBackupsUsesTheMetadataCache(@TempDir final Path backupVolume) throws Exception {
         final BackupMetadata backup = backup(30L, false, null, null,
                 BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, UUID.randomUUID());
-        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "payload", CURSOR, true);
+        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "payload", true);
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
         assertEquals(List.of(backup), backend.listBackups());
 
@@ -615,7 +620,7 @@ class FilesystemVolumeBackupBackendTest {
     void deleteBackupTakesThePublicationLock(@TempDir final Path backupVolume) throws Exception {
         final BackupMetadata backup = backup(40L, false, null, null,
                 BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, UUID.randomUUID());
-        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "payload", CURSOR, true);
+        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "payload", true);
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
         final Path lockFile = backupVolume.resolve(".publish.lock");
 
@@ -652,15 +657,15 @@ class FilesystemVolumeBackupBackendTest {
         assertFalse(backend.hasUserUploadedStorage());
     }
 
-    /// An upload without a manifest is refused by preflight and staged restore.
+    /// An upload without a Store payload is refused by preflight and staged restore.
     @Test
-    void userUploadWithoutAManifestLeavesThePreviousStoreIntact(
+    void userUploadWithoutAStorePayloadLeavesThePreviousStoreIntact(
             @TempDir final Path backupVolume, @TempDir final Path root) throws Exception {
         try (OutputStream output = Files.newOutputStream(
                 backupVolume.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE));
              ZipOutputStream zip = new ZipOutputStream(output)) {
-            zip.putNextEntry(new ZipEntry(StorageBackupBackend.STORAGE_ENTRY + "/data"));
-            zip.write("payload without a manifest".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            zip.putNextEntry(new ZipEntry("metadata"));
+            zip.write("no Store payload".getBytes(java.nio.charset.StandardCharsets.UTF_8));
             zip.closeEntry();
         }
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
@@ -670,8 +675,8 @@ class FilesystemVolumeBackupBackendTest {
 
         final NodeException validation = assertThrows(NodeException.class,
                 backend::validateUserUploadedStorage);
-        assertTrue(validation.getMessage().contains("exactly one readable manifest"),
-                "must name the missing manifest, was: %s".formatted(validation.getMessage()));
+        assertTrue(validation.getMessage().contains("no non-empty storage payload"),
+                "must name the missing Store payload, was: %s".formatted(validation.getMessage()));
         assertThrows(NodeException.class,
                 () -> backend.restoreUserUploadedStorage(destination),
                 "the staged copy must be rejected before replacing local storage");
@@ -687,9 +692,6 @@ class FilesystemVolumeBackupBackendTest {
         try (OutputStream output = Files.newOutputStream(
                 backupVolume.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE));
              ZipOutputStream zip = new ZipOutputStream(output)) {
-            zip.putNextEntry(new ZipEntry(StorageBackupBackend.MANIFEST_ENTRY));
-            zip.write(ReplicationCursorStore.encode(CURSOR));
-            zip.closeEntry();
             zip.putNextEntry(new ZipEntry(StorageBackupBackend.STORAGE_ENTRY + "/empty"));
             zip.closeEntry();
         }
@@ -726,6 +728,11 @@ class FilesystemVolumeBackupBackendTest {
     void tempDirectoryAttributesFallBackWithoutAPosixView(@TempDir final Path root) throws Exception {
         assertEquals(1, FilesystemVolumeBackupBackend
                 .privateDirectoryAttributes(root).length);
+        final Path privateDirectory = Files.createTempDirectory(root, ".private-",
+                FilesystemVolumeBackupBackend.privateDirectoryAttributes(root));
+        assertEquals(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE,
+                        PosixFilePermission.OWNER_EXECUTE),
+                Files.getPosixFilePermissions(privateDirectory));
         final Path zip = root.resolve("fs.zip");
         final URI uri = URI.create("jar:" + zip.toUri());
         try (final FileSystem zipfs = FileSystems.newFileSystem(uri, Map.of("create", "true"))) {
@@ -740,7 +747,7 @@ class FilesystemVolumeBackupBackendTest {
             throws Exception {
         final BackupMetadata backup = backup(12L, false, null, null,
                 BackupMetadata.UNKNOWN, BackupMetadata.UNKNOWN, UUID.randomUUID());
-        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "payload", CURSOR, true);
+        createArchive(backupVolume, BackupArchive.toArchiveFileName(backup), "payload", true);
         final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(backupVolume);
         final Path destination = root.resolve("destination");
         Files.createDirectories(destination.resolve(StorageBackupBackend.STORAGE_ENTRY));
@@ -764,7 +771,7 @@ class FilesystemVolumeBackupBackendTest {
 
 
             @Override
-            public ReplicationCursor getCursorForBackup(final BackupMetadata backup) {
+            public ReplicationPosition retentionBoundary(final BackupMetadata backup) {
                 return null;
             }
 
@@ -775,7 +782,6 @@ class FilesystemVolumeBackupBackendTest {
             @Override
             public void createBackup(
                     final StorageConnection connection,
-                    final ReplicationCursor cursor,
                     final BackupMetadata backup
             ) {
             }

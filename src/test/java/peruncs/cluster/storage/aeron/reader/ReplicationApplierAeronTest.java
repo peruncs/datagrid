@@ -5,7 +5,6 @@ import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.errors.CorruptReplicationDataException;
-import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelopeTestSupport;
@@ -205,17 +204,19 @@ class ReplicationApplierAeronTest {
         assertNotNull(assembler.failure());
     }
 
-        /// Verifies rejection of sequence regression instead of silently skipping data.
+    /// Frames through the persisted Store mark are skipped before decoding.
     @Test
-    void rejectsSequenceRegressionInsteadOfSilentlySkippingData() {
+    void skipsFramesThroughThePersistedStoreMark() {
         final RecordingReceiver receiver = new RecordingReceiver();
         final TransactionAssembler assembler = TransactionAssemblerTestSupport.New(
                 AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1).termLength(64 * 1024).chunkSize(256)
                         .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, 5, receiver, () -> {
         });
         final byte[] data = {1};
-        assertThrows(ReseedRequiredException.class, () -> accept(assembler,
-                envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 4, 0, 1, 0, data, 1)));
+        accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 4, 0, 1, 0, data, 1));
+        assertEquals(5, assembler.lastResolvedSequence());
+        assertEquals(0, receiver.dataCalls);
+        assertNull(assembler.failure());
     }
 
         /// Verifies abort advances cursor and does not import.
@@ -347,46 +348,6 @@ class ReplicationApplierAeronTest {
         assertEquals(2, callbacks.get(), "duplicate resolution must be idempotent");
     }
 
-        /// Verifies delivery boundary leaves uncertain marker when store import fails.
-    @Test
-    void deliveryBoundaryLeavesUncertainMarkerWhenStoreImportFails() {
-        final AtomicInteger before = new AtomicInteger();
-        final AtomicInteger after = new AtomicInteger();
-        final StorageBinaryDataReceiver receiver = new RecordingReceiver() {
-            @Override
-            public void receiveData(final Binary value) {
-                throw new IllegalStateException("injected Store import failure");
-            }
-        };
-        final TransactionAssembler assembler = TransactionAssemblerTestSupport.New(
-                AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1).termLength(64 * 1024).chunkSize(256)
-                        .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1, receiver, () -> {
-        },
-                new ReaderDeliveryListener() {
-                    @Override
-                    public void beforeStoreImport(final long sequence, final long position, final int dataLength,
-                                                  final int dataChunkCount, final int crc32c) {
-                        before.incrementAndGet();
-                    }
-
-                    @Override
-                    public void afterStoreImport() {
-                        after.incrementAndGet();
-                    }
-                }
-        );
-        final byte[] data = {1, 2, 3};
-        accept(assembler, envelope(AeronReplicationEnvelope.Kind.STORE_BINARY, 0, 0, 1, 0,
-                data, data.length));
-        assertThrows(IllegalStateException.class, () -> accept(assembler, AeronReplicationEnvelopeTestSupport.encode(
-                CLUSTER, EPOCH, 1L, 0, AeronReplicationEnvelope.Kind.COMMIT, data.length, 0, 1, 0,
-                AeronReplicationEnvelope.crc32c(data), new byte[0])));
-        assertEquals(1, before.get());
-        assertEquals(0, after.get());
-        assertEquals(-1, assembler.lastResolvedSequence());
-        assertNotNull(assembler.failure());
-    }
-
         /// Verifies rejection of oversize and non contiguous chunks.
     @Test
     void rejectsOversizeAndNonContiguousChunks() {
@@ -444,8 +405,7 @@ class ReplicationApplierAeronTest {
                 987,
                 new RecordingReceiver(),
                 () -> {
-                },
-                null
+                }
         );
 
         assertEquals(new CursorSnapshot(41, 987), assembler.cursorSnapshot());
@@ -525,7 +485,7 @@ class ReplicationApplierAeronTest {
                         AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1).termLength(64 * 1024).chunkSize(256)
                                 .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1, receiver,
                         () -> {
-                            throw new IllegalStateException("checkpoint failed");
+                            throw new IllegalStateException("progress callback failed");
                         }
                 );
         final byte[] data = {1, 2, 3};
@@ -539,7 +499,7 @@ class ReplicationApplierAeronTest {
                         AeronReplicationEnvelope.crc32c(data), new byte[0])));
         assembler.failure(callbackFailure);
         assertEquals(1, receiver.dataCalls);
-        assertEquals("checkpoint failed", assembler.failure().getMessage());
+        assertEquals("progress callback failed", assembler.failure().getMessage());
     }
 
         /// Verifies rejection of wrong cluster and epoch before mutating state.
@@ -747,8 +707,8 @@ class ReplicationApplierAeronTest {
 
             final byte[] stale = envelopeWithToken(AeronReplicationEnvelope.Kind.STORE_BINARY, 5L,
                     1, 0, 1, 0, data, data.length);
-            final ReseedRequiredException failure =
-                    assertThrows(ReseedRequiredException.class, () -> accept(assembler, stale));
+            final CorruptReplicationDataException failure =
+                    assertThrows(CorruptReplicationDataException.class, () -> accept(assembler, stale));
             assertTrue(failure.getMessage().contains("stale writer fencing token"),
                     "stale token must fail closed, was: %s".formatted(failure.getMessage()));
             assertNotNull(assembler.failure(), "stale token must latch the terminal failure");
@@ -767,7 +727,7 @@ class ReplicationApplierAeronTest {
             final byte[] data = {1, 2};
             final byte[] older = envelopeWithToken(AeronReplicationEnvelope.Kind.STORE_BINARY, 3L,
                     0, 0, 1, 0, data, data.length);
-            assertThrows(ReseedRequiredException.class, () -> accept(assembler, older));
+            assertThrows(CorruptReplicationDataException.class, () -> accept(assembler, older));
             assertNotNull(assembler.failure());
         } finally {
             assembler.dispose();

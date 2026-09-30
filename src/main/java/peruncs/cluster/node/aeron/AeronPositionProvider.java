@@ -1,10 +1,9 @@
 package peruncs.cluster.node.aeron;
 
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.errors.ReplicationPositionUnavailableException;
+import peruncs.cluster.errors.internal.ReplicationPositionUnavailableException;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
-import peruncs.cluster.storage.ReplicationCursor;
-import peruncs.cluster.storage.aeron.checkpoint.AeronReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -54,7 +53,7 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
     }
 
     @Override
-    public ReplicationCursor latest() throws NodeException {
+    public ReplicationPosition latest() throws NodeException {
         if (!this.writer.getAsBoolean()) {
             throw new ReplicationPositionUnavailableException("Aeron reader cannot establish the writer's latest durable boundary without watermark delivery");
         }
@@ -67,11 +66,11 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
             throw unavailable;
         } catch (final RuntimeException failure) {
             throw new ReplicationPositionUnavailableException(
-                    "Aeron writer fencing lease is not held; no writer position can be established", failure);
+                    "Aeron writer Store mark is not available; no writer position can be established", failure);
         }
         if (fencingToken <= 0) {
             throw new ReplicationPositionUnavailableException(
-                    "Aeron writer fencing lease is not held; no writer position can be established");
+                    "Aeron writer Store mark is not available; no writer position can be established");
         }
         final AeronWriterRecoveryBoundary boundary = this.writerBoundary.get();
         if (boundary.recordingId() < 0 || boundary.position() < 0) {
@@ -79,10 +78,8 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
                     "Aeron writer has no resolved Archive position to report");
         }
         final UUID generation = this.storeGeneration.get();
-        final byte[] encoded = new AeronReplicationCursor(this.clusterId.get(), this.nodeId.get(), generation,
-                this.epoch.getAsLong(), fencingToken, boundary.recordingId(), boundary.position(),
-                boundary.sequence()).encode();
-        return ReplicationCursor.of("aeron", generation, boundary.sequence(), encoded);
+        return new ReplicationPosition(this.clusterId.get(), generation, this.epoch.getAsLong(),
+                boundary.recordingId(), boundary.sequence(), boundary.position(), fencingToken, this.nodeId.get());
     }
 
         /// Releases nothing: the provider reads the transport's published

@@ -1,16 +1,19 @@
 package peruncs.cluster.node.backup;
 
+import org.eclipse.serializer.concurrency.LockedExecutor;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.api.BackupInfo;
 import peruncs.cluster.api.BackupSlot;
+import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.errors.BackupBusyException;
 import peruncs.cluster.node.CloseSequencer;
 import peruncs.cluster.node.store.StorageTaskExecutor;
 
+import java.time.Duration;
+import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.Objects;
 
 import static java.lang.System.Logger.Level.ERROR;
 import static java.lang.System.Logger.Level.INFO;
@@ -35,7 +38,23 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
     static StorageBackupTaskExecutor create(final StorageConnection connection,
                                             final StorageBackupManager backupManager,
                                             final long closeTimeoutMillis) {
-        return new Default(notNull(connection), notNull(backupManager), closeTimeoutMillis);
+        return new Default(notNull(connection), notNull(backupManager), closeTimeoutMillis,
+                NodeConfig.Operations.DEFAULT.storageCheckCloseTimeout());
+    }
+
+    /// Creates both executors with their respective bounded close waits.
+    ///
+    /// @param connection Store connection
+    /// @param backupManager backup manager
+    /// @param closeTimeoutMillis backup executor close wait
+    /// @param operations configured maintenance bounds
+    /// @return task executor
+    static StorageBackupTaskExecutor create(final StorageConnection connection,
+                                            final StorageBackupManager backupManager,
+                                            final long closeTimeoutMillis,
+                                            final NodeConfig.Operations operations) {
+        return new Default(notNull(connection), notNull(backupManager), closeTimeoutMillis,
+                Objects.requireNonNull(operations, "operations").storageCheckCloseTimeout());
     }
 
     /// Starts a backup and returns its eventual result.
@@ -110,6 +129,9 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         private final StorageBackupManager backupManager;
         private final ExecutorService backupExecutor;
         private final long closeTimeoutMillis;
+        /* Serializes the phase, task, and close-state fields below. Never run
+         * Store work, wait for shutdown, or complete user futures while held. */
+        private final LockedExecutor state = LockedExecutor.New();
 
         private Future<?> backupTask;
         private CompletableFuture<BackupInfo> backupResult;
@@ -122,11 +144,18 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         private enum BackupPhase { IDLE, QUEUED, RUNNING }
 
         private Default(final StorageConnection connection, final StorageBackupManager backupManager) {
-            this(connection, backupManager, 60_000L);
+            this(connection, backupManager, 60_000L, NodeConfig.Operations.DEFAULT.storageCheckCloseTimeout());
         }
 
         private Default(final StorageConnection connection, final StorageBackupManager backupManager, final long closeTimeoutMillis) {
-            this(connection, backupManager, closeTimeoutMillis, Executors.newSingleThreadExecutor(Thread.ofVirtual()
+            this(connection, backupManager, closeTimeoutMillis,
+                    NodeConfig.Operations.DEFAULT.storageCheckCloseTimeout());
+        }
+
+        private Default(final StorageConnection connection, final StorageBackupManager backupManager,
+                        final long closeTimeoutMillis, final Duration storageCheckCloseTimeout) {
+            this(connection, backupManager, closeTimeoutMillis, storageCheckCloseTimeout,
+                    Executors.newSingleThreadExecutor(Thread.ofVirtual()
                     .name("EclipseStore-StorageBackup", 0L)
                     .factory()));
         }
@@ -135,8 +164,17 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
                 final StorageBackupManager backupManager,
                 final long closeTimeoutMillis,
                 final ExecutorService backupExecutor) {
+            this(connection, backupManager, closeTimeoutMillis,
+                    NodeConfig.Operations.DEFAULT.storageCheckCloseTimeout(), backupExecutor);
+        }
+
+        private Default(final StorageConnection connection,
+                        final StorageBackupManager backupManager,
+                        final long closeTimeoutMillis,
+                        final Duration storageCheckCloseTimeout,
+                        final ExecutorService backupExecutor) {
             if (closeTimeoutMillis <= 0L) throw new IllegalArgumentException("closeTimeoutMillis must be positive");
-            this.storageChecks = StorageTaskExecutor.create(connection);
+            this.storageChecks = StorageTaskExecutor.create(connection, storageCheckCloseTimeout);
             this.backupManager = backupManager;
             this.closeTimeoutMillis = closeTimeoutMillis;
             this.backupExecutor = Objects.requireNonNull(backupExecutor, "backupExecutor");
@@ -161,39 +199,39 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         public CompletableFuture<BackupInfo> runBackup(final BackupSlot slot) {
             Objects.requireNonNull(slot, "slot");
             final CompletableFuture<BackupInfo> result = new CompletableFuture<>();
-            synchronized (this) {
+            final RuntimeException rejection = this.state.write(() -> {
                 if (this.backupClosing || this.backupClosed) {
-                    return CompletableFuture.failedFuture(
-                            new IllegalStateException("Storage backup task executor is closed"));
+                    return new IllegalStateException("Storage backup task executor is closed");
                 }
                 if (this.phase != BackupPhase.IDLE) {
-                    return CompletableFuture.failedFuture(new BackupBusyException("Storage backup is already running"));
+                    return new BackupBusyException("Storage backup is already running");
                 }
                 LOGGER.log(System.Logger.Level.DEBUG, "Issuing new storage backup");
                 this.backupResult = result;
                 this.phase = BackupPhase.QUEUED;
-            }
+                return null;
+            });
+            if (rejection != null) return CompletableFuture.failedFuture(rejection);
             try {
                 final Future<?> task = this.backupExecutor.submit(() -> this.runBackup(slot, result));
-                boolean cancelTask = false;
-                synchronized (this) {
+                final boolean cancelTask = this.state.write(() -> {
                     if (this.phase == BackupPhase.QUEUED && this.backupResult == result) {
                         this.backupTask = task;
-                    } else {
-                        /* close() may have cancelled this queued run while
-                         * submit() was outside the state monitor. */
-                        cancelTask = true;
+                        return false;
                     }
-                }
+                    /* close() may have cancelled this queued run while
+                     * submit() was outside the state lock. */
+                    return true;
+                });
                 if (cancelTask) task.cancel(false);
             } catch (final RuntimeException | Error failure) {
-                synchronized (this) {
+                this.state.write(() -> {
                     if (this.backupResult == result) {
                         this.phase = BackupPhase.IDLE;
                         this.backupTask = null;
                         this.backupResult = null;
                     }
-                }
+                });
                 if (failure instanceof Error error) throw error;
                 result.completeExceptionally(failure);
             }
@@ -201,10 +239,12 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         }
 
         private void runBackup(final BackupSlot slot, final CompletableFuture<BackupInfo> result) {
-            synchronized (this) {
-                if (this.phase != BackupPhase.QUEUED || this.backupResult != result) return;
+            final boolean entered = this.state.write(() -> {
+                if (this.phase != BackupPhase.QUEUED || this.backupResult != result) return false;
                 this.phase = BackupPhase.RUNNING;
-            }
+                return true;
+            });
+            if (!entered) return;
             BackupInfo backup = null;
             Throwable failure = null;
             try {
@@ -220,11 +260,11 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
                 this.backupFailure.set(fatalFailure);
                 LOGGER.log(ERROR, "Fatal storage-backup failure", fatalFailure);
             } finally {
-                synchronized (this) {
+                this.state.write(() -> {
                     this.phase = BackupPhase.IDLE;
                     this.backupTask = null;
                     this.backupResult = null;
-                }
+                });
                 if (failure == null) result.complete(backup);
                 else result.completeExceptionally(failure);
             }
@@ -232,13 +272,13 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         }
 
         @Override
-        public synchronized boolean isRunningBackup() {
-            return this.phase != BackupPhase.IDLE;
+        public boolean isRunningBackup() {
+            return this.state.read(() -> this.phase != BackupPhase.IDLE);
         }
 
         @Override
-        public synchronized boolean isBackupExecuting() {
-            return this.phase == BackupPhase.RUNNING;
+        public boolean isBackupExecuting() {
+            return this.state.read(() -> this.phase == BackupPhase.RUNNING);
         }
 
         @Override
@@ -267,27 +307,28 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         /// stopped; failures from both phases are aggregated.
         @Override
         public void close() {
-            final boolean closeBackup;
-            CompletableFuture<BackupInfo> cancelledResult = null;
-            synchronized (this) {
-                closeBackup = !this.backupClosed;
+            final CloseState closeState = this.state.write(() -> {
+                final boolean closeBackup = !this.backupClosed;
                 if (closeBackup) {
                     this.backupClosing = true;
                     if (this.backupTask != null) this.backupTask.cancel(false);
+                    CompletableFuture<BackupInfo> cancelledResult = null;
                     if (this.phase == BackupPhase.QUEUED) {
                         this.phase = BackupPhase.IDLE;
                         cancelledResult = this.backupResult;
                         this.backupTask = null;
                         this.backupResult = null;
                     }
+                    return new CloseState(true, cancelledResult);
                 }
-            }
-            if (cancelledResult != null) {
-                cancelledResult.completeExceptionally(
+                return new CloseState(false, null);
+            });
+            if (closeState.cancelledResult() != null) {
+                closeState.cancelledResult().completeExceptionally(
                         new CancellationException("queued backup cancelled during close"));
             }
             Throwable failure = null;
-            if (closeBackup) {
+            if (closeState.closeBackup()) {
                 this.backupExecutor.shutdown();
                 try {
                     if (!this.backupExecutor.awaitTermination(this.closeTimeoutMillis, TimeUnit.MILLISECONDS)) {
@@ -299,10 +340,10 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
                     failure = new IllegalStateException("Interrupted while stopping storage backup", interrupted);
                 }
                 if (failure == null) {
-                    synchronized (this) {
+                    this.state.write(() -> {
                         this.backupClosed = true;
                         this.backupClosing = false;
-                    }
+                    });
                 }
             }
             try {
@@ -312,6 +353,9 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
             }
             if (failure instanceof Error error) throw error;
             if (failure instanceof RuntimeException runtime) throw runtime;
+        }
+
+        private record CloseState(boolean closeBackup, CompletableFuture<BackupInfo> cancelledResult) {
         }
     }
 }

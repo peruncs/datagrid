@@ -3,9 +3,10 @@ package peruncs.cluster.node.backup;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.api.BackupInfo;
 import peruncs.cluster.api.BackupSlot;
+import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.node.replication.ReplicationLogRetention;
-import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.ReplicationRetry;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 
@@ -34,7 +35,7 @@ public interface StorageBackupManager {
     /// @param storageConnection    Store connection
     /// @param maxBackupCount       maximum backup count
     /// @param storageBackupBackend backup backend
-    /// @param cursorSupplier       replication cursor supplier
+    /// @param positionSupplier       replication position supplier
     /// @param dataClient           replication client
     /// @param retention            log retention policy
     /// @return backup manager
@@ -42,16 +43,39 @@ public interface StorageBackupManager {
             final StorageConnection storageConnection,
             final int maxBackupCount,
             final StorageBackupBackend storageBackupBackend,
-            final Supplier<ReplicationCursor> cursorSupplier,
+            final Supplier<ReplicationPosition> positionSupplier,
             final ReplicationApplier dataClient,
             final ReplicationLogRetention retention) {
+        return create(storageConnection, maxBackupCount, storageBackupBackend, positionSupplier, dataClient,
+                retention, NodeConfig.Operations.DEFAULT);
+    }
+
+    /// Creates a backup manager with configured retry and stop bounds.
+    ///
+    /// @param storageConnection Store connection
+    /// @param maxBackupCount maximum backup count
+    /// @param storageBackupBackend backup backend
+    /// @param positionSupplier replication position supplier
+    /// @param dataClient replication client
+    /// @param retention log retention policy
+    /// @param operations configured retry and stop bounds
+    /// @return backup manager
+    static StorageBackupManager create(
+            final StorageConnection storageConnection,
+            final int maxBackupCount,
+            final StorageBackupBackend storageBackupBackend,
+            final Supplier<ReplicationPosition> positionSupplier,
+            final ReplicationApplier dataClient,
+            final ReplicationLogRetention retention,
+            final NodeConfig.Operations operations) {
         return new Default(
                 notNull(storageConnection),
                 positive(maxBackupCount),
                 notNull(storageBackupBackend),
-                notNull(cursorSupplier),
+                notNull(positionSupplier),
                 notNull(dataClient),
-                notNull(retention)
+                notNull(retention),
+                Objects.requireNonNull(operations, "operations")
         );
     }
 
@@ -127,33 +151,31 @@ public interface StorageBackupManager {
     /// Implements the stop, backup, retention, and resume sequence.
     class Default implements StorageBackupManager {
         private static final System.Logger LOGGER = System.getLogger(StorageBackupManager.class.getName());
-        private static final long STOP_TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(1);
-        private static final long POLL_INTERVAL_MILLIS = 100L;
-        private static final int RETENTION_RETRY_ATTEMPTS = 3;
-        private static final long RETENTION_RETRY_DELAY_MILLIS = 100L;
-
         private final StorageConnection storageConnection;
         private final int maxBackupCount;
         private final StorageBackupBackend backend;
-        private final Supplier<ReplicationCursor> cursorSupplier;
+        private final Supplier<ReplicationPosition> positionSupplier;
         private final ReplicationApplier dataClient;
         private final ReplicationLogRetention retention;
+        private final NodeConfig.Operations operations;
         private final AtomicReference<Throwable> maintenanceFailure = new AtomicReference<>();
 
         private Default(
                 final StorageConnection storageConnection,
                 final int maxBackupCount,
                 final StorageBackupBackend backupBackend,
-                final Supplier<ReplicationCursor> cursorSupplier,
+                final Supplier<ReplicationPosition> positionSupplier,
                 final ReplicationApplier dataClient,
-                final ReplicationLogRetention retention
+                final ReplicationLogRetention retention,
+                final NodeConfig.Operations operations
         ) {
             this.storageConnection = storageConnection;
             this.maxBackupCount = maxBackupCount;
             this.backend = backupBackend;
-            this.cursorSupplier = cursorSupplier;
+            this.positionSupplier = positionSupplier;
             this.dataClient = dataClient;
             this.retention = retention;
+            this.operations = operations;
         }
 
         @Override
@@ -186,21 +208,20 @@ public interface StorageBackupManager {
                 }
             }
 
-            /* The manifest cursor must describe the stopped boundary, not the
-             * position observed before the stop resolved. Anything captured
-             * earlier can lag the boundary the backup actually quiesced at.
-             * The backup generation comes from that same cursor, so a node
+            /* Backup identity and retention boundary must describe the
+             * stopped Store mark, not a position observed before the stop.
+             * The backup generation comes from that same position, so a node
              * on a shared volume only ever restores its own cluster, epoch,
              * and recording. The backup id is random, so concurrent
-             * publishers never share an archive name. Acquire the cursor and
+             * publishers never share an archive name. Acquire the position and
              * build the metadata INSIDE the try: a failed preparation after a
              * successful stop must resume the reader just the same. */
             Throwable operationFailure = null;
             try {
-                final ReplicationCursor cursor = this.cursorSupplier.get();
-                final var newBackup = BackupMetadata.create(timestamp, slot == BackupSlot.MANUAL, cursor);
-                final var localIdentity = BackupMetadata.Identity.of(cursor);
-                this.backend.createBackup(this.storageConnection, cursor, newBackup);
+                final ReplicationPosition position = this.positionSupplier.get();
+                final var newBackup = BackupMetadata.create(timestamp, slot == BackupSlot.MANUAL, position);
+                final var localIdentity = BackupMetadata.Identity.of(position);
+                this.backend.createBackup(this.storageConnection, newBackup);
                 this.runMaintenance(backups, slot, newBackup, localIdentity);
                 return new BackupInfo(newBackup.backupId(),
                         Instant.ofEpochMilli(newBackup.timestamp()),
@@ -230,7 +251,7 @@ public interface StorageBackupManager {
         /// Runs the post-publication maintenance steps without failing the backup.
         ///
         /// Each step is independent: scanning for unreadable archives, resolving
-        /// the retention cursor, pruning old archives, and advancing log
+        /// the retention position, pruning old archives, and advancing log
         /// retention all catch their own runtime failures, log them, and publish
         /// them through [#maintenanceFailure()]. The durable backup published
         /// before this method runs is never affected.
@@ -243,21 +264,21 @@ public interface StorageBackupManager {
             this.maintenanceFailure.set(null);
             this.sweepUnreadableArchives();
 
-            /* The retention cursor is resolved before pruning while the
+            /* The retention position is resolved before pruning while the
              * previous archive still exists to read it from. */
-            final ReplicationCursor retentionCursor;
+            final ReplicationPosition retentionPosition;
             try {
-                retentionCursor = slot == BackupSlot.MANUAL
-                        ? null : this.retentionCursorExcluding(created, localIdentity);
+                retentionPosition = slot == BackupSlot.MANUAL
+                        ? null : this.retentionPositionExcluding(created, localIdentity);
             } catch (final RuntimeException failure) {
-                this.recordMaintenanceFailure("resolve the retention cursor", failure);
+                this.recordMaintenanceFailure("resolve the retention position", failure);
                 this.pruneBackups(backups, slot, localIdentity);
                 return;
             }
 
             this.pruneBackups(backups, slot, localIdentity);
             try {
-                this.advanceRetention(slot, retentionCursor);
+                this.advanceRetention(slot, retentionPosition);
             } catch (final RuntimeException failure) {
                 this.recordMaintenanceFailure("advance replication retention", failure);
             }
@@ -317,7 +338,7 @@ public interface StorageBackupManager {
         }
 
         /// Advances log retention, reporting but not rethrowing failures.
-        private void advanceRetention(final BackupSlot slot, final ReplicationCursor retentionCursor)
+        private void advanceRetention(final BackupSlot slot, final ReplicationPosition retentionPosition)
                 throws NodeException {
             if (slot == BackupSlot.MANUAL) {
                 return;
@@ -327,11 +348,11 @@ public interface StorageBackupManager {
                         "Replication retention is unsupported; preserving Archive history");
                 return;
             }
-            if (retentionCursor == null) {
+            if (retentionPosition == null) {
                 return;
             }
             final ReplicationLogRetention.MaintenanceResult result =
-                    this.deleteThroughWithReplayRetry(retentionCursor);
+                    this.deleteThroughWithReplayRetry(retentionPosition);
             switch (result.status()) {
                 case DELETED -> LOGGER.log(System.Logger.Level.DEBUG,
                         "Replication retention deleted Archive history through %s".formatted(result.position()));
@@ -403,7 +424,8 @@ public interface StorageBackupManager {
         private void stopDataClient() throws NodeException {
             LOGGER.log(System.Logger.Level.TRACE, "Waiting for data client to stop reading");
             this.dataClient.stopAtLatestMessage();
-            final long deadline = ReplicationRetry.deadlineNanos(STOP_TIMEOUT_NANOS);
+            final long deadline = ReplicationRetry.deadlineNanos(TimeUnit.MILLISECONDS.toNanos(
+                    this.operations.backupStopTimeout().toMillis()));
             while (true) {
                 final ReplicationApplier.StopResult result = this.dataClient.stopResult();
                 final ReplicationApplier.StopOutcome outcome = result.outcome();
@@ -426,9 +448,9 @@ public interface StorageBackupManager {
                 if (ReplicationRetry.expired(deadline)) {
                     throw new NodeException(
                             "Timed out waiting for replication reader boundary at %s (last resolved sequence=%s, position=%s)"
-                                    .formatted(this.dataClient.cursor(), result.sequence(), result.position()));
+                                    .formatted(this.dataClient.position(), result.sequence(), result.position()));
                 }
-                awaitNextPoll();
+                this.awaitNextPoll();
             }
         }
 
@@ -438,12 +460,12 @@ public interface StorageBackupManager {
         /// wrapper: it is translated into a [NodeException], and the
         /// interrupt flag is restored so the caller's cancellation policy still
         /// sees it.
-        private static void awaitNextPoll() throws NodeException {
+        private void awaitNextPoll() throws NodeException {
             if (Thread.currentThread().isInterrupted()) {
                 throw new NodeException("Interrupted while waiting for the replication reader boundary");
             }
             try {
-                Thread.sleep(POLL_INTERVAL_MILLIS);
+                Thread.sleep(this.operations.backupStopPollInterval().toMillis());
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 throw new NodeException(
@@ -451,17 +473,17 @@ public interface StorageBackupManager {
             }
         }
 
-                /// Resolves the retention cursor from the newest backup compatible
+                /// Resolves the retention position from the newest backup compatible
         /// with this node, excluding the backup that was just created.
         ///
         /// Counting from the newest backup overall would hand retention a
-        /// cursor from an unrelated generation sharing the volume, deleting
+        /// position from an unrelated generation sharing the volume, deleting
         /// log history this node's own restores still need.
         ///
         /// @param created        backup that was just published
         /// @param localIdentity  this node's backup identity
-        /// @return cursor of the previous compatible backup, or `null` when none exists
-        private ReplicationCursor retentionCursorExcluding(
+        /// @return position of the previous compatible backup, or `null` when none exists
+        private ReplicationPosition retentionPositionExcluding(
                 final BackupMetadata created,
                 final BackupMetadata.Identity localIdentity) {
             final var previous = this.backend.listBackups().stream()
@@ -472,7 +494,7 @@ public interface StorageBackupManager {
             if (previous == null) {
                 return null;
             }
-            return this.backend.getCursorForBackup(previous);
+            return this.backend.retentionBoundary(previous);
         }
 
                 /// Retries a purge that is temporarily blocked by an active Archive replay.
@@ -481,22 +503,22 @@ public interface StorageBackupManager {
         /// chance to finish, and a still-active replay is retained for the next backup
         /// cycle with an explicit warning.
         private ReplicationLogRetention.MaintenanceResult deleteThroughWithReplayRetry(
-                final ReplicationCursor cursor) throws NodeException {
-            ReplicationLogRetention.MaintenanceResult result = this.retention.deleteThrough(cursor);
+                final ReplicationPosition position) throws NodeException {
+            ReplicationLogRetention.MaintenanceResult result = this.retention.deleteThrough(position);
             for (int attempt = 1; result.status() == ReplicationLogRetention.MaintenanceResult.Status.DEFERRED_ACTIVE_REPLAY &&
-                                  attempt < RETENTION_RETRY_ATTEMPTS; attempt++) {
-                sleepRetentionRetryDelay();
-                result = this.retention.deleteThrough(cursor);
+                                  attempt < this.operations.backupRetentionRetryAttempts(); attempt++) {
+                this.sleepRetentionRetryDelay();
+                result = this.retention.deleteThrough(position);
             }
             return result;
         }
 
-        private static void sleepRetentionRetryDelay() throws NodeException {
+        private void sleepRetentionRetryDelay() throws NodeException {
             if (Thread.currentThread().isInterrupted()) {
                 throw new NodeException("Interrupted while waiting to retry replication retention");
             }
             try {
-                Thread.sleep(RETENTION_RETRY_DELAY_MILLIS);
+                Thread.sleep(this.operations.backupRetentionRetryDelay().toMillis());
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 throw new NodeException("Interrupted while waiting to retry replication retention", interrupted);

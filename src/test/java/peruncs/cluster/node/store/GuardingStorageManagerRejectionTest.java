@@ -10,23 +10,16 @@ import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.api.ClusterStorageManager;
-import peruncs.cluster.errors.CorruptReplicationDataException;
-import peruncs.cluster.errors.GraphInvalidatedException;
-import peruncs.cluster.errors.ReplicationUnavailableException;
-import peruncs.cluster.errors.WriteRejectedException;
+import peruncs.cluster.errors.*;
 import peruncs.cluster.storage.StorageGraphCoordinator;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /// Checks the fail-closed cause-chain rule for writer rejections.
 class GuardingStorageManagerRejectionTest {
@@ -37,11 +30,20 @@ class GuardingStorageManagerRejectionTest {
         final StorageGraphCoordinator graph = new StorageGraphCoordinator();
         try (EmbeddedStorageManager delegate = foundation.start()) {
             final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
-                    delegate, StorageSizeValidation.notReached(), openNode(), graph);
+                    delegate, () -> false, openNode(), graph);
 
             targetFailure.set(new WriteRejectedException("capacity"));
             assertThrows(RuntimeException.class, () -> manager.store(new StorageWriteGatingTest.Payload("retry")));
             assertDoesNotThrow(() -> manager.store(new StorageWriteGatingTest.Payload("accepted after retry")));
+            targetFailure.set(new WriteRejectedException("capacity"));
+            assertThrows(RuntimeException.class, () -> manager.storeAll(
+                    List.of(new StorageWriteGatingTest.Payload("void persistence path"))));
+            assertDoesNotThrow(() -> manager.storeAll(
+                    List.of(new StorageWriteGatingTest.Payload("void persistence retry"))));
+            assertThrows(IllegalArgumentException.class, () -> manager.graphBoundary().write(() -> {
+                throw new IllegalArgumentException("application owns invalidation");
+            }));
+            assertNull(graph.graphFailure(), "application write failures remain caller-managed");
             assertDoesNotThrow(() -> manager.graphBoundary().read(() -> manager.root()));
 
             targetFailure.set(new WriteRejectedException("corrupt", new CorruptReplicationDataException("bad frame")));
@@ -57,6 +59,24 @@ class GuardingStorageManagerRejectionTest {
     }
 
     @Test
+    void pendingLocalCommitKeepsTheGraphValid(@TempDir final Path directory) {
+        final AtomicReference<RuntimeException> targetFailure = new AtomicReference<>();
+        final StorageGraphCoordinator graph = new StorageGraphCoordinator();
+        try (EmbeddedStorageManager delegate = foundation(directory, targetFailure).start()) {
+            final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+                    delegate, () -> false, openNode(), graph);
+            targetFailure.set(new IllegalStateException("Store wrapper", new ReplicationPendingException(1L,
+                    new ReplicationUnavailableException("commit offer timed out"))));
+
+            assertThrows(IllegalStateException.class,
+                    () -> manager.store(new StorageWriteGatingTest.Payload("locally accepted")));
+            assertNull(graph.graphFailure());
+            assertDoesNotThrow(() -> manager.graphBoundary().read(() -> manager.root()));
+            assertDoesNotThrow(() -> manager.store(new StorageWriteGatingTest.Payload("after recovery")));
+        }
+    }
+
+    @Test
     void uncertainReplicationFailuresAndErrorsWinOverRejection() {
         assertFalse(GuardingStorageManager.isCleanRejection(new WriteRejectedException(
                 "wrapped corruption", new CorruptReplicationDataException("bad frame"))));
@@ -67,6 +87,16 @@ class GuardingStorageManagerRejectionTest {
     }
 
     @Test
+    void recognizesWrappedPendingCommitsButRejectsUncertainChains() {
+        final ReplicationPendingException pending = new ReplicationPendingException(1L,
+                new ReplicationUnavailableException("commit offer timed out"));
+        assertTrue(GuardingStorageManager.isPendingCommit(
+                new IllegalStateException("Store wrapper", pending)));
+        assertFalse(GuardingStorageManager.isPendingCommit(
+                new ReplicationUnavailableException("unrelated", pending)));
+    }
+
+    @Test
     void boundsTheCauseWalkAndRejectsCycles() {
         final Throwable first = new Throwable();
         final Throwable second = new Throwable();
@@ -74,9 +104,15 @@ class GuardingStorageManagerRejectionTest {
         second.initCause(first);
         assertFalse(GuardingStorageManager.isCleanRejection(new WriteRejectedException("cycle", first)));
 
+        final Throwable pendingCause = new Throwable();
+        final ReplicationPendingException pending = new ReplicationPendingException(1L, pendingCause);
+        pendingCause.initCause(pending);
+        assertFalse(GuardingStorageManager.isPendingCommit(pending));
+
         Throwable deep = new OutOfMemoryError("too deep");
         for (int index = 0; index < 17; index++) deep = new IllegalStateException("wrapper", deep);
         assertFalse(GuardingStorageManager.isCleanRejection(new WriteRejectedException("deep", deep)));
+        assertFalse(GuardingStorageManager.isPendingCommit(new ReplicationPendingException(2L, deep)));
     }
 
     @Test
@@ -100,6 +136,10 @@ class GuardingStorageManagerRejectionTest {
             @Override
             public void write(final Binary data) {
                 final RuntimeException failure = targetFailure.getAndSet(null);
+                if (GuardingStorageManager.isPendingCommit(failure)) {
+                    delegate.write(data);
+                    throw failure;
+                }
                 if (failure != null) throw failure;
                 delegate.write(data);
             }

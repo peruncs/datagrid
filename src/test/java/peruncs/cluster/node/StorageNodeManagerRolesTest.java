@@ -1,15 +1,21 @@
 package peruncs.cluster.node;
 
+import org.eclipse.store.storage.types.StorageController;
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.api.NodeRole;
+import peruncs.cluster.api.ReplicationState;
+import peruncs.cluster.api.ReplicationStatus;
+import peruncs.cluster.node.replication.ReplicationHealth;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.cluster.node.store.StorageTaskExecutor;
-import peruncs.cluster.node.store.StorageUsageGauge;
-import peruncs.cluster.storage.ReplicationCursor;
+import peruncs.cluster.storage.ReplicationPosition;
+import peruncs.cluster.storage.StorageGraphCoordinator;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 import peruncs.cluster.storage.binary.ReplicationPublisher;
 
 import java.lang.reflect.Proxy;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -20,7 +26,7 @@ class StorageNodeManagerRolesTest {
         /// A fixed-role reader never distributes.
     @Test
     void readerNeverDistributes() {
-        final StorageNodeManager manager = manager(StorageNodeManager.Role.READER, "aeron");
+        final StorageNodeManager manager = manager(NodeRole.READER, true);
 
         assertFalse(manager.isWriter());
         /* The transport is no longer a monitoring surface: metrics compose
@@ -32,7 +38,7 @@ class StorageNodeManagerRolesTest {
         /// health from the distributor instead of a reader health check.
     @Test
     void writerManagerIsWriter() {
-        final StorageNodeManager manager = manager(StorageNodeManager.Role.WRITER, "aeron");
+        final StorageNodeManager manager = manager(NodeRole.WRITER, true);
 
         assertTrue(manager.isWriter());
         assertTrue(manager.isReady(), "a writer must not depend on a reader health check");
@@ -47,31 +53,35 @@ class StorageNodeManagerRolesTest {
                 stub(ReplicationPublisher.class),
                 stub(StorageTaskExecutor.class),
                 client,
-                stub(StorageNodeHealthCheck.class),
-                stub(StorageUsageGauge.class),
-                stub(ReplicationPositionProvider.class),
-                "none",
-                StorageNodeManager.Role.READER, new peruncs.cluster.storage.StorageGraphCoordinator()));
+                healthCheck(),
+                () -> -1L,
+                positionProvider(),
+                true,
+                NodeRole.READER, new StorageGraphCoordinator()));
 
         assertFalse(manager.isWriter());
-        assertEquals(0L, manager.currentSequence());
+        final ReplicationStatus status = manager.replicationStatus();
+        assertEquals(ReplicationState.LIVE, status.state());
+        assertEquals(0L, status.currentSequence());
+        assertEquals(0L, status.latestSequence());
+        assertEquals(0L, status.appliedSequence());
     }
 
         /// A latched graph invalidity surfaces through status: the node is
         /// neither healthy nor ready until it reloads or reseeds.
     @Test
     void graphInvalidationMakesTheNodeUnhealthy() {
-        final peruncs.cluster.storage.StorageGraphCoordinator coordinator =
-                new peruncs.cluster.storage.StorageGraphCoordinator();
+        final StorageGraphCoordinator coordinator =
+                new StorageGraphCoordinator();
         final StorageNodeManager manager = StorageNodeManager.create(new StorageNodeManager.Configuration(
                 stub(ReplicationPublisher.class),
                 stub(StorageTaskExecutor.class),
                 stub(ReplicationApplier.class),
-                stub(StorageNodeHealthCheck.class),
-                stub(StorageUsageGauge.class),
+                healthCheck(),
+                () -> -1L,
                 stub(ReplicationPositionProvider.class),
-                "aeron",
-                StorageNodeManager.Role.WRITER,
+                true,
+                NodeRole.WRITER,
                 coordinator));
         assertTrue(manager.isHealthy(), "healthy before any failed update");
         assertTrue(manager.isReady(), "ready before any failed update");
@@ -86,32 +96,67 @@ class StorageNodeManagerRolesTest {
         /// The writer flag reflects the fixed role.
     @Test
     void writerFlagReflectsFixedRole() {
-        final StorageNodeManager reader = manager(StorageNodeManager.Role.READER, "aeron");
-        final StorageNodeManager writer = manager(StorageNodeManager.Role.WRITER, "aeron");
+        final StorageNodeManager reader = manager(NodeRole.READER, true);
+        final StorageNodeManager writer = manager(NodeRole.WRITER, true);
+
+        final StorageNodeManager standalone = manager(NodeRole.STANDALONE, false);
 
         assertFalse(reader.isWriter());
         assertTrue(writer.isWriter());
+        assertTrue(standalone.isWriter());
     }
 
-    private static StorageNodeManager manager(final StorageNodeManager.Role role, final String transport) {
+    @Test
+    void backupReaderUsesItsBackupManager() {
+        assertThrows(IllegalArgumentException.class, () -> manager(NodeRole.BACKUP_READER, true));
+    }
+
+    private static StorageNodeManager manager(final NodeRole role, final boolean replicationEnabled) {
         return StorageNodeManager.create(new StorageNodeManager.Configuration(
                 stub(ReplicationPublisher.class),
                 stub(StorageTaskExecutor.class),
                 stub(ReplicationApplier.class),
-                stub(StorageNodeHealthCheck.class),
-                stub(StorageUsageGauge.class),
+                healthCheck(),
+                () -> -1L,
                 stub(ReplicationPositionProvider.class),
-                transport,
-                role, new peruncs.cluster.storage.StorageGraphCoordinator()));
+                replicationEnabled,
+                role, new StorageGraphCoordinator()));
+    }
+
+    private static StorageNodeHealthCheck healthCheck() {
+        return StorageNodeHealthCheck.create(
+                (StorageController) Proxy.newProxyInstance(StorageController.class.getClassLoader(),
+                        new Class<?>[]{StorageController.class},
+                        (proxy, method, args) -> method.getName().equals("isRunning")),
+                new ReplicationHealth() {
+                    @Override public boolean isReady() { return true; }
+                    @Override public boolean isHealthy() { return true; }
+                    @Override public long appliedSequence() { return 0L; }
+                    @Override public void close() { }
+                },
+                () -> true);
+    }
+
+    private static ReplicationPositionProvider positionProvider() {
+        final UUID id = UUID.randomUUID();
+        return new ReplicationPositionProvider() {
+            @Override public void init() { }
+            @Override public ReplicationPosition latest() {
+                return new ReplicationPosition(id, id, 0L, 0L, 0L, 0L, 1L, id);
+            }
+            @Override public void close() { }
+        };
     }
 
     @SuppressWarnings("unchecked")
     private static <T> T stub(final Class<T> type) {
         return (T) Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
                 (proxy, method, args) -> {
-                    if (method.getName().equals("cursor")) {
-                        return new ReplicationCursor("test", null, 0L, "");
+                    if (method.getReturnType() == ReplicationPosition.class) {
+                        final UUID id = UUID.randomUUID();
+                        return new ReplicationPosition(id, id, 0L, 0L, 0L, 0L, 1L, id);
                     }
+                    if (method.getReturnType() == ReplicationState.class) return ReplicationState.LIVE;
                     final Class<?> result = method.getReturnType();
                     if (result == boolean.class) return false;
                     if (result == int.class) return 0;
