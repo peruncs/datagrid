@@ -1,4 +1,4 @@
-# PerunCS Cluster — Review and Implementation Spec (Opus), revision 110
+# PerunCS Cluster — Review and Implementation Spec (Opus), revision 111
 
 **Baseline:** commit `9975d95`. Revision 6 was the original static review; later revisions record
 implementation follow-up and remaining acceptance gates.
@@ -742,6 +742,23 @@ reader nodes, replicated over Aeron.
     open; `StoreIndexReflection` is the sole production reflection boundary, limited to temporary
     JVector graph invalidation until upstream exposes the supported API. No node authentication
     or transport encryption is required or permitted.
+- **rev 111 (2026-09-30, complete code sweep and item status):**
+  - Rechecked implementation paths and current source against every item in this review. No new
+    production correction was justified: there is no `ThreadLocal`, production reflection remains
+    limited to the tracked JVector bridge, every production package has a `package-info.java`, and
+    remaining PerunCS-qualified references are documentation links. The Java 27 pattern-switch
+    parser recovery noted by the code graph was checked in source and is valid Java.
+  - Kept primitive arguments on envelope and watermark codecs to avoid per-frame allocations.
+    Remaining long constructors are package-private setup wiring; wrapping those same one-time
+    dependencies in records would only relocate their argument lists. D10's targeted reusable
+    construction records remain in place.
+  - Reconciled D-20 with the implementation: vector graph warm-up stays in the exclusive
+    coordinator write section because shared-read warm-up could race application first-search.
+    The 1k-versus-100k duration comparison remains deferred.
+  - Added the item-by-item status register below. The source is unchanged from rev 110; the final
+    Java 27 profile rerun passed after this documentation update: integration (782 unit tests, 1
+    skipped; 26 integration tests), crashmatrix (782 unit tests, 1 skipped; 17 crash/integration
+    tests), and soak (782 unit tests, 1 skipped; one soak test).
 - **Performance follow-up (2026-09-28):**
   - Same-run Java 27 JMH comparison of native-order `ByteBuffer`, FFM, VarHandle, and Serializer's
     raw iterator selected `ByteBuffer`: 6.73 M ops/s at 64 KiB versus 6.27 M for FFM and 6.66 M
@@ -789,7 +806,7 @@ reader nodes, replicated over Aeron.
 | D-17 | Pause/resume replication API | Deleted (`BackupNodeControl.stopReadingAtLatestMessage/resumeReading/isReading`); backup work owns its own boundary pause. | Default |
 | D-18 | Standalone `status()` | Returns `NOT_CONFIGURED`, never `WrongRoleException`. | README contract |
 | D-19 | Roles | Exported `enum NodeRole { STANDALONE, WRITER, READER, BACKUP_READER }`. `NodeStatus.writer` becomes `NodeStatus.role()`. | Default |
-| D-20 | P1-4 | Off-lock warm-up is implemented under the coordinator read side. Upstream `VectorIndex.invalidateGraph()` remains the planned replacement for the interim reflective invalidation (PR #832). | Owner + upstream |
+| D-20 | P1-4 | Keep vector graph warm-up inside the exclusive coordinator write section; moving it under shared reads could race application first-search. The 1k-versus-100k write-section duration comparison remains open. Upstream `VectorIndex.invalidateGraph()` remains the planned replacement for interim reflective invalidation (PR #832). | Owner + upstream |
 | D-21 | A8 | Discovery **already exists**. The remaining work is an epoch in the alias, verification against the mark, and README fixes. Needed only for A2b. | Code evidence |
 | D-22 | S1 | Keep same-name identity checks: they prevent a conflicting retry from overwriting a durable archive. Retain off-lock digest inspection with a destination-stamp recheck to keep large-archive hashing outside the shared lock. | Code evidence; data-loss prevention |
 | D-23 | Group commit | Out of scope. | Spec |
@@ -817,7 +834,7 @@ reader nodes, replicated over Aeron.
 | Step | Work | Needs | Done when | Status (2026-09-30) |
 |------|------|-------|-----------|--------------------|
 | 0 | **Baseline benchmark** on `9975d95` (harness in §3.A1 tests). | – | `bench/results/9975d95.json` committed. | **OPEN** — baseline evidence absent. |
-| 1 | Batch 1: **C1**, **C2**, **C3**, **C5**, **C6**, **C10**, **A4**. | 0 | `mvn verify` green; all §9 rows tagged step 1 pass. | **DONE** — final integration and crashmatrix profiles pass. C1 covers recorded-ABORT recovery, S+2, and fail-closed handling after local-write uncertainty. C2 covers production close/drain, timeout with Store/transport left open, retry, and restart. C3 covers bounded starter backup failure while retaining the upload; C5 keeps synchronization for the factory/close race. C10 covers late queued entry, bounded running close, submission rejection/fatal failure, and callback ordering. A4's named-module consumer and writer-reader Lucene/JVector replication coverage pass. |
+| 1 | Batch 1: **C1**, **C2**, **C3**, **C5**, **C6**, **C10**, **A4**. | 0 (benchmark prerequisite deferred by owner) | `mvn verify` green; all §9 rows tagged step 1 pass. | **DONE** — final integration and crashmatrix profiles pass. C1 covers recorded-ABORT recovery, S+2, and fail-closed handling after local-write uncertainty. C2 covers production close/drain, timeout with Store/transport left open, retry, and restart. C3 covers bounded starter backup failure while retaining the upload; C5 keeps synchronization for the factory/close race. C10 covers late queued entry, bounded running close, submission rejection/fatal failure, and callback ordering. A4's named-module consumer and writer-reader Lucene/JVector replication coverage pass. |
 | 2 | **A1 spike** S-1…S-5 (S-0 is already answered). | 1 | Each spike criterion documented as pass/fail; D-08 or its fallback confirmed. | **DONE** — S-2's 200-trial child-kill matrix, S-4 reader-dictionary assertion, S-5 scanner matrix, and real-Archive ABORT/COMMIT crash recovery passed in the final profiles. |
 | 3 | **A1** (+D-26, +C1 re-verify on the reworked publisher). | 2 | `mvn verify -Pintegration -Pcrashmatrix` green with the new oracle; §9 rows tagged step 3 pass. | **DONE** — Store marks, exact writer sequence reservation, bounded Archive-tail recovery, reader replay/resume, backup restore, and removal of legacy cursor/checkpoint/manifest paths passed integration and crash recovery. D-26's external-Archive setting/fallback is removed. |
 | 4 | **Benchmark compare** against step 0. | 3 | D-25 thresholds met. Otherwise stop and report to the owner. | **OPEN** — owner deferred further benchmark work. The corrected local F1 writer-header scan missed its 5% comparison (about 29% slower at 64 KiB and 10% slower at 1 MiB); Linux/NVMe execution was waived. The historical `9975d95` artifact is absent. |
@@ -830,15 +847,52 @@ reader nodes, replicated over Aeron.
 | 11 | **J1-a + P1-4** (PR #832). | PR #832 in the eclipse-store snapshot | §9 J1-a rows pass. | **PARTIAL** — interim vector invalidation remains isolated in `StoreIndexReflection.invalidateVectorGraph`; warm-up stays inside the coordinator write section. All local profiles pass. The only production reflection remains this temporary bridge pending [PR #832](https://github.com/eclipse-store/store/pull/832), still open on 2026-09-30; upstream API adoption and the 1k-versus-100k write-section duration comparison remain open. |
 | 12 | **N3** (writer-driven retention; P1, may be pulled forward), cleanup: C8, C9, C12, S1, S3, S5, S6, D2–D8, D10, J1-b, J2–J6, §6 security, §7 docs. Optional: **A2b**, **A8**. | 10 | Remaining §9 rows pass. | **PARTIAL** — N3's scheduled writer retention pass and lagging/caught-up two-reader fixture pass; C9/C12, S1/S3/S6, D2–D10, J2–J5, and the §7 no-authentication/no-encryption documentation pass. Generic codec, structured-concurrency fan-out, and role-specific assembly are withdrawn. J1-b removed all non-vector production reflection; only the temporary PR #832 JVector invalidation bridge remains. Reader-thread consolidation and P1-6 gather/CRC work remain deferred; F1/F2 throughput gates remain open by owner decision. Optional A2b/A8 remain unselected. |
 
-**Current gate status (2026-09-30).** Final Java 27 profiles pass on the current source: integration
-has 782 unit tests (1 skipped) and 26 integration tests; crashmatrix has 782 unit tests (1 skipped)
-and 17 crash/integration tests; soak has 782 unit tests (1 skipped) and one passing soak test. The
-soak reported 568 transactions, 42,489 verified reads, zero torn transactions, and successful
-reader/index convergence. A subsequent soak-only JFR/jcmd run also passed: 171,457 events over
-83 seconds, 27 ms maximum GC pause, no pauses over 100 ms, no monitor-block time, no virtual-thread
-pins, about 120 MB live heap, and no deadlock. The F1 fuzz/equivalence and 10k real-Store pool
-ownership checks passed in the integration profile; the scheduled N3 writer/two-reader quorum test
-passed as well.
+### Item-by-item status (rev 111)
+
+Each identifier below is listed individually; `PARTIAL`, `OPEN`, `WITHDRAWN`, `OPTIONAL`, and
+`MOOT` are not counted as complete.
+
+| Status | Items | Current result |
+|--------|-------|----------------|
+| **DONE** | A1; A2; A3; A4; A6; A7; A9 | Store-mark replication and recovery; local writer lock; typed position and public API; index facade and named-module/Lucene/JVector replication coverage; role-aware status; package/module boundaries. |
+| **DONE** | C1; C2; C3; C5; C6; C7; C9; C10; C12 | Rejection/lifecycle/backup contracts, reader mutation gating, method classification, backup status, bounded settings and close behavior are implemented and covered by the profile suites. C5 intentionally retains synchronization to close the factory/disposal race. |
+| **DONE** | S-0; S-1; S-2; S-3; S-4; S-5 | A1 durability/recovery spikes are answered or pass, including the 200-trial crash matrix, reader dictionary assertion, scanner cases, and real-Archive recovery. These `S-` spike IDs are distinct from the cleanup item `S5` below. |
+| **DONE** | N1; N3; P1-7; P1-10; P1-11 | Reader-owned bounded native buffers, apply/backpressure path, scheduled writer retention, bounded backup streaming, and cached storage-usage measurements are implemented. |
+| **DONE** | P1-4 warm-up; J1-b; S1; S3; S4; S6 | Index warm-up coordination, supported read-only index discovery, safe backup publication, shared graph-section plumbing, mark dictionary assertion, and retryable reader shutdown are implemented. |
+| **DONE** | D1; D2; D3; D4; D5; D6; D7; D8; D9; D10 | Typed settings, API/package cleanup, exception outcomes, public optional-value accessors, and the targeted construction-record cleanup are implemented. Binary codec signatures remain primitive to avoid allocations on the frame path; other long constructors are package-private setup wiring. |
+| **DONE** | J2; J3; J4; J5; SEC1; SEC2; SEC3; SEC4; SEC5; §7 docs | Monitor use audited (129 source lines currently contain `synchronized`; remaining locks protect compound state); fully qualified references removed from code bodies; close/fault-injection ownership, filesystem modes, legacy security-key removal, and documentation match the supported topology. |
+| **PARTIAL** | P1-1; F1 | The checked scanner and real writer prefilter pass correctness/equivalence and malformed-input tests. The 5% scan benchmark gate still fails and remains deferred by the owner. |
+| **PARTIAL** | F2 | FFM pool ownership, release, and NMT checks pass; its throughput gate remains deferred. |
+| **PARTIAL** | P1-4 invalidation; J1-a | `StoreIndexReflection.invalidateVectorGraph` is the only production reflection bridge. Replace it when [Eclipse Store PR #832](https://github.com/eclipse-store/store/pull/832) merges; the 1k/100k write-section duration comparison is also open. The PR is open as of this revision. |
+| **PARTIAL** | P1-6 | CRC/gather-offer rewrite remains deferred until a same-work comparison can choose the faster path. |
+| **OPEN / DEFERRED** | Step 0; Step 4; D-25; C4 | Baseline artifact is absent; benchmark comparison and graph-lock read-latency measurement are deferred by the owner. Linux/NVMe execution is waived. |
+| **OPEN / DEFERRED** | P1-12 | Reader-thread consolidation waits for thread/latency profiling; poll, apply, watermark, and maintenance workers retain their separate pacing and close ownership. |
+| **MOOT** | C8 | The dictionary-parse monitor finding no longer applies after the P1-7 apply path. |
+| **WITHDRAWN** | A5; S5; J6 | Separate role assembly, a generic codec, and structured-concurrency fan-out were rejected as duplicate or unnecessary machinery. |
+| **OPTIONAL / NOT SELECTED** | A2b; A8 | Manual promotion without reseed and epoch-specific recording aliases are outside the current single-recording deployment. |
+| **RETIRED** | A10; C11; C13; P1-2; P1-3; P1-5; P1-9; D-12 | Their concerns were subsumed by C7, A2, C1, A1, or removal of the provider SPI, as listed above. |
+
+The decision-log IDs are tracked separately from implementation IDs:
+
+| Decision status | IDs | Current result |
+|-----------------|-----|----------------|
+| **IN FORCE / IMPLEMENTED** | D-00; D-01; D-02; D-04; D-05; D-06; D-07; D-08; D-09; D-10; D-11; D-13; D-14; D-15; D-16; D-17; D-18; D-19; D-22; D-24; D-26; D-27; D-28 | The chosen scope, 1-writer/N-reader topology, Store API, lifecycle, mark, failure, configuration, backup, and filesystem decisions are reflected in the current code and docs. |
+| **PARTIAL** | D-03; D-20; D-29 | A1 and FFM policy are implemented; benchmark gates remain deferred. D-20 keeps the safe exclusive warm-up path, but its duration comparison and upstream invalidation API remain open. |
+| **OPTIONAL / NOT SELECTED** | D-21 | Epoch-aware recording aliases are only needed if optional A2b is selected. |
+| **OUT OF SCOPE** | D-23 | Group commit remains excluded. |
+| **OPEN** | D-25 | The baseline-based performance acceptance gate is deferred by the owner. |
+| **RETIRED** | D-12 | Provider SPI was removed from the design. |
+
+**Current gate status (2026-09-30).** The rev-111 Java 27 rerun passed: integration has 782 unit
+tests (1 skipped) and 26 integration tests; crashmatrix has 782 unit tests (1 skipped) and 17
+crash/integration tests; soak has 782 unit tests (1 skipped) and one soak test. The latest soak
+reported 540 transactions, 20,464 queries, 11,958 verified reads, zero torn transactions, four
+restarts, two abrupt restarts, two reseeds, one rejoin, one writer restart, and one retention purge.
+Both live readers passed graph/Lucene/JVector census checks with zero missing entries. The separate
+rev-110 JFR/jcmd capture reported 171,457 events over 83 seconds, a 27 ms maximum GC pause, no
+pauses over 100 ms, no monitor-block time, no virtual-thread pins, about 120 MB live heap, and no
+deadlock. The F1 fuzz/equivalence and 10k real-Store pool ownership checks passed in integration;
+the scheduled N3 writer/two-reader quorum test passed as well.
 
 Step 0 baseline evidence and the step 4 / F1 / F2 performance gates remain open by the owner's
 explicit deferral; Linux/NVMe execution is waived. PR #832 remains open, so production reflection is
