@@ -1,6 +1,11 @@
 package peruncs.cluster.storage.index;
 
 import org.eclipse.serializer.persistence.binary.types.Binary;
+import org.eclipse.serializer.persistence.binary.types.BinaryEntityDataReader;
+import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataAcceptor;
+import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataIterator;
+import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
+import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.types.PersistenceFunction;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDefinition;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDefinitionMember;
@@ -24,6 +29,7 @@ import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -107,6 +113,19 @@ final class ClusterIndexValidation {
                         this.definitions.put(definition.type(), definition);
                     }
                 });
+            }
+        }
+
+        /// Learns a type seen by the commit scan without replacing a newer runtime schema.
+        void observe(final PersistenceTypeDefinition definition) {
+            if (definition == null || definition.type() == null) return;
+            final Class<?> type = definition.type();
+            final PersistenceTypeDefinition previous = this.definitions.get(type);
+            if (previous == null || previous.typeId() < definition.typeId()) {
+                this.definitions.put(type, definition);
+                this.assignable.clear();
+                this.relevant.clear();
+                this.resolving.clear();
             }
         }
 
@@ -235,12 +254,12 @@ final class ClusterIndexValidation {
 
     /// Reusable per-writer commit-type filter state; do not share across threads.
     static final class CommitPrefilterScratch {
-        /* This one-type cache is reset per commit because definitions can bind in place. */
+        /* Type definitions and loaded Java class layouts are append-only/immutable. */
         private PersistenceTypeDictionary dictionary;
         private final TypeRelevance typeRelevance = new TypeRelevance();
-        private long lastTypeId;
-        private boolean hasLastType;
-        private boolean lastTypeRelevant;
+        private long cachedTypeId;
+        private boolean hasCachedType;
+        private boolean cachedTypeRelevant;
         private boolean touchesIndexes;
         /* The node registers the reserved mark root before Store startup, so
          * its type id is stable before this writer accepts a commit. */
@@ -248,25 +267,55 @@ final class ClusterIndexValidation {
         private boolean hasReplicationMarkType;
         private long expectedObjectId;
         private boolean containsObjectId;
+        private boolean wrappedBinary;
+        private boolean selectiveMarkType;
+        private final BinaryEntityRawDataIterator rawIterator = BinaryEntityRawDataIterator.New();
+        private final BinaryEntityRawDataAcceptor rawEntityAcceptor = this::acceptRawEntity;
+        private final BinaryEntityDataReader rawDataReader = this::scanRawBuffer;
         final EntityHeaders.TypeIdVisitor visitor = this::checkType;
-        final EntityHeaders.EntityVisitor entityVisitor = this::checkEntity;
 
-        private void checkEntity(final long typeId, final long objectId) {
-            if (this.expectedObjectId >= 0L && objectId == this.expectedObjectId) this.containsObjectId = true;
+        void scanWriterCommit(final Binary binary, final boolean selectiveMarkType) {
+            this.wrappedBinary = binary instanceof ChunksWrapper;
+            this.selectiveMarkType = selectiveMarkType;
+            binary.iterateEntityData(this.rawDataReader);
+        }
+
+        private void scanRawBuffer(final ByteBuffer buffer) {
+            if (buffer == null) throw new IllegalStateException("Store supplied a null writer buffer");
+            /* Writer targets receive only Serializer-produced local data. The
+             * reader path validates framing before using this upstream iterator. */
+            final long start = XMemory.getDirectByteBufferAddress(buffer);
+            final int length = this.wrappedBinary ? buffer.position() : buffer.limit();
+            if (this.rawIterator.iterateEntityRawData(start, start + length, this.rawEntityAcceptor) != 0L) {
+                throw new IllegalStateException("Store supplied an incomplete writer buffer");
+            }
+        }
+
+        private boolean acceptRawEntity(final long address, final long boundAddress) {
+            final long typeId = XMemory.get_long(address + Long.BYTES);
             this.checkType(typeId);
+            if (!this.selectiveMarkType || typeId == this.replicationMarkTypeId) {
+                final long objectId = XMemory.get_long(address + 2 * Long.BYTES);
+                if (this.expectedObjectId >= 0L && objectId == this.expectedObjectId) this.containsObjectId = true;
+            }
+            return true;
         }
 
         private void checkType(final long typeId) {
             if (this.touchesIndexes) return;
-            if (!this.hasLastType || this.lastTypeId != typeId) {
+            if (this.hasReplicationMarkType && typeId == this.replicationMarkTypeId) return;
+            if (!this.hasCachedType || this.cachedTypeId != typeId) {
                 final PersistenceTypeDefinition definition = this.dictionary == null
                         ? null : this.dictionary.lookupTypeById(typeId);
-                this.lastTypeId = typeId;
-                this.hasLastType = true;
-                this.lastTypeRelevant = definition == null || definition.type() == null ||
-                this.typeRelevance.isRelevant(definition.type());
+                this.cachedTypeId = typeId;
+                this.hasCachedType = definition != null && definition.type() != null;
+                this.cachedTypeRelevant = !this.hasCachedType;
+                if (this.hasCachedType) {
+                    this.typeRelevance.observe(definition);
+                    this.cachedTypeRelevant = this.typeRelevance.isRelevant(definition.type());
+                }
             }
-            this.touchesIndexes = this.lastTypeRelevant;
+            this.touchesIndexes = this.cachedTypeRelevant;
         }
     }
 
@@ -480,7 +529,6 @@ final class ClusterIndexValidation {
         Objects.requireNonNull(scratch, "scratch");
         bindDictionary(scratch, dictionary);
         scratch.touchesIndexes = false;
-        scratch.hasLastType = false;
         EntityHeaders.forEachTypeId(binary, scratch.visitor);
         return scratch.touchesIndexes;
     }
@@ -490,25 +538,23 @@ final class ClusterIndexValidation {
         Objects.requireNonNull(scratch, "scratch");
         bindDictionary(scratch, dictionary);
         scratch.touchesIndexes = false;
-        scratch.hasLastType = false;
         scratch.expectedObjectId = markObjectId;
         scratch.containsObjectId = false;
-        if (dictionary == null) {
-            EntityHeaders.forEach(binary, scratch.entityVisitor);
-        } else if (scratch.hasReplicationMarkType) {
-            EntityHeaders.forEachWriterCommit(binary, scratch.entityVisitor, scratch.replicationMarkTypeId);
-        } else {
-            EntityHeaders.forEach(binary, scratch.entityVisitor);
-        }
+        scratch.scanWriterCommit(binary, dictionary != null && scratch.hasReplicationMarkType);
         return (scratch.touchesIndexes ? ClusterStoreIndexes.COMMIT_TOUCHES_INDEXES : 0) |
                 (scratch.containsObjectId ? ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK : 0);
     }
 
     private static void bindDictionary(final CommitPrefilterScratch scratch,
                                         final PersistenceTypeDictionary dictionary) {
+        /* The writer registers the mark before Store startup. Once found,
+         * the type dictionary is append-only, so checking its synchronized
+         * size on every commit only adds contention. Keep watching growth
+         * only on the fail-open path where the mark is still absent. */
+        if (dictionary == scratch.dictionary && scratch.hasReplicationMarkType) return;
         if (!scratch.typeRelevance.bind(dictionary)) return;
         scratch.dictionary = dictionary;
-        scratch.hasLastType = false;
+        scratch.hasCachedType = false;
         final PersistenceTypeDefinition mark = dictionary == null
                 ? null : dictionary.lookupTypeByName(ReplicationMark.class.getName());
         scratch.hasReplicationMarkType = mark != null;

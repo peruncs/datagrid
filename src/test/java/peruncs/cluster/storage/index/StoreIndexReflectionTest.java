@@ -31,6 +31,11 @@ class StoreIndexReflectionTest {
             for (final Path path : paths.filter(file -> file.toString().endsWith(".java")).toList()) {
                 final String source = Files.readString(path);
                 if (source.contains("java.lang.reflect") || source.contains(".getDeclared") ||
+                    source.contains(".getField(") || source.contains(".getFields(") ||
+                    source.contains(".getMethod(") || source.contains(".getMethods(") ||
+                    source.contains(".getConstructor(") || source.contains(".getConstructors(") ||
+                    source.contains(".getRecordComponents(") || source.contains(".getAnnotations(") ||
+                    source.contains(".getAnnotation(") ||
                     source.contains(".setAccessible(") || source.contains(".trySetAccessible(") ||
                     source.contains("Class.forName(") || source.contains("privateLookupIn(")) {
                     reflectiveSources.add(sourceRoot.relativize(path));

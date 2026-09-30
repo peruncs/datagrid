@@ -49,13 +49,53 @@ class ClusterIndexCommitPrefilterTest {
         registerType(dictionary, 17L, String.class);
         registerType(dictionary, 19L, ReplicationMark.class);
 
-        assertEquals(0, ClusterIndexValidation.inspectWriterCommit(binary, dictionary,
-                new ClusterIndexValidation.CommitPrefilterScratch(), 31L) &
-                ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK);
+        final int missingMark = ClusterIndexValidation.inspectWriterCommit(binary, dictionary,
+                new ClusterIndexValidation.CommitPrefilterScratch(), 31L);
+        assertEquals(0, missingMark);
+
+        final int foundMark = ClusterIndexValidation.inspectWriterCommit(binary, dictionary,
+                new ClusterIndexValidation.CommitPrefilterScratch(), 32L);
+        assertEquals(ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK, foundMark,
+                "the replication mark must not make ordinary writes index-relevant");
+    }
+
+    @Test
+    void writerCommitNoticesMarkTypeRegisteredAfterAnEarlierScan() {
+        final PersistenceTypeDictionary dictionary = unknownTypeDictionary();
+        registerType(dictionary, 17L, String.class);
+        final ClusterIndexValidation.CommitPrefilterScratch scratch =
+                new ClusterIndexValidation.CommitPrefilterScratch();
+        final ByteBuffer bytes = ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());
+        bytes.putLong(24L).putLong(17L).putLong(1L);
+        bytes.putLong(24L).putLong(19L).putLong(2L);
+        final Binary binary = ChunksWrapper.New(bytes);
+
         assertEquals(ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK,
-                ClusterIndexValidation.inspectWriterCommit(binary, dictionary,
-                        new ClusterIndexValidation.CommitPrefilterScratch(), 32L) &
+                ClusterIndexValidation.inspectWriterCommit(binary, dictionary, scratch, 1L) &
+                ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK);
+
+        registerType(dictionary, 19L, ReplicationMark.class);
+
+        assertEquals(0,
+                ClusterIndexValidation.inspectWriterCommit(binary, dictionary, scratch, 1L) &
                         ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK);
+    }
+
+    @Test
+    void retriesAnUnknownTypeAfterItsDefinitionArrives() {
+        final PersistenceTypeDictionary dictionary = unknownTypeDictionary();
+        registerType(dictionary, 19L, ReplicationMark.class);
+        final ClusterIndexValidation.CommitPrefilterScratch scratch =
+                new ClusterIndexValidation.CommitPrefilterScratch();
+        final Binary binary = binary(17L);
+
+        assertEquals(ClusterStoreIndexes.COMMIT_TOUCHES_INDEXES,
+                ClusterIndexValidation.inspectWriterCommit(binary, dictionary, scratch, -1L));
+
+        registerType(dictionary, 17L, String.class);
+
+        assertEquals(0, ClusterIndexValidation.inspectWriterCommit(binary, dictionary, scratch, -1L),
+                "an unknown type must not stay cached as index-relevant after it becomes known");
     }
 
     @Test

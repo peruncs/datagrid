@@ -645,7 +645,7 @@ class AeronStoreIntegrationIT {
                         rejected.getCause().getMessage());
                 assertEquals(before.sequence(), latest(writerTransport).sequence(),
                         "a pre-filter rejection must not publish a sequence");
-                store(writerTransport, writer, new ProbeMark());
+                store(writerTransport, writer, new String("plain write after rejection"));
                 assertTrue(latest(writerTransport).sequence() > before.sequence(),
                         "a clean rejection must leave the writer usable");
             } finally {

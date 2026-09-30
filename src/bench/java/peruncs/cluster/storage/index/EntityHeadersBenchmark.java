@@ -5,6 +5,7 @@ import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataAcceptor;
 import org.eclipse.serializer.persistence.binary.types.BinaryEntityRawDataIterator;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
+import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorage;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
@@ -17,6 +18,7 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
+import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -25,8 +27,9 @@ import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.UUID;
 
-/// Compares the checked writer pre-filter with Serializer's raw type-id walk over one real commit.
+/// Measures the writer prefilter over one real Store commit against Serializer's raw walk.
 @State(Scope.Thread)
 public class EntityHeadersBenchmark {
     private static final int ENTITY_BYTES = 1024;
@@ -38,18 +41,21 @@ public class EntityHeadersBenchmark {
     private EmbeddedStorageManager storage;
     private ByteBuffer data;
     private Binary binary;
-    private Binary nonNativeOrderBinary;
+    private PersistenceTypeDictionary dictionary;
+    private long replicationMarkObjectId;
     private long count;
-    private final EntityHeaders.EntityVisitor visitor = (typeId, objectId) -> {
+    private long replicationMarkTypeId;
+    private final BinaryEntityRawDataAcceptor typeAcceptor = (address, _) -> {
+        final long typeId = XMemory.get_long(address + Long.BYTES);
         this.count = checksum(this.count, typeId);
-        this.count = checksum(this.count, objectId);
-    };
-    private final BinaryEntityRawDataAcceptor acceptor = (address, _) -> {
-        this.count = checksum(this.count, XMemory.get_long(address + Long.BYTES));
-        this.count = checksum(this.count, XMemory.get_long(address + 2L * Long.BYTES));
+        if (typeId == this.replicationMarkTypeId) {
+            this.count = checksum(this.count, XMemory.get_long(address + 2 * Long.BYTES));
+        }
         return true;
     };
     private final BinaryEntityRawDataIterator iterator = BinaryEntityRawDataIterator.New();
+    private final ClusterIndexValidation.CommitPrefilterScratch scratch =
+            new ClusterIndexValidation.CommitPrefilterScratch();
 
     @Setup(Level.Trial)
     public void setup() throws Exception {
@@ -92,44 +98,47 @@ public class EntityHeadersBenchmark {
             entities[index] = new byte[length];
             remaining -= length;
         }
-        this.storage = foundation.start(new BenchmarkRoot(entities));
+        final BenchmarkRoot root = new BenchmarkRoot(entities,
+                new ReplicationMark(UUID.randomUUID(), UUID.randomUUID(), 1L, 1L));
+        this.storage = foundation.start(root);
         this.storage.storeRoot();
+        this.dictionary = this.storage.persistenceManager().typeDictionary();
+        this.replicationMarkTypeId = this.dictionary.lookupTypeByName(ReplicationMark.class.getName()).typeId();
+        this.replicationMarkObjectId = this.storage.persistenceManager().objectRegistry().lookupObjectId(root.mark());
         final byte[] bytes = serialized.toByteArray();
         this.data = ByteBuffer.allocateDirect(bytes.length).order(ByteOrder.nativeOrder());
         this.data.put(bytes).flip();
         final ByteBuffer source = this.data.duplicate().order(ByteOrder.nativeOrder());
         source.position(source.limit());
         this.binary = ChunksWrapper.New(source);
-        final ByteBuffer nonNativeOrder = this.data.duplicate().order(ByteOrder.BIG_ENDIAN);
-        nonNativeOrder.position(nonNativeOrder.limit());
-        this.nonNativeOrderBinary = ChunksWrapper.New(nonNativeOrder);
         if (this.data.remaining() < this.payloadBytes) {
             throw new IllegalStateException("Serializer commit is smaller than the requested benchmark payload");
         }
+        final int scan = ClusterIndexValidation.inspectWriterCommit(
+                this.binary, this.dictionary, this.scratch, this.replicationMarkObjectId);
+        if ((scan & ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK) == 0) {
+            throw new IllegalStateException("writer prefilter did not find its replication mark");
+        }
     }
 
     @Benchmark
-    public long boundsCheckedProductionBinaryHeaderScan() {
+    public int productionWriterCommitPrefilter() {
+        return ClusterIndexValidation.inspectWriterCommit(
+                this.binary, this.dictionary, this.scratch, this.replicationMarkObjectId);
+    }
+
+    @Benchmark
+    public long serializerRawWriterCommitScan() {
         this.count = 0L;
-        EntityHeaders.forEach(this.binary, this.visitor);
+        scanRawWriterCommit();
         return this.count;
     }
 
-    @Benchmark
-    public long boundsCheckedProductionBinaryHeaderScanNonNativeOrder() {
-        this.count = 0L;
-        EntityHeaders.forEach(this.nonNativeOrderBinary, this.visitor);
-        return this.count;
-    }
-
-    @Benchmark
-    public long serializerRawHeaderScan() {
-        this.count = 0L;
+    private void scanRawWriterCommit() {
         final long start = XMemory.getDirectByteBufferAddress(this.data);
-        if (this.iterator.iterateEntityRawData(start, start + this.data.limit(), this.acceptor) != 0L) {
+        if (this.iterator.iterateEntityRawData(start, start + this.data.limit(), this.typeAcceptor) != 0L) {
             throw new IllegalStateException("Serializer left an incomplete trailing item");
         }
-        return this.count;
     }
 
     @TearDown(Level.Trial)
@@ -160,6 +169,6 @@ public class EntityHeadersBenchmark {
         return Long.rotateLeft(current, 9) ^ typeId;
     }
 
-    private record BenchmarkRoot(byte[][] entities) {
+    private record BenchmarkRoot(byte[][] entities, ReplicationMark mark) {
     }
 }

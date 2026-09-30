@@ -39,19 +39,6 @@ final class EntityHeaders {
         forEach(binary, visitor, null);
     }
 
-    /// Scans entity types and reads object ids only for the replication-mark type.
-    static void forEachWriterCommit(final Binary binary, final EntityVisitor visitor,
-                                    final long replicationMarkTypeId) {
-        Objects.requireNonNull(binary, "binary");
-        Objects.requireNonNull(visitor, "visitor");
-        final boolean wrapped = binary instanceof ChunksWrapper;
-        binary.iterateEntityData(source -> {
-            if (source == null) throw invalid(0L, "null binary buffer");
-            final int logicalLength = wrapped ? source.position() : source.limit();
-            scan(source, logicalLength, visitor, true, replicationMarkTypeId);
-        });
-    }
-
     /// Visits entity type ids for the writer's bounded index pre-filter.
     static void forEachTypeId(final Binary binary, final TypeIdVisitor visitor) {
         Objects.requireNonNull(binary, "binary");
@@ -82,11 +69,6 @@ final class EntityHeaders {
     }
 
     private static void scan(final ByteBuffer buffer, final int end, final EntityVisitor visitor) {
-        scan(buffer, end, visitor, false, 0L);
-    }
-
-    private static void scan(final ByteBuffer buffer, final int end, final EntityVisitor visitor,
-                             final boolean selectiveObjectIds, final long objectIdTypeId) {
         Objects.requireNonNull(buffer, "buffer");
         if (end < 0 || end > buffer.limit()) {
             throw new IllegalArgumentException("entity header scan length exceeds buffer bounds");
@@ -103,8 +85,7 @@ final class EntityHeaders {
                 }
                 if (visitor != null) {
                     final long typeId = nativeLong(buffer, offset + Long.BYTES, nativeOrder);
-                    final long objectId = !selectiveObjectIds || typeId == objectIdTypeId
-                            ? nativeLong(buffer, offset + 2 * Long.BYTES, nativeOrder) : -1L;
+                    final long objectId = nativeLong(buffer, offset + 2 * Long.BYTES, nativeOrder);
                     visitor.entity(typeId, objectId);
                 }
                 offset += (int) itemLength;
@@ -148,9 +129,7 @@ final class EntityHeaders {
     }
 
     private static long nativeLong(final ByteBuffer buffer, final int offset, final boolean bufferHasNativeOrder) {
-        return bufferHasNativeOrder
-                ? buffer.getLong(offset)
-                : (long) NATIVE_LONG.get(buffer, offset);
+        return bufferHasNativeOrder ? buffer.getLong(offset) : (long) NATIVE_LONG.get(buffer, offset);
     }
 
     private static CorruptReplicationDataException invalid(final long offset, final String reason) {
