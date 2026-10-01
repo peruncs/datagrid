@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Compare two A1.10 result files against the D-25 limits."""
+
+import json
+import math
+import sys
+from pathlib import Path
+
+
+def read(path):
+    data = json.loads(Path(path).read_text())
+    if data.get("schemaVersion") != 1:
+        raise ValueError(f"{path}: unsupported schemaVersion")
+    return data
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise SystemExit("usage: bench/compare BASELINE.json CURRENT.json")
+    baseline, current = map(read, sys.argv[1:])
+    if baseline["workload"] != current["workload"]:
+        raise ValueError("workload settings differ")
+    if baseline["environment"] != current["environment"]:
+        raise ValueError("benchmark environments differ")
+    if baseline["workload"] != {
+        "writers": 4,
+        "readers": 3,
+        "warmupSeconds": 60,
+        "windowSeconds": 60,
+        "windows": 5,
+    }:
+        raise ValueError("results do not use the A1.10 acceptance workload")
+    if baseline["commit"] != "9975d95":
+        raise ValueError(f"baseline commit must be 9975d95, got {baseline['commit']}")
+
+    base_rows = {row["payloadBytes"]: row for row in baseline["payloads"]}
+    current_rows = {row["payloadBytes"]: row for row in current["payloads"]}
+    if base_rows.keys() != current_rows.keys() or base_rows.keys() != {1024, 65536}:
+        raise ValueError("both results must contain exactly 1 KiB and 64 KiB payloads")
+
+    failed = False
+    for size in sorted(base_rows):
+        base, row = base_rows[size], current_rows[size]
+        for result in (base, row):
+            metrics = ("writerP99Nanos", "writerCommitsPerSecond", "readerApplyP99Nanos", "liveEndToEndP99Nanos")
+            if any(not math.isfinite(result[key]) or result[key] <= 0 for key in metrics):
+                raise ValueError(f"payload {size}: missing or invalid required metric")
+            if not result["windows"] or len(result["windows"]) != 5:
+                raise ValueError(f"payload {size}: expected five measured windows")
+            if any(len(window["readers"]) != 3 for window in result["windows"]):
+                raise ValueError(f"payload {size}: expected three reader measurements per window")
+        gates = {
+            "writerP99Nanos <= baseline * 1.10": row["writerP99Nanos"] <= base["writerP99Nanos"] * 1.10,
+            "writerCommitsPerSecond >= baseline * 0.95": row["writerCommitsPerSecond"] >= base["writerCommitsPerSecond"] * 0.95,
+            "readerApplyP99Nanos <= baseline * 1.10": row["readerApplyP99Nanos"] <= base["readerApplyP99Nanos"] * 1.10,
+            "liveEndToEndP99Nanos <= baseline": row["liveEndToEndP99Nanos"] <= base["liveEndToEndP99Nanos"],
+        }
+        print(f"{size} bytes:")
+        for name, passed in gates.items():
+            print(f"  {'PASS' if passed else 'FAIL'} {name}")
+            failed |= not passed
+        print(f"  writer p99 {row['writerP99Nanos'] / 1e6:.3f} ms; "
+              f"{row['writerCommitsPerSecond']:.2f} commits/s; "
+              f"reader apply p99 {row['readerApplyP99Nanos'] / 1e6:.3f} ms; "
+              f"end-to-end p99 {row['liveEndToEndP99Nanos'] / 1e6:.3f} ms; "
+              f"read p99 idle/loaded {row['readBoundaryIdleP99Nanos'] / 1e6:.4f}/"
+              f"{row['readBoundaryUnderWriteP99Nanos'] / 1e6:.3f} ms")
+    return int(failed)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

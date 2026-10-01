@@ -11,10 +11,17 @@ import java.lang.reflect.Modifier;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
-/// Holds the temporary JVector workaround required until Eclipse Store PR #832 lands.
+/// Invalidates Eclipse Store's transient JVector graph after replicated imports.
 ///
-/// This is the only accepted production-reflection use. Do not add other reflective
-/// reads here; validation must use Serializer's supported type-handler APIs.
+/// Replicated materialization bypasses `VectorIndex`'s mutation API, leaving its in-memory graph
+/// stale. Reflection is currently necessary because Eclipse Store exposes no public invalidation
+/// method. This bridge retires that graph while the caller holds the graph write boundary. It is
+/// temporary pending
+/// [Eclipse Store PR #832](https://github.com/eclipse-store/store/pull/832), which proposes the
+/// supported `VectorIndex.invalidateGraph()` API; replace this bridge with that API when the PR is
+/// merged and released. This is the only permitted production use of reflection; all other
+/// production reflection remains prohibited. Use Serializer's supported type-handler APIs for
+/// validation.
 final class StoreIndexReflection {
     private StoreIndexReflection() {
     }

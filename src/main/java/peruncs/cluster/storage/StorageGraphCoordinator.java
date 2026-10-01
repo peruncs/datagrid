@@ -42,10 +42,10 @@ import static org.eclipse.serializer.util.X.notNull;
 /// The merger's own scans join too, on different sides: view retirement,
 /// materialization, validation, and vector-graph invalidation run on the write
 /// side as one section, so joined reads never observe a half-applied batch.
-/// The changed vector graphs are warmed afterward on the read side, where
-/// queries may trigger the same upstream lazy rebuild concurrently. The
-/// type-dictionary conflict scan is another merger read-side path when the
-/// merger was built with this coordinator (see
+/// Changed vector graphs are warmed afterward, still inside the write section,
+/// because upstream's lazy first-use rebuild is not safe against a concurrent
+/// application search. The type-dictionary conflict scan is another merger
+/// read-side path when the merger was built with this coordinator (see
 /// [StorageBinaryDataMerger#graphCoordinator()]).
 /// The type-dictionary *mutation* deliberately does not use the read side —
 /// it runs through the update handler on the write side, because the read

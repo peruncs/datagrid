@@ -299,6 +299,11 @@ final class AeronReaderTransport {
                     this.delegate().fencingToken(), this.nodeId());
         }
 
+        @Override
+        public long currentSequence() {
+            return this.delegate().lastAppliedSequence();
+        }
+
         public boolean isRunning() {
             return this.delegate().isRunning();
         }

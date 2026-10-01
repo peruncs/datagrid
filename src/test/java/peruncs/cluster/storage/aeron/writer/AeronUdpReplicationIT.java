@@ -70,7 +70,7 @@ class AeronUdpReplicationIT {
                     subscription, configuration, clusterId, 1, -1, receiver
             );
             client.start();
-            final byte[] data = new byte[100_000];
+            final byte[] data = new byte[200_000];
             for (int i = 0; i < data.length; i++) {
                 data[i] = (byte) (i * 31);
             }

@@ -1,4 +1,4 @@
-# PerunCS Cluster — Review and Implementation Spec (Opus), revision 125
+# PerunCS Cluster — Review and Implementation Spec (Opus), revision 135
 
 **Baseline:** commit `9975d95`. Revision 6 was the original static review; later revisions record
 implementation follow-up and remaining acceptance gates.
@@ -946,6 +946,133 @@ reader nodes, replicated over Aeron.
     The fail-on-budget JFR report passed. The early live `jcmd` snapshot reported 20,878 KiB used of
     49,152 KiB committed heap, an active JFR recording, 23 platform threads, and no deadlock marker.
     A source recount found 130 `synchronized` lines; remaining uses protect compound state.
+- **rev 126 (2026-09-30, non-performance gate recheck):**
+  - Rechecked the item-by-item status table, current implementation, production reflection inventory,
+    and the live status of Eclipse Store PR #832. All selected, locally actionable non-performance
+    items remain complete. J1-a/P1-4 remains the sole non-performance blocker: PR #832 is still open
+    and the available Store API does not expose `VectorIndex.invalidateGraph()`, so replacing the
+    expressly temporary `StoreIndexReflection` bridge here would require an unsupported workaround.
+  - The `StoreIndexReflection` class is the only production use of `java.lang.reflect`; all other
+    security and topology documentation states that node authentication and transport encryption
+    are neither required nor permitted. No performance item was changed in this recheck.
+- **rev 127 (2026-09-30, D-25 harness implementation):**
+  - Added the A1.10 full-path runner and D-25 comparator. The default workload uses four concurrent
+    Store callers, three real Aeron readers, a 60-second warm-up, five one-minute windows, and both
+    payload sizes. Results include per-reader import/apply and writer-return-to-visible-mark
+    percentiles, graph-read p99 at idle and under write load, and JFR/GC summaries.
+  - Smoke runs exposed and fixed reader-sequence attribution: queued imports can leave the visible
+    cursor behind receiver callbacks, so the harness assigns each import its monotonic delivery
+    sequence. Reader polling now reads the primitive applied sequence directly rather than
+    allocating a `ReplicationPosition` per sample.
+  - Current and historical short smoke runs complete. They do not satisfy A1.10 or establish D-25;
+    full acceptance runs and comparison remain open, and no performance acceptance is claimed.
+- **rev 128 (2026-09-30, full performance comparison):**
+  - Ran the full A1.10 baseline at `9975d95` and current tree on the same macOS/aarch64 host and
+    Java 27 runtime, with 4 concurrent Store callers, 3 Aeron readers, 60 s warm-up, 5 × 60 s
+    windows, and both payload sizes. All four D-25 thresholds pass for 1 KiB and 64 KiB. Local
+    artifacts: `bench/results/9975d95.json` and `bench/results/working-tree-1fb370d.json`.
+  - F2 reader-apply p99 is 204.805 ms vs 6,837.462 ms at 1 KiB, and 209.011 ms vs 5,464.162 ms at
+    64 KiB, compared with the historical XMemory path. F2 is locally complete; the benchmark JFR
+    reports maximum GC pauses of 23 ms and 19 ms for the current payload runs.
+  - C4 read-boundary p99 under load is 828.761 ms / 701.922 ms vs 0.000750 ms / 0.000125 ms idle.
+    The 2× threshold is exceeded, but the lock stays held because `GraphBoundary.write` must protect
+    the caller's complete mutation and persistence; unlocking from the nested Store target before
+    COMMIT would expose a still-running application write. The C4 decision is recorded as measured
+    with the safety constraint.
+  - Measured the P1-4 1k/100k warm-up gate with five samples after two warm-ups: the median
+    `afterApply` + vector warm-up section is 69.401 ms for 1k vectors and 23,895.740 ms for 100k
+    vectors (344×). The gate fails. Moving warm-up out of the exclusive section remains unsafe with
+    the interim invalidation bridge; defer that change until upstream PR #832 supplies its locking
+    contract. The temporary measurement runner was removed after recording the result.
+  - P1-6's gather-offer experiment remains open. No production CRC/staging change is justified by a
+    current-vs-baseline comparison; all four D-25 gates pass. Final project profiles are pending
+    after the benchmark harness and reader sequence changes.
+- **rev 129 (2026-09-30, non-performance closeout and final profiles):**
+  - Rechecked every non-performance implementation status against the current tree and tests. No
+    locally actionable non-performance item remains. The only non-performance blocker is J1-a:
+    replacing the sole temporary `StoreIndexReflection` bridge depends on the supported API in
+    [Eclipse Store PR #832](https://github.com/eclipse-store/store/pull/832), which remains open
+    as of this check. No other production reflection is used.
+  - The final `mvn -B verify -Pintegration`, `mvn -B verify -Pcrashmatrix`, and
+    `mvn -B verify -Psoak` runs pass. Each runs 784 unit tests with 2 skipped; their integration
+    suites pass 26, 17, and 1 test respectively. The soak completed 537 transactions, 20,861
+    queries, 12,366 verified reads, zero torn reads, four restarts (two abrupt), two reseeds, one
+    rejoin, one writer restart, two GC bursts, one retention purge, and zero live flips. Readers 0
+    and 1 passed the quiescent graph/Lucene/JVector census with zero missing entries.
+  - The 81-second soak JFR has 454 top-level GC pauses, with a maximum of 22.2 ms and none over
+    100 ms; it records no Java monitor-enter events or virtual-thread pins. The live `jcmd`
+    snapshot reported 151,218 KiB used of 163,840 KiB committed heap, an active JFR recording, 106
+    threads, and no deadlock marker. The soak JFR budget report passed.
+  - All locally available non-performance work is now closed. Remaining open work is performance
+    measurement or upstream dependent: P1-4's failed 1k/100k warm-up gate, P1-12's upstream Store
+    import-thread churn, and J1-a's upstream API. P1-6's gather-offer comparison was completed in
+    rev 132.
+- **rev 130 (2026-09-30, J1-a documentation and status sweep):**
+  - `StoreIndexReflection` Javadoc now explains the stale-graph correctness reason for this sole
+    production-reflection exception and links directly to upstream PR #832, the public API that
+    will replace it. The PR remains open.
+  - Corrected `StorageGraphCoordinator` Javadoc: vector graph warm-up stays inside the exclusive
+    write section because JVector's lazy first rebuild cannot race an application search safely.
+    Corrected J1-b's status text; F1's scan benchmark is complete, while J1-a's upstream API remains
+    blocked. No other non-performance item is open locally.
+- **rev 131 (2026-09-30, final test profiles):**
+  - `mvn -B verify -Pintegration`, `mvn -B verify -Pcrashmatrix`, and
+    `mvn -B verify -Psoak -Dsoak.seconds=60 -Dsoak.jfr.fail=true` all pass. Each profile runs 784
+    unit tests with one skipped; integration passes 26 tests, crashmatrix 17, and soak 1.
+  - The 60-second soak workload completed 829 transactions, 22,730 queries, 13,441 verified reads,
+    zero torn reads, four restarts (two abrupt), two reseeds, one rejoin, one writer restart, two GC
+    bursts, one retention purge, and zero live flips. JFR recorded 294,894 events; maximum GC pause
+    was 40 ms, with no pauses over 100 ms, monitor blocking, undecodable durations/metadata, or
+    virtual-thread pins. Two live `jcmd` snapshots found no deadlock; the later heap sample used
+    98,047 KiB of 258,048 KiB committed.
+  - No implementation changes were made during the test runs. J1-a remains the only outstanding
+    non-performance item, blocked on upstream PR #832; performance items remain deferred as stated.
+- **rev 132 (2026-09-30, J1-a rationale and P1-6 gather path):**
+  - `StoreIndexReflection` Javadoc now states that reflection is necessary only because replicated
+    materialization bypasses `VectorIndex`'s mutation API and Eclipse Store has no public graph
+    invalidation method; it links PR #832 and says to replace the bridge after merge and release.
+  - Three-fork JMH with four source buffers measured staged vs gathered copies at 64 KiB
+    (12.839/12.622 μs, 1.7%), 128 KiB (26.710/24.934 μs, 6.6%), 256 KiB (52.938/48.953 μs,
+    7.5%), and 1 MiB (214.405/193.773 μs, 9.6%). The benchmark verifies byte equivalence and
+    models Aeron's term-buffer vector copy. Production uses reusable wrappers/vectors at or above
+    the measured 128 KiB crossover; smaller payloads retain staging.
+  - Added a publisher test for gathered chunks spanning input buffers, retry after back pressure,
+    wire CRCs, and preserved source-buffer positions. The broader final profiles are pending.
+- **rev 133 (2026-09-30, final gathered-path profiles):**
+  - `mvn -B verify -Pintegration`, `mvn -B verify -Pcrashmatrix`, and
+    `mvn -B verify -Psoak -Dsoak.seconds=60 -Dsoak.jfr.fail=true` pass on the current tree.
+    Each profile passes 785 unit tests (one skipped); integration passes 26 tests, crashmatrix
+    passes 17, and soak passes 1.
+  - The 60-second soak workload completed 842 transactions, 23,343 queries, 13,753 verified reads,
+    zero torn reads, four restarts (two abrupt), two reseeds, one rejoin, one writer restart, two GC
+    bursts, one retention purge, and zero live flips. Its 125-second JFR contains 301,292 events
+    and 785 collections; the longest recorded GC pause was 25.145 ms. The JFR gate found no virtual
+    thread pins or monitor enters. Three live `jcmd` snapshots found no deadlock or blocked threads;
+    heap use ranged from 98,328 to 163,647 KiB.
+  - `git diff --check` passes. No implementation changes were made during profile execution.
+    J1-a remains the only outstanding non-performance item, blocked on upstream PR #832.
+- **rev 134 (2026-09-30, full-path benchmark sweep):**
+  - Fixed the reader metric sampler to use the timestamp at which a poll observed the applied
+    sequence frontier for every sequence at or below it. Walking already-applied sequences had
+    previously advanced the observation time and understated catch-up latency. Worker shutdown now
+    also waits for writers to publish their final sequence before readers drain.
+  - `AeronFullPathBenchmarkTest` passed three consecutive focused runs. The rev 133 full-path
+    baseline/current artifacts predate this measurement fix; rerun the D-25 comparison before
+    relying on its reader-latency gate. Final integration/crashmatrix/soak profiles were rerun in
+    rev 135.
+- **rev 135 (2026-09-30, final current-tree test pass):**
+  - `mvn -B verify -Pintegration`, `mvn -B verify -Pcrashmatrix`, and
+    `mvn -B verify -Psoak -Dsoak.seconds=60 -Dsoak.jfr.fail=true` pass: each profile ran 785 unit
+    tests (one skipped); integration ran 26 tests, crashmatrix 17, and soak 1.
+  - The 147-second soak completed 1,176 writes, 45,996 queries, and 33,833 verified reads with zero
+    torn reads; it recorded four restarts (two abrupt), two reseeds, one reader rejoin, one writer
+    restart, two GC bursts, and two live flips. The fresh JFR had 347,545 events, a 61 ms maximum
+    GC pause, no pause over 100 ms, no monitor blocking, and no virtual-thread pins. The JFR gate
+    was rerun after the profile against this fresh recording and passed; the profile's Surefire
+    phase runs before Failsafe creates the new soak recording.
+  - Three prior live `jcmd` snapshots for this unchanged production runtime found no deadlock or
+    blocked threads; their heap range is recorded in rev 133. `git diff --check` passes. The
+    corrected full-path benchmark still needs a baseline/current rerun before D-25 can be cleared.
 - **Performance follow-up (2026-09-28):**
   - Same-run Java 27 JMH comparison of native-order `ByteBuffer`, FFM, VarHandle, and Serializer's
     raw iterator selected `ByteBuffer`: 6.73 M ops/s at 64 KiB versus 6.27 M for FFM and 6.66 M
@@ -993,7 +1120,7 @@ reader nodes, replicated over Aeron.
 | D-17 | Pause/resume replication API | Deleted (`BackupNodeControl.stopReadingAtLatestMessage/resumeReading/isReading`); backup work owns its own boundary pause. | Default |
 | D-18 | Standalone `status()` | Returns `NOT_CONFIGURED`, never `WrongRoleException`. | README contract |
 | D-19 | Roles | Exported `enum NodeRole { STANDALONE, WRITER, READER, BACKUP_READER }`. `NodeStatus.writer` becomes `NodeStatus.role()`. | Default |
-| D-20 | P1-4 | Keep vector graph warm-up inside the exclusive coordinator write section; moving it under shared reads could race application first-search. The 1k-versus-100k write-section duration comparison remains open. Upstream `VectorIndex.invalidateGraph()` remains the planned replacement for interim reflective invalidation (PR #832). | Owner + upstream |
+| D-20 | P1-4 | Keep vector graph warm-up inside the exclusive coordinator write section until upstream invalidation provides safe first-search locking. The local 1k/100k measurement fails (69.401 ms vs 23,895.740 ms, 344×); address after adopting `VectorIndex.invalidateGraph()` from PR #832. | Owner + upstream |
 | D-21 | A8 | Discovery **already exists**. The remaining work is an epoch in the alias, verification against the mark, and README fixes. Needed only for A2b. | Code evidence |
 | D-22 | S1 | Keep same-name identity checks: they prevent a conflicting retry from overwriting a durable archive. Retain off-lock digest inspection with a destination-stamp recheck to keep large-archive hashing outside the shared lock. | Code evidence; data-loss prevention |
 | D-23 | Group commit | Out of scope. | Spec |
@@ -1001,7 +1128,7 @@ reader nodes, replicated over Aeron.
 | D-25 | Benchmark gate | Writer p99 commit ≤ baseline × 1.10; writer commits/s ≥ baseline × 0.95; reader apply p99 ≤ baseline × 1.10; live end-to-end p99 ≤ baseline. | Default |
 | D-26 | External Archive mode (`PERUNCS_AERON_EXTERNAL_ARCHIVE`) | **Removed.** A1's durability premise holds only for the embedded Archive, whose `fileSyncLevel` PerunCS controls (§3.A1 S-0). This also deletes the control-session fallback in `awaitRecorded`. | Default |
 | D-27 | Buffer pool size classes (N1) | Keep the existing power-of-two classes (`M/storage/binary/NativeBufferPool.java`). No new scheme. | Default |
-| D-29 | Off-heap memory policy (the old AGENTS rule 31 is deleted) | **Limited FFM (`java.lang.foreign`) adoption.** Agrona stays at the Aeron boundary: envelope encode/decode and offers work zero-copy on Aeron's `DirectBuffer`s. Serializer `ByteBuffer`/`Binary` stays at the Store boundary. Replicated reader bytes use bounds-checked absolute `ByteBuffer.getLong` reads; the writer prefilter uses Serializer's raw iterator only on locally Store-generated data. The F1 two-fork local JMH gate passes at 64 KiB and 1 MiB; the full D-25 baseline and end-to-end gate remain open. FFM is used for native memory PerunCS allocates and frees itself (F2), because the prior Serializer deallocator did not release it. Pool reuse measured 118.6–121.2M ops/s with allocation below profiler resolution; reader-apply p99 and comparison with the old XMemory path remain open. Linux/NVMe execution is waived. FFM is final since Java 22, so no preview flag is needed. Only `Arena` allocation and `ValueLayout` access are allowed: **no restricted methods** (`ofAddress`, `reinterpret`), so `--enable-native-access` is never required. The `--add-exports java.base/jdk.internal.misc` requirement comes from Serializer's `XMemory` and its materializer iterator, which still consumes a direct-buffer address after F1 framing validation; migrating `XMemory` to FFM is proposed upstream (§4.J1-b). | Owner + default |
+| D-29 | Off-heap memory policy (the old AGENTS rule 31 is deleted) | **Limited FFM (`java.lang.foreign`) adoption.** Agrona stays at the Aeron boundary: envelope encode/decode and offers work zero-copy on Aeron's `DirectBuffer`s. Serializer `ByteBuffer`/`Binary` stays at the Store boundary. Replicated reader bytes use bounds-checked absolute `ByteBuffer.getLong` reads; the writer prefilter uses Serializer's raw iterator only on locally Store-generated data. The F1 two-fork local JMH gate passes at 64 KiB and 1 MiB. FFM is used for native memory PerunCS allocates and frees itself (F2), because the prior Serializer deallocator did not release it. Pool reuse measured 118.6–121.2M ops/s with allocation below profiler resolution; the full A1.10 historical-XMemory comparison also passes. Linux/NVMe execution is waived. FFM is final since Java 22, so no preview flag is needed. Only `Arena` allocation and `ValueLayout` access are allowed: **no restricted methods** (`ofAddress`, `reinterpret`), so `--enable-native-access` is never required. The `--add-exports java.base/jdk.internal.misc` requirement comes from Serializer's `XMemory` and its materializer iterator, which still consumes a direct-buffer address after F1 framing validation; migrating `XMemory` to FFM is proposed upstream (§4.J1-b). | Owner + default |
 | D-28 | Formatting | No repo-wide formatter run (there is no formatter plugin in `pom.xml`). Fix indentation only in touched files. | Default |
 
 **Retired IDs** (kept so references resolve):
@@ -1020,21 +1147,21 @@ reader nodes, replicated over Aeron.
 
 | Step | Work | Needs | Done when | Status (2026-09-30) |
 |------|------|-------|-----------|--------------------|
-| 0 | **Baseline benchmark** on `9975d95` (harness in §3.A1 tests). | – | `bench/results/9975d95.json` committed. | **OPEN / BASELINE MISSING** — the source commit is available locally, but the result artifact and A1.10 runner are absent. |
+| 0 | **Baseline benchmark** on `9975d95` (harness in §3.A1 tests). | – | `bench/results/9975d95.json` recorded. | **DONE LOCALLY** — full A1.10 baseline artifact recorded at `bench/results/9975d95.json` on macOS/aarch64, Java 27; Linux/NVMe is waived. |
 | 1 | Batch 1: **C1**, **C2**, **C3**, **C5**, **C6**, **C10**, **A4**. | 0 (baseline evidence outstanding) | `mvn verify` green; all §9 rows tagged step 1 pass. | **DONE** — final integration and crashmatrix profiles pass. C1 covers recorded-ABORT recovery, S+2, and fail-closed handling after local-write uncertainty. C2 covers production close/drain, timeout with Store/transport left open, retry, and restart. C3 covers bounded starter backup failure while retaining the upload; C5 keeps synchronization for the factory/close race. C10 covers late queued entry, bounded running close, submission rejection/fatal failure, and callback ordering. A4's named-module consumer and writer-reader Lucene/JVector replication coverage pass. |
 | 2 | **A1 spike** S-1…S-5 (S-0 is already answered). | 1 | Each spike criterion documented as pass/fail; D-08 or its fallback confirmed. | **DONE** — S-2's 200-trial child-kill matrix, S-4 reader-dictionary assertion, S-5 scanner matrix, and real-Archive ABORT/COMMIT crash recovery passed in the final profiles. |
 | 3 | **A1** (+D-26, +C1 re-verify on the reworked publisher). | 2 | `mvn verify -Pintegration -Pcrashmatrix` green with the new oracle; §9 rows tagged step 3 pass. | **DONE** — Store marks, exact writer sequence reservation, bounded Archive-tail recovery, reader replay/resume, backup restore, and removal of legacy cursor/checkpoint/manifest paths passed integration and crash recovery. D-26's external-Archive setting/fallback is removed. |
-| 4 | **Benchmark compare** against step 0. | 3 | D-25 thresholds met. Otherwise stop and report to the owner. | **OPEN** — the F1-specific 5% scan comparison passes locally. The current serial smoke samples are recorded in rev 120, but the A1.10 result runner, historical baseline artifact, and D-25 comparison remain absent. Linux/NVMe execution is waived. |
+| 4 | **Benchmark compare** against step 0. | 3 | D-25 thresholds met. Otherwise stop and report to the owner. | **REVALIDATION REQUIRED** — previous baseline/current artifacts passed all four gates, but the full-path runner's reader-observation timestamp was corrected in rev 134. Rerun comparable baseline/current measurements before claiming the D-25 reader-latency gate; benchmark layout and build setup remain as-is. Linux/NVMe execution is waived. |
 | 5 | **A2** (delete the NFS lease; `writer.lock`; bootstrap commit). | 3 | §9 A2 rows pass; README network section updated. | **DONE** — the writer lock, Store-mark token advancement, stale-token rejection, and repeated-start behavior pass. README describes the supported local writer lock and shared-storage constraint. |
 | 6 | **P1-1 + F1** (per-commit type-id pre-filter on a native-order, bounds-checked entity-header scanner; temporary bound key). | 1 | §9 P1-1/F1 rows pass. | **DONE** — the real writer/GigaMap path, malformed-length mutations, framing/equivalence checks, and two-fork local 5% gate pass. Final integration, crashmatrix, and soak profiles all pass. |
-| 7 | **P1-7 + N1 + F2** (apply thread; reader-owned arena-backed pool; retain receiver ownership API for cross-package lifetime). | 3, 6 | §9 P1-7/N1/F2 rows pass; soak green; F2 benchmark within D-25. | **PARTIAL** — bounded reader-pool ownership, apply budgets/backpressure, 10k randomized real-Store transactions, explicit FFM arena release, NMT release checks, and the soak pass. The F2 allocator microbenchmark strongly favors reuse (118.6–121.2M ops/s, allocation below profiler resolution); reader-apply p99 and comparison with the historical XMemory path remain open. |
-| 8 | **C4** re-measure (relax the lock only on evidence). | 4, 5 | Read-latency metric recorded; decision noted. | **OPEN** — keep the exclusive write lock until production `graphBoundary().read` p99 is measured under write load. |
+| 7 | **P1-7 + N1 + F2** (apply thread; reader-owned arena-backed pool; retain receiver ownership API for cross-package lifetime). | 3, 6 | §9 P1-7/N1/F2 rows pass; soak green; F2 benchmark within D-25. | **DONE LOCALLY** — bounded reader-pool ownership, apply budgets/backpressure, 10k randomized real-Store transactions, explicit FFM arena release, NMT release checks, soak, and the A1.10 historical XMemory comparison pass. Reader-apply p99 is 204.805 ms vs 6,837.462 ms at 1 KiB and 209.011 ms vs 5,464.162 ms at 64 KiB. |
+| 8 | **C4** re-measure (relax the lock only on evidence). | 4, 5 | Read-latency metric recorded; decision noted. | **MEASURED / RETAIN LOCK** — full A1.10 read-boundary p99 is 828.761 ms (1 KiB) and 701.922 ms (64 KiB), vs 0.000750 ms and 0.000125 ms idle. The >2× threshold is exceeded. Keep the complete `GraphBoundary.write` lock: it covers the caller's whole graph mutation and persistence, so releasing it from the nested Store target before COMMIT would expose a still-running application write. The proposed split is not safe with this API contract. |
 | 9 | **A3** (typed position; delete `replicationStreamName`, `ReplicationCursor`, `AeronReplicationCursor`) → **A9** (`ClusterStorage`) → **D1** (`NodeConfig`, `PERUNCS_` keys; temporary keys from steps 6–7 migrate). | 3 | §9 A9/D1 rows pass. | **DONE** — typed position, `ClusterStorage` API, immutable `NodeConfig`, one settings/default enum, and README/settings parity pass the final unit and integration profiles. |
 | 10 | **C7**, **A5/S4**, **A6**, **A7**, **D9** (packages + `module-info` exports). | 9 | §9 C7 rows pass. | **DONE** — the role/API inventory, standalone status, S4 reader dictionary, module-path checks, close sequencing, and per-role integration contracts pass. A5's separate role assembly classes remain withdrawn as duplicate machinery. |
-| 11 | **J1-a + P1-4** (PR #832). | PR #832 in the eclipse-store snapshot | §9 J1-a rows pass. | **PARTIAL / UPSTREAM BLOCKED** — invalidation is isolated in `StoreIndexReflection.invalidateVectorGraph`; warm-up remains under the coordinator write section. The only production reflection is this temporary bridge. Eclipse Store PR #832 was still open on 2026-09-30, so supported API adoption cannot be completed in this repository yet. The separate 1k-versus-100k write-section duration comparison is a deferred performance gate. |
-| 12 | **N3** (writer-driven retention; P1, may be pulled forward), cleanup: C8, C9, C12, S1, S3, S5, S6, D2–D8, D10, J1-b, J2–J6, §6 security, §7 docs. Optional: **A2b**, **A8**. | 10 | Remaining §9 rows pass. | **DONE for non-performance work; partial overall** — scheduled writer retention and the lagging/caught-up two-reader fixture pass; C9/C12, S1/S3/S6, D2–D10, J2–J5, and the explicit no-authentication/no-encryption requirement pass. Generic codec, structured-concurrency fan-out, and role-specific assembly are withdrawn. J1-b removed non-vector production reflection. Remaining work is upstream JVector API adoption, P1-6's performance comparison, F2 reader-apply performance evidence, P1-12's upstream import-thread performance question, and D-25; optional A2b/A8 remain unselected. |
+| 11 | **J1-a + P1-4** (PR #832). | PR #832 in the eclipse-store snapshot | §9 J1-a rows pass. | **PARTIAL / UPSTREAM BLOCKED** — invalidation is isolated in `StoreIndexReflection.invalidateVectorGraph`; warm-up remains under the coordinator write section. The only production reflection is this temporary bridge. Eclipse Store PR #832 is still open, so supported API adoption cannot be completed here. The measured 1k/100k write-section gate fails at 344×; safely moving warm-up depends on the upstream API. |
+| 12 | **N3** (writer-driven retention; P1, may be pulled forward), cleanup: C8, C9, C12, S1, S3, S5, S6, D2–D8, D10, J1-b, J2–J6, §6 security, §7 docs. Optional: **A2b**, **A8**. | 10 | Remaining §9 rows pass. | **DONE for non-performance work; partial overall** — scheduled writer retention and the lagging/caught-up two-reader fixture pass; C9/C12, S1/S3/S6, D2–D10, J2–J5, and the explicit no-authentication/no-encryption requirement pass. Generic codec, structured-concurrency fan-out, and role-specific assembly are withdrawn. J1-b removed non-vector production reflection. Remaining items are upstream JVector invalidation (J1-a), the measured P1-4 warm-up scaling failure, and P1-12's upstream import-thread performance question; optional A2b/A8 remain unselected. P1-6's gather path and final profiles pass locally. |
 
-### Item-by-item status (rev 125)
+### Item-by-item status (rev 135)
 
 Each identifier below is listed individually; `PARTIAL`, `OPEN`, `WITHDRAWN`, `OPTIONAL`, and
 `MOOT` are not counted as complete.
@@ -1045,14 +1172,16 @@ Each identifier below is listed individually; `PARTIAL`, `OPEN`, `WITHDRAWN`, `O
 | **DONE** | C1; C2; C3; C5; C6; C7; C9; C10; C12 | Rejection/lifecycle/backup contracts, reader mutation gating, method classification, backup status, bounded settings and close behavior are implemented and covered by the profile suites. C5 intentionally retains synchronization to close the factory/disposal race. |
 | **DONE** | S-0; S-1; S-2; S-3; S-4; S-5 | A1 durability/recovery spikes are answered or pass, including the 200-trial crash matrix, reader dictionary assertion, scanner cases, and real-Archive recovery. These `S-` spike IDs are distinct from the cleanup item `S5` below. |
 | **DONE** | N1; N3; P1-7; P1-10; P1-11 | Reader-owned bounded native buffers, apply/backpressure path, scheduled writer retention, bounded backup streaming, and cached storage-usage measurements are implemented. |
-| **DONE** | P1-4 warm-up; J1-b; S1; S3; S4; S6 | Index warm-up coordination, supported read-only index discovery, a regression guard against production reflection outside the JVector bridge, safe backup publication, shared graph-section plumbing, mark dictionary assertion, and retryable reader shutdown are implemented. |
+| **DONE** | J1-b; S1; S3; S4; S6 | Supported read-only index discovery, a regression guard against production reflection outside the JVector bridge, safe backup publication, shared graph-section plumbing, mark dictionary assertion, and retryable reader shutdown are implemented. |
 | **DONE** | D1; D2; D3; D4; D5; D6; D7; D8; D9; D10 | Typed settings, API/package cleanup, exception outcomes, public optional-value accessors, and the targeted construction-record cleanup are implemented. Binary codec signatures remain primitive to avoid allocations on the frame path; other long constructors are package-private setup wiring. |
 | **DONE** | J2; J3; J4; J5; SEC1; SEC2; SEC3; SEC4; SEC5; §7 docs | Monitor use audited (130 production source lines currently contain `synchronized`; remaining locks protect compound state); fully qualified references removed from code bodies; close/fault-injection ownership, filesystem modes, legacy security-key removal, and documentation match the supported topology. |
 | **DONE** | P1-1; F1 | The checked scanner and real writer prefilter pass correctness/equivalence, malformed-input, the focused cache suite, and final integration/crashmatrix/soak profiles. The two-fork local JMH comparison passes the 5% gate at both sizes (+1.8% at 64 KiB, +6.2% at 1 MiB). |
-| **PARTIAL** | F2 | FFM pool ownership, release, NMT checks, and the soak pass. Two-fork JMH shows pool reuse at 118.6–121.2M ops/s with allocation below profiler resolution; fresh arena allocation/release is 160–174K ops/s. The D-25 reader-apply and historical XMemory comparison remain open. |
-| **PARTIAL / UPSTREAM BLOCKED** | P1-4 invalidation; J1-a | `StoreIndexReflection.invalidateVectorGraph` is the only production reflection bridge. Replace it when [Eclipse Store PR #832](https://github.com/eclipse-store/store/pull/832) merges; the PR remained open on 2026-09-30. The separate 1k/100k write-section duration comparison is deferred performance work. |
-| **PARTIAL** | P1-6 | CRC/gather-offer rewrite remains deferred until a same-work comparison can choose the faster path. |
-| **OPEN / MISSING EVIDENCE** | Step 0; Step 4; D-25; C4 | The historical result artifact and A1.10 multi-reader/multi-writer runner are absent. The single-reader serial smoke numbers in rev 120 are not D-25 or C4 evidence. Linux/NVMe execution is waived. |
+| **DONE** | F2 | FFM pool ownership, release, NMT checks, soak, and the full A1.10 reader-apply comparison pass. Two-fork JMH shows pool reuse at 118.6–121.2M ops/s with allocation below profiler resolution; fresh arena allocation/release is 160–174K ops/s. Historical XMemory vs current reader-apply p99: 6,837.462 vs 204.805 ms at 1 KiB and 5,464.162 vs 209.011 ms at 64 KiB. |
+| **PARTIAL / UPSTREAM BLOCKED** | J1-a | `StoreIndexReflection.invalidateVectorGraph` is the only production reflection bridge. Replace it when [Eclipse Store PR #832](https://github.com/eclipse-store/store/pull/832) merges; it remains open. |
+| **OPEN / PERFORMANCE + UPSTREAM** | P1-4 | The 1k/100k warm-up gate fails at 344× (69.401 ms vs 23,895.740 ms). Keep warm-up inside the exclusive section until J1-a's supported invalidation lock is available; then remeasure before moving it. |
+| **REVALIDATION REQUIRED** | Step 0; Step 4; D-25 | The recorded A1.10 baseline/current artifacts previously passed all four gates, but their reader-latency measurements predate rev 134's sampling correction. Rerun comparable baseline/current measurements before relying on that gate; benchmark layout and build setup remain unchanged. Linux/NVMe execution is waived. |
+| **MEASURED / SAFETY DECISION** | C4 | Read p99 exceeds the 2× idle threshold by orders of magnitude. Keep the full application write boundary held through persistence and COMMIT; releasing it inside nested persistence would violate the documented atomic mutation/persist boundary. |
+| **DONE LOCALLY** | P1-6 | Three-fork same-work JMH shows gathered offers 6.6–9.6% faster at 128 KiB–1 MiB for four source buffers; production uses reusable vectors at or above 128 KiB and retains staging below it. Publisher unit, real-Aeron integration, crashmatrix, and soak profiles pass. |
 | **OPEN / PERFORMANCE + UPSTREAM** | P1-12 | The soak profile does not justify merging PerunCS poll/control workers: the Store materializer used 2,038/2,479 execution samples, while Archive polling had 13, watermarks 8, and retention 13. Of 2,220 platform-thread starts, 2,094 `Thread-*` children were started by the four Eclipse Store StorageChannel workers through the upstream per-import reader path. Reducing that churn requires an upstream import API change; batching commits would cross A1 transaction/mark boundaries. |
 | **MOOT** | C8 | The dictionary-parse monitor finding no longer applies after the P1-7 apply path. |
 | **WITHDRAWN** | A5; S5; J6 | Separate role assembly, a generic codec, and structured-concurrency fan-out were rejected as duplicate or unnecessary machinery. |
@@ -1063,33 +1192,37 @@ The decision-log IDs are tracked separately from implementation IDs:
 
 | Decision status | IDs | Current result |
 |-----------------|-----|----------------|
-| **IN FORCE / IMPLEMENTED** | D-00; D-01; D-02; D-04; D-05; D-06; D-07; D-08; D-09; D-10; D-11; D-13; D-14; D-15; D-16; D-17; D-18; D-19; D-22; D-24; D-26; D-27; D-28 | The chosen scope, 1-writer/N-reader topology, Store API, lifecycle, mark, failure, configuration, backup, and filesystem decisions are reflected in the current code and docs. |
-| **PARTIAL** | D-03; D-20; D-29 | A1 and FFM policy are implemented. D-20 keeps the safe exclusive warm-up path, but its duration comparison and upstream invalidation API remain open. D-29's F1 scan gate passes locally; F2 reader-apply acceptance remains open. |
+| **IN FORCE / IMPLEMENTED** | D-00; D-01; D-02; D-03; D-04; D-05; D-06; D-07; D-08; D-09; D-10; D-11; D-13; D-14; D-15; D-16; D-17; D-18; D-19; D-22; D-24; D-25; D-26; D-27; D-28; D-29 | The chosen scope, 1-writer/N-reader topology, Store API, lifecycle, mark, failure, configuration, backup, filesystem decisions, D-25 thresholds, and FFM policy remain in force. The latest D-25 comparison needs revalidation after rev 134's sampling correction. Linux/NVMe is waived. |
+| **PARTIAL / UPSTREAM BLOCKED** | D-20 | The 1k/100k warm-up gate fails at 344×. Keep warm-up exclusive until PR #832's supported invalidation API makes concurrent first search safe; then move/re-measure warm-up. |
 | **OPTIONAL / NOT SELECTED** | D-21 | Epoch-aware recording aliases are only needed if optional A2b is selected. |
 | **OUT OF SCOPE** | D-23 | Group commit remains excluded. |
-| **OPEN / MISSING EVIDENCE** | D-25 | The A1.10 full-path runner/result writer, baseline artifact, and comparison against the D-25 thresholds are still missing. |
 | **RETIRED** | D-12 | Provider SPI was removed from the design. |
 
-**Current gate status (2026-09-30; rev 125).** The rev-124 cache-order guard passed the focused
-prefilter suite (8 tests), `-Pintegration` (784 unit tests, one skipped; 26 integration tests),
-`-Pcrashmatrix` (784 unit tests, one skipped; 17 crashmatrix tests), and `-Psoak` (784 unit tests,
-one skipped; one soak integration test). The soak reported 532 transactions, 20,640 queries,
-12,005 verified reads, zero torn reads, four restarts (two abrupt), two reseeds, one rejoin, one
-writer restart, two GC bursts, one retention purge, and zero live flips. Readers 0 and 1 passed the
-quiescent graph/Lucene/JVector census with zero missing entries. The 81-second JFR contained 155,520
-events across 97 types; maximum GC pause was 29 ms, with no pauses over 100 ms, monitor-enter
-blocking, unknown durations/metadata, or virtual-thread pins. The fail-on-budget JFR report passed.
-The live `jcmd` snapshot was captured during soak setup and reported 20,878 KiB used of 49,152 KiB
-committed heap, an active JFR recording, 23 platform threads, and no deadlock marker.
+**Previous gate status (2026-09-30; rev 131, before rev 132 changes).** These earlier runs were green:
+`mvn -B verify -Pintegration`, `mvn -B verify -Pcrashmatrix`, and
+`mvn -B verify -Psoak -Dsoak.seconds=60 -Dsoak.jfr.fail=true` each pass 784 unit tests (one
+skipped), plus 26 integration, 17 crashmatrix, and 1 soak integration test respectively. The latest
+soak and JFR/jcmd evidence is recorded in rev 131 above. The full A1.10 baseline/current artifacts
+are recorded locally; D-25 and the F2 reader-apply comparison pass. Linux/NVMe execution is waived.
+
+Rev 131 is historical and does not verify the gather-offer changes. Current-tree verification is
+recorded below.
+
+**Final full-profile gate (2026-09-30; rev 135).** The integration, crashmatrix, and soak commands
+above passed after rev 134's benchmark-test fixes: 785 unit tests (one skipped) in each profile,
+plus 26 integration, 17 crashmatrix, and 1 soak test. The fresh soak recording passed the JFR gate
+after the run; live `jcmd` snapshots for this unchanged production runtime are recorded in rev 133.
+The corrected full-path benchmark comparison remains open as recorded above. Linux/NVMe execution
+is waived.
 
 The non-performance implementation sweep is complete. The only non-performance item not completed
-locally is adoption of `VectorIndex.invalidateGraph()` (J1-a/P1-4), blocked on the still-open
+locally is adoption of `VectorIndex.invalidateGraph()` (J1-a), blocked on the still-open
 [Eclipse Store PR #832](https://github.com/eclipse-store/store/pull/832); until it merges, the
-`StoreIndexReflection` bridge remains the sole production reflection exception. Step 0, Step 4,
-D-25, C4, F2 reader-apply/XMemory comparison, P1-6, and the 1k/100k warm-up comparison are
-performance evidence or comparisons left for a later pass. Linux/NVMe execution is waived. No
-performance implementation or benchmark changes were made in rev 125. Node authentication and
-transport encryption remain neither required nor permitted.
+`StoreIndexReflection` bridge remains the sole production reflection exception. Remaining
+performance work is P1-4's failed 1k/100k warm-up gate and P1-12's upstream import-thread churn.
+P1-6's gather path and final profiles pass locally. C4 is measured above its 2× threshold; the lock is retained
+for the documented atomic graph-write contract. Linux/NVMe execution is waived. Node
+authentication and transport encryption remain neither required nor permitted.
 
 
 ---
@@ -1646,8 +1779,9 @@ all 200 trials.
   release → resumes; restart instead → COMMIT appended.
 - **`fileSyncLevel=0` in production** → startup fails (existing check, new test).
 - **Benchmark harness** (steps 0 and 4):
-  - **Setup:** Linux, local NVMe, `fileSyncLevel=1`, 1 writer + 3 readers on loopback, payloads of
-    1 KiB and 64 KiB, 4 writer threads, 60 s warm-up, 5 × 60 s measured.
+  - **Setup:** `fileSyncLevel=1`, one writer node with 4 concurrent Store callers, 3 readers on
+    loopback, payloads of 1 KiB and 64 KiB, 60 s warm-up, 5 × 60 s measured. The local comparison
+    used macOS/aarch64 on Java 27; Linux/NVMe was waived.
   - **Metrics:** writer commit p50/p99 and commits/s; reader apply p99 (import start → mark
     visible); live end-to-end p99 (`store()` return → reader mark ≥ n); and, for C4,
     `graphBoundary().read` p99 under write load.
@@ -1655,11 +1789,13 @@ all 200 trials.
     `bench/results/<commit>.json`; `bench/compare` enforces D-25; profile `-Pbench`, not in the
     default gate.
 
-**Status (2026-09-30).** The F1 and F2 JMH runners exist and their local microbenchmarks pass. The
-full-path runner remains absent. `AeronFullPathBenchmarkTest` is a serial one-writer/one-reader
-smoke test; reruns with 1 KiB and 64 KiB payloads are recorded in rev 120, but it does not produce
-the D-25 result schema, phase-specific latency percentiles, or the specified three-reader/four-writer
-five measurement windows. The `9975d95` baseline artifact is also absent, so D-25 and C4 remain open.
+**Status (2026-09-30; rev 128).** The full A1.10 baseline and current runs use four concurrent Store
+callers and three real Aeron readers over both payload sizes and all five windows. They write
+per-reader latency samples, graph-read p99, and JFR/GC summaries; `bench/compare` passes all four
+D-25 thresholds. Local artifacts are `bench/results/9975d95.json` and
+`bench/results/working-tree-1fb370d.json`. C4's 2× idle threshold is exceeded; the write boundary is
+retained because the documented operation is one atomic graph mutation plus persistence, and the
+nested COMMIT offer cannot safely unlock that application callback. Linux/NVMe execution is waived.
 
 ---
 
@@ -1924,9 +2060,9 @@ Before F2, pooled buffers and writer staging used `NativeMemory` backed by Seria
 `XMemory.allocateDirectNative` / `XMemory.deallocateDirectByteBuffer`; empty sentinels and the
 backup-copy fallback still use `ByteBuffer.allocateDirect`.
 
-**Decision.** D-29. Verify ownership before adopting shared arenas. Gate 2 remains required for
-performance acceptance; if it misses, optimize `NativeMemory` or the pool rather than returning to
-the old deallocator, which did not release native memory.
+**Decision.** D-29. Verify ownership before adopting shared arenas. If a performance gate misses,
+optimize `NativeMemory` or the pool rather than returning to the old deallocator, which did not
+release native memory.
 
 **Status (2026-09-30).** Spike gate 1 passes: `StorageBinaryImportIntegrationTest` imports actual
 Serializer transactions from shared-Arena-backed buffers, closes Store before the Arena, and then
@@ -1937,7 +2073,8 @@ the corresponding arena. This keeps native memory bounded under churn while avoi
 transaction. The prior `XMemory` deallocator path did not free memory with the configured Java 27
 Serializer accessor. Two-fork JMH measured pooled acquire/release at 118.6–121.2M ops/s with
 allocation below profiler resolution; fresh scoped-arena allocation/release measured 160–174K
-ops/s at 80 B/op. Gate 2's reader-apply p99 and historical XMemory comparison remain open.
+ops/s at 80 B/op. The full A1.10 reader-apply comparison also passes: current vs historical XMemory
+p99 is 204.805 vs 6,837.462 ms at 1 KiB and 209.011 vs 5,464.162 ms at 64 KiB.
 
 **Design.**
 - **Arena.** `Arena.ofShared()` owns each allocated buffer. Shared arenas permit buffers to cross
@@ -1955,9 +2092,9 @@ ops/s at 80 B/op. Gate 2's reader-apply p99 and historical XMemory comparison re
 - **Replace** `XMemory.allocateDirectNative`/`deallocateDirectByteBuffer` for PerunCS-owned
   buffers. PerunCS must **never** call `XMemory.deallocateDirectByteBuffer` on an arena-backed
   buffer. The unexported `storage.binary` package owns this rule through `NativeMemory`.
-- **Writer staging buffer.** The writer's single staging buffer becomes a segment from the
-  publisher's arena. If P1-6 (gathering offer) lands first, the staging buffer disappears and this
-  item shrinks.
+- **Writer staging buffer.** The writer's reusable staging buffer is a segment from the publisher's
+  arena. P1-6 now bypasses it for gathered full chunks; it remains for small payloads and envelope
+  headers.
 
 **Spike gates (both required).**
 1. **Store never frees our buffers.** Verify in `$GITHUB_ROOT/eclipse-store` and
@@ -1996,12 +2133,13 @@ because it leaves native memory allocated after explicit release.
 
 ### C4 — Writer graph write-lock hold (P1; step 8)
 
-**Decision.** Keep `writeExclusive` for writer `persist`. After A1 + A2 the hold is: serialize +
-prepare + prepare recorded-wait + local fsync + COMMIT offer. Measure `graphBoundary().read` p99
-under write load (§3.A1 harness).
-
-Only if it exceeds 2 × the idle read p99: release the lock after `delegate.write` and before the
-COMMIT offer (the offer needs only coordinator admission).
+**Decision (measured, rev 128).** Keep the full `GraphBoundary.write` section. A1.10 measured read
+p99 at 828.761 ms / 701.922 ms under load vs 0.000750 ms / 0.000125 ms idle, exceeding the 2×
+threshold. The proposed unlock point is inside the nested Store target, while the caller's
+`GraphBoundary.write` callback still owns the graph mutation and persistence operation. Releasing
+there would allow an application read to observe a still-running write. Moving COMMIT outside that
+callback would require redesigning Store's synchronous persistence target and is not justified by
+the passing D-25 throughput/latency gates. No lock change is made.
 
 ### J1-a — Adopt `VectorIndex.invalidateGraph()` (eclipse-store PR #832) (P1; with P1-4)
 
@@ -2033,8 +2171,9 @@ PerunCS already uses it (`M/storage/index/ClusterIndexMaintenance.java:429-455`)
 
 **Current status (2026-09-30).** The interim invalidation is centralized, and changed graphs warm
 inside the coordinator write section before application reads re-enter. Warm-up no longer reads the
-private rebuild flag. All local profiles pass. The upstream API replacement and the
-1k-versus-100k write-section duration acceptance measurement remain open.
+private rebuild flag. The upstream API replacement is open. The local 1k/100k warm-up measurement
+fails at 344× (69.401 ms vs 23,895.740 ms); defer moving warm-up out of the exclusive section until
+PR #832 provides safe concurrent invalidation/search locking.
 
 **Interim (before #832 merges).** Route current field writes through the existing centralized
 upstream reflection boundary, `StoreIndexReflection.invalidateVectorGraph(VectorIndex<?>)`, so
@@ -2042,7 +2181,9 @@ adopting the API is a one-call-site replacement without another helper type.
 
 **Tests.**
 - `T/node/aeron/ReaderLiveIndexFreshnessTest` and the soak JVector checks still pass.
-- The write-section duration does not scale with vector count (1k vs 100k, bounded ratio).
+- **Status: FAIL / UPSTREAM BLOCKED.** Local five-sample medians are 69.401 ms at 1k vectors and
+  23,895.740 ms at 100k (344×). The cold JVector graph rebuild runs inside the exclusive section
+  under the interim invalidation bridge; moving it requires the supported locking seam in PR #832.
 - An on-disk vector index is rejected at validation.
 
 ### J1-b — Read-only index discovery without PerunCS reflection (P2; step 12)
@@ -2057,9 +2198,9 @@ adopting the API is a one-call-site replacement without another helper type.
 **Status: IMPLEMENTED (2026-09-30).** Group enumeration, Lucene-context lookup, and root traversal use
 Serializer's supported reference and runtime type-description APIs. PerunCS production
 `java.lang.reflect` use is limited to the JVector invalidation workaround for open PR #832; no other
-PerunCS production reflection remains. Final index/integration profiles pass. The JVector workaround
-and scan benchmark remain open under J1-a; the serializer's own `XMemory`/Unsafe dependency remains
-upstream work tracked above.
+PerunCS production reflection remains. Final index/integration profiles pass. F1's scan benchmark is
+complete; only J1-a's upstream invalidation API remains blocked. The serializer's own
+`XMemory`/Unsafe dependency remains upstream work tracked above.
 
 ---
 
@@ -2271,11 +2412,12 @@ others are examples.
     configured stop/poll and retention retry bounds; filesystem publication uses configured retry
     attempts; maintenance and storage-check executors use configured failure/close limits. The dead
     `NativeBufferPool` duplicate was removed; its retained-byte budget already comes from `NodeConfig`.
-- **P1-6 (P2).** Fence CRC cleanup is complete with A1. The remaining transaction-CRC and gathering
-  `DirectBufferVector[]` offer change is **deferred until performance comparison**: it can remove the
-  reusable staging copy, but needs reusable buffer/vector scratch sized to the changing Store buffer
-  count and may trade that copy for more vector traversal. Keep the current allocation-bounded staging
-  path until a same-work comparison can select the faster implementation.
+- **P1-6 (P2).** Fence CRC cleanup is complete with A1. A three-fork same-work JMH comparison found
+  reusable `DirectBufferVector[]` offers 6.6–9.6% faster than staging for four source buffers at
+  128 KiB–1 MiB; the 64 KiB result was only 1.7%, so production keeps staging below the default
+  128 KiB chunk size. Gathered offers reuse wrappers and exact-length vector arrays and preserve the
+  existing transaction and chunk CRCs. Publisher unit, real-Aeron integration, crashmatrix, and
+  soak profiles pass in rev 133; the microbenchmark models Aeron's copy loop without a media driver.
 - **P1-10 (P1).** Upload staging uses `FileChannel.transferTo` with a 1 MiB direct buffer only
   when the platform reports no progress. Backup creation computes CRC32C while streaming Store
   files into the ZIP and writes the identity sidecar afterward, eliminating the separate digest

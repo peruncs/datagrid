@@ -35,6 +35,7 @@ import peruncs.cluster.storage.binary.*;
 import peruncs.cluster.storage.index.ClusterStoreIndexes;
 
 import java.net.ServerSocket;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -44,6 +45,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
+import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -65,7 +67,7 @@ class AeronStoreIntegrationIT {
         return positionProvider.latest();
     }
 
-    private static long latestSequence(final ClusterReplicationTransport transport) {
+    static long latestSequence(final ClusterReplicationTransport transport) {
         final ReplicationPositionProvider positionProvider = transport.positionProvider();
         positionProvider.init();
         return positionProvider.latest().sequence();
@@ -203,7 +205,7 @@ class AeronStoreIntegrationIT {
         }
     }
 
-    static void store(final ClusterReplicationTransport transport, final EmbeddedStorageManager storage,
+    static long store(final ClusterReplicationTransport transport, final EmbeddedStorageManager storage,
                       final Object... instances) {
         final ReplicationMark mark = Objects.requireNonNull(transport.replicationMark(), "replicationMark");
         final Object[] marked = Arrays.copyOf(instances, instances.length + 1);
@@ -214,6 +216,7 @@ class AeronStoreIntegrationIT {
         } finally {
             transport.cancelReplicationCommit(mark);
         }
+        return mark.sequence;
     }
 
     private static void replicateAndVerify(
@@ -1375,6 +1378,7 @@ class AeronStoreIntegrationIT {
         private final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
         private final UUID nodeId;
         private final ReplicationMark mark;
+        private final LongConsumer importStartListener;
         private StorageBinaryDataReceiver receiver;
         private ReplicationApplier client;
         private boolean closed;
@@ -1388,17 +1392,20 @@ class AeronStoreIntegrationIT {
                 final UUID generation,
                 final int controlPort,
                 final int livePort,
-                final int watermarkPort
+                final int watermarkPort,
+                final LongConsumer importStartListener
         ) {
             this.transport = new AeronTransport(properties(
                     nodeRoot, clusterId, nodeId, generation, role, -1L, controlPort, livePort, watermarkPort));
             this.nodeId = nodeId;
+            this.importStartListener = importStartListener;
             try {
                 this.foundation = foundation(storePath);
                 this.transport.registerPersistentRoots(this.foundation);
                 this.storage = this.foundation.start();
                 this.mark = this.transport.replicationMark();
-                this.receiver = this.newReceiver();
+                final StorageBinaryDataReceiver receiver = this.newReceiver();
+                this.receiver = this.importStartListener == null ? receiver : this.instrumentImportStart(receiver);
                 this.client = this.newClient();
             } catch (final RuntimeException | Error failure) {
                 try {
@@ -1452,7 +1459,24 @@ class AeronStoreIntegrationIT {
         ) throws Exception {
             Files.createDirectories(nodeRoot);
             return new ReaderNode(nodeRoot, storePath, role, nodeId, clusterId, generation,
-                    controlPort, livePort, watermarkPort);
+                    controlPort, livePort, watermarkPort, null);
+        }
+
+        /// Opens a benchmark reader from its copied Store image.
+        static ReaderNode openForBenchmark(
+                final Path nodeRoot,
+                final Path storePath,
+                final UUID nodeId,
+                final UUID clusterId,
+                final UUID generation,
+                final int controlPort,
+                final int livePort,
+                final int watermarkPort,
+                final LongConsumer importStartListener
+        ) throws Exception {
+            Files.createDirectories(nodeRoot);
+            return new ReaderNode(nodeRoot, storePath, "reader", nodeId, clusterId, generation,
+                    controlPort, livePort, watermarkPort, Objects.requireNonNull(importStartListener, "importStartListener"));
         }
 
         private static RuntimeException append(final RuntimeException current, final RuntimeException additional) {
@@ -1463,6 +1487,44 @@ class AeronStoreIntegrationIT {
 
         void start() {
             this.client.start();
+        }
+
+        /// Returns the latest fully materialized replication sequence.
+        long appliedSequence() {
+            return this.client.currentSequence();
+        }
+
+        private StorageBinaryDataReceiver instrumentImportStart(final StorageBinaryDataReceiver delegate) {
+            return new StorageBinaryDataReceiver() {
+                private void starting() {
+                    ReaderNode.this.importStartListener.accept(ReaderNode.this.appliedSequence() + 1L);
+                }
+
+                @Override public ByteBuffer allocateNativeBuffer(final int capacity) {
+                    return delegate.allocateNativeBuffer(capacity);
+                }
+                @Override public void releaseNativeBuffer(final ByteBuffer buffer) {
+                    delegate.releaseNativeBuffer(buffer);
+                }
+                @Override public RuntimeException failure() { return delegate.failure(); }
+                @Override public boolean canReceiveDataOwned() { return delegate.canReceiveDataOwned(); }
+                @Override public boolean canAcceptOwnedData(final long bytes) {
+                    return delegate.canAcceptOwnedData(bytes);
+                }
+                @Override public void receiveData(final Binary data) {
+                    starting();
+                    delegate.receiveData(data);
+                }
+                @Override public boolean receiveDataOwned(
+                        final Binary data) {
+                    starting();
+                    return delegate.receiveDataOwned(data);
+                }
+                @Override public void awaitApplied() { delegate.awaitApplied(); }
+                @Override public void receiveTypeDictionary(final String dictionary) {
+                    delegate.receiveTypeDictionary(dictionary);
+                }
+            };
         }
 
         /* A lagging reader still converges: replaying a deep backlog at a few

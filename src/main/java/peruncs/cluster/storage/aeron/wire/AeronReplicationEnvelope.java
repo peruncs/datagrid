@@ -119,9 +119,9 @@ public final class AeronReplicationEnvelope {
                 chunkLength, crc32c(payload, payloadOffset, chunkLength, checksumContext), checksumContext);
     }
 
-        /// Encodes an envelope when the caller already computed the payload checksum
-    /// while staging the bytes. This avoids a second full pass over every data
-    /// chunk on the writer hot path.
+        /// Encodes an envelope when the caller already computed its payload checksum.
+    /// This avoids a second full pass over each chunk and supports gathering offers
+    /// whose payload is supplied separately from the header buffer.
     ///
     /// @param target          destination buffer
     /// @param targetOffset    destination offset
@@ -136,10 +136,10 @@ public final class AeronReplicationEnvelope {
     /// @param chunkCount      total chunk count
     /// @param chunkOffset     logical payload offset
     /// @param commitCrc32c    complete transaction checksum for terminal markers
-    /// @param payload         source payload
+    /// @param payload         source payload; use `target` at the payload offset when a gathering offer supplies it
     /// @param payloadOffset   source offset
     /// @param chunkLength     bytes in this frame
-    /// @param payloadCrc32c   checksum of the staged payload bytes
+    /// @param payloadCrc32c   checksum of the frame payload bytes
     /// @param checksumContext caller-owned checksum state used for the header CRC
     /// @return encoded frame length
     /// @throws IllegalArgumentException when bounds or protocol fields are invalid
@@ -188,8 +188,8 @@ public final class AeronReplicationEnvelope {
         target.putLong(targetOffset + WIRE_NONCE_OFFSET, wireNonce, ByteOrder.BIG_ENDIAN);
         target.putInt(targetOffset + HEADER_CRC_OFFSET,
                 checksumContext.compute(target, targetOffset, HEADER_CRC_OFFSET), ByteOrder.BIG_ENDIAN);
-        // The publisher can stage a multi-buffer chunk directly in the destination
-        // payload area. Avoid copying that already-staged range a second time.
+        // Staged payloads are already in place; gathered offers use this target range
+        // as a placeholder and supply the payload in their vector list.
         if (payload != target || payloadOffset != targetOffset + HEADER_LENGTH) {
             target.putBytes(targetOffset + HEADER_LENGTH, payload, payloadOffset, chunkLength);
         }

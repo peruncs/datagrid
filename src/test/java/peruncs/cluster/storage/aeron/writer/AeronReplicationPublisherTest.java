@@ -1,5 +1,6 @@
 package peruncs.cluster.storage.aeron.writer;
 
+import io.aeron.DirectBufferVector;
 import io.aeron.Publication;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -20,6 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -177,6 +179,83 @@ class AeronReplicationPublisherTest {
             assertEquals(AeronReplicationEnvelope.crc32c(data), commit.commitCrc32c());
             assertArrayEquals(data, preparedData(messages.get(1)));
         }
+    }
+
+    /// Uses the gathered path for a full chunk and verifies its wire bytes and CRCs.
+    @Test
+    void gathersFullChunksWithoutChangingSourceBuffers() {
+        final List<byte[]> messages = new ArrayList<>();
+        final AtomicInteger vectorAttempts = new AtomicInteger();
+        final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
+                .termLength(2 * 1024 * 1024)
+                .chunkSize(AeronReplicationConfiguration.DEFAULT_CHUNK_SIZE)
+                .maxTransactionBytes(256 * 1024)
+                .offerTimeoutNanos(50_000_000L)
+                .build();
+        final AeronOfferRetryer.Offerer offerer = new AeronOfferRetryer.Offerer() {
+            @Override
+            public long offer(final DirectBuffer buffer, final int offset, final int length) {
+                return record(buffer, offset, length);
+            }
+
+            @Override
+            public boolean supportsVectors() {
+                return true;
+            }
+
+            @Override
+            public long offer(final DirectBufferVector[] vectors) {
+                if (vectorAttempts.getAndIncrement() == 0) return Publication.BACK_PRESSURED;
+                final int length = DirectBufferVector.validateAndComputeLength(vectors);
+                final byte[] bytes = new byte[length];
+                int offset = 0;
+                for (final DirectBufferVector vector : vectors) {
+                    vector.buffer().getBytes(vector.offset(), bytes, offset, vector.length());
+                    offset += vector.length();
+                }
+                messages.add(bytes);
+                return messages.size();
+            }
+
+            private long record(final DirectBuffer buffer, final int offset, final int length) {
+                final byte[] bytes = new byte[length];
+                buffer.getBytes(offset, bytes);
+                messages.add(bytes);
+                return messages.size();
+            }
+        };
+        final byte[] payload = new byte[150_000];
+        for (int i = 0; i < payload.length; i++) payload[i] = (byte) i;
+        final int split = payload.length / 2;
+        final ByteBuffer first = ByteBuffer.allocateDirect(split + 2);
+        first.put((byte) 99).put((byte) 98).put(payload, 0, split).flip().position(2);
+        final ByteBuffer second = ByteBuffer.allocateDirect(payload.length - split + 2);
+        second.put((byte) 97).put((byte) 96).put(payload, split, payload.length - split).flip().position(2);
+        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+                offerer, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
+            publisher.publishTransaction(null, new ByteBuffer[]{first, second});
+        }
+
+        assertEquals(3, messages.size(), "two data chunks and their commit marker are offered");
+        assertEquals(3, vectorAttempts.get(), "the gathered offer retries back pressure");
+        final var firstData = AeronReplicationEnvelope.decode(new UnsafeBuffer(messages.getFirst()), 0,
+                messages.getFirst().length);
+        final var secondData = AeronReplicationEnvelope.decode(new UnsafeBuffer(messages.get(1)), 0,
+                messages.get(1).length);
+        final byte[] gathered = new byte[firstData.payload().length + secondData.payload().length];
+        System.arraycopy(firstData.payload(), 0, gathered, 0, firstData.payload().length);
+        System.arraycopy(secondData.payload(), 0, gathered, firstData.payload().length, secondData.payload().length);
+        assertArrayEquals(payload, gathered);
+        assertEquals(AeronReplicationEnvelope.Kind.STORE_BINARY, firstData.kind());
+        assertEquals(0, firstData.chunkIndex());
+        assertEquals(1, secondData.chunkIndex());
+        assertEquals(2, first.position());
+        assertEquals(2, second.position());
+        final var commit = AeronReplicationEnvelope.decode(new UnsafeBuffer(messages.getLast()), 0, messages.getLast().length);
+        assertEquals(AeronReplicationEnvelope.Kind.COMMIT, commit.kind());
+        final CRC32C crc = new CRC32C();
+        crc.update(payload, 0, payload.length);
+        assertEquals((int) crc.getValue(), commit.commitCrc32c());
     }
 
         /// The allocation-free checksum path must produce the same CRC and

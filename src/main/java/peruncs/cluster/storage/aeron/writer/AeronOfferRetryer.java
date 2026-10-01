@@ -1,5 +1,6 @@
 package peruncs.cluster.storage.aeron.writer;
 
+import io.aeron.DirectBufferVector;
 import io.aeron.Publication;
 import org.agrona.DirectBuffer;
 import peruncs.cluster.errors.ReplicationUnavailableException;
@@ -37,6 +38,10 @@ final class AeronOfferRetryer {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
+    boolean supportsVectors() {
+        return this.offerer.supportsVectors();
+    }
+
     /// Offers until Aeron accepts the frame or its deadline expires.
     ///
     /// @throws ReplicationUnavailableException when the thread is interrupted, the
@@ -46,10 +51,18 @@ final class AeronOfferRetryer {
         if (source == null || length < 0 || length > source.capacity()) {
             throw new IllegalArgumentException("invalid Aeron offer length");
         }
-        return this.offerLoop(source, length, this.configuration.offerTimeoutNanos());
+        return this.offerLoop(source, null, length, this.configuration.offerTimeoutNanos());
     }
 
-    private long offerLoop(final DirectBuffer source, final int length, final long timeoutNanos) {
+    /// Offers a reusable vector message until Aeron accepts it or its deadline expires.
+    long offer(final DirectBufferVector[] vectors) {
+        if (!this.offerer.supportsVectors()) throw new UnsupportedOperationException("vector offers are unsupported");
+        final int length = DirectBufferVector.validateAndComputeLength(vectors);
+        return this.offerLoop(null, vectors, length, this.configuration.offerTimeoutNanos());
+    }
+
+    private long offerLoop(final DirectBuffer source, final DirectBufferVector[] vectors,
+                           final int length, final long timeoutNanos) {
         final AeronRetryPolicy policy = this.configuration.retryPolicy();
         final long deadline = ReplicationRetry.deadlineNanos(timeoutNanos, this.clock);
         long backPressured = 0;
@@ -60,7 +73,9 @@ final class AeronOfferRetryer {
             if (Thread.currentThread().isInterrupted()) {
                 throw new ReplicationUnavailableException("interrupted while offering Aeron replication frame");
             }
-            final long position = this.offerer.offer(source, 0, length);
+            final long position = vectors == null
+                    ? this.offerer.offer(source, 0, length)
+                    : this.offerer.offer(vectors);
             if (position >= 0) return position;
             if (position == Publication.CLOSED || position == Publication.MAX_POSITION_EXCEEDED) {
                 throw new ReplicationUnavailableException(
@@ -102,6 +117,16 @@ final class AeronOfferRetryer {
     @FunctionalInterface
     interface Offerer {
         long offer(DirectBuffer buffer, int offset, int length);
+
+        /// Returns whether this offerer supports Aeron's gathering offer.
+        default boolean supportsVectors() {
+            return false;
+        }
+
+        /// Offers one gathered message; implementations opt in with `supportsVectors()`.
+        default long offer(final DirectBufferVector[] vectors) {
+            throw new UnsupportedOperationException("vector offers are unsupported");
+        }
 
         /// Returns the publication connectivity observed by the offerer. Test
         /// offerers may keep the default because they do not model a subscription.

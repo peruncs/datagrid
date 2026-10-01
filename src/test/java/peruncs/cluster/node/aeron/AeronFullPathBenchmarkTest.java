@@ -5,35 +5,25 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/// Smoke-checks that the full-path benchmark measures every production stage.
+/// Smoke-checks that the full-path benchmark records writer, reader, and graph-boundary metrics.
 class AeronFullPathBenchmarkTest {
     /// Verifies the benchmark measures the store, archive, reader-import, and cursor path and reports sane percentiles.
     @Test
-    void measuresStoreArchiveReaderImportAndCursorPath() throws Exception {
+    void measuresConcurrentStoreArchiveAndReaderPath() throws Exception {
         final int payload = Integer.getInteger("aeron.benchmark.payload.bytes", 64 * 1024);
-        final int warmup = Integer.getInteger("aeron.benchmark.warmup", 4);
-        final int iterations = Integer.getInteger("aeron.benchmark.iterations", 8);
-        final AeronFullPathBenchmark.Result result = AeronFullPathBenchmark.measure(payload, warmup, iterations);
-        System.out.printf("Aeron full-path regression: tx/s=%.1f MiB/s=%.2f p99-us=%.1f heap-bytes/tx=%d%n",
-                result.transactionsPerSecond(), result.mebibytesPerSecond(), result.p99Nanos() / 1_000.0,
-                result.heapBytesPerTransaction());
-        assertEquals(iterations, result.iterations());
-        assertTrue(result.p50Nanos() > 0L);
-        assertTrue(result.p99Nanos() >= result.p50Nanos());
-        /* Throughput and allocation numbers are deliberately reported, not hard-coded
-         * as a wall-clock gate: shared CI, GC scheduling, and Archive I/O make those
-         * thresholds machine-dependent.  A benchmark run may opt into local floors
-         * with -Daeron.benchmark.minimum.mib.per.second=... and
-         * -Daeron.benchmark.maximum.heap.bytes.per.transaction=... . */
-        final String minimumThroughput = System.getProperty("aeron.benchmark.minimum.mib.per.second");
-        if (minimumThroughput != null) {
-            assertTrue(result.mebibytesPerSecond() >= Double.parseDouble(minimumThroughput),
-                    "full Store/Archive/import path fell below the configured throughput floor");
-        }
-        final String maximumHeap = System.getProperty("aeron.benchmark.maximum.heap.bytes.per.transaction");
-        if (maximumHeap != null && result.heapBytesPerTransaction() >= 0L) {
-            assertTrue(result.heapBytesPerTransaction() <= Long.parseLong(maximumHeap),
-                    "full Store/Archive/import path exceeded the configured heap-allocation ceiling");
-        }
+        final int warmupSeconds = Integer.getInteger("aeron.benchmark.warmup.seconds", 1);
+        final int windowSeconds = Integer.getInteger("aeron.benchmark.window.seconds", 2);
+        final AeronFullPathBenchmark.Measurement result =
+                AeronFullPathBenchmark.measure(payload, warmupSeconds, windowSeconds, 1, 2, 1);
+        assertEquals(1, result.windows().size());
+        assertTrue(result.writerCommits() > 0L);
+        assertTrue(result.writerCommitsPerSecond() > 0.0);
+        assertTrue(result.writerP50Nanos() > 0L);
+        assertTrue(result.writerP99Nanos() >= result.writerP50Nanos());
+        assertTrue(result.readerApplyP99Nanos() > 0L);
+        assertTrue(result.loadedReadP99Nanos() > 0L);
+        assertEquals(1, result.readerMetrics().size());
+        assertEquals(result.writerCommits(), result.readerMetrics().getFirst().samples());
+        assertEquals(result.writerCommits(), result.windows().getFirst().commits());
     }
 }

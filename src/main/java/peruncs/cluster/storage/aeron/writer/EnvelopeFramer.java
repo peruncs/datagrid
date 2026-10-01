@@ -1,30 +1,80 @@
 package peruncs.cluster.storage.aeron.writer;
 
+import io.aeron.DirectBufferVector;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
+import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.io.FaultInjection;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.CRC32C;
 
-/// Encodes one transaction's frames in the publisher's reusable staging buffer.
+/// Encodes one transaction's frames in the publisher's reusable frame buffer.
 ///
-/// The publisher admits only one prepared transaction at a time, so the buffer
-/// stays owned by this framer until its transaction becomes terminal. This type
-/// encodes, accumulates CRCs, and offers frames.
+/// Full chunks use Aeron's gathering offer; smaller payloads reuse the staging area.
 final class EnvelopeFramer implements AutoCloseable {
+    /* P1-6 JMH: four-buffer crossover is the default 128 KiB chunk size. */
+    private static final int MIN_GATHER_PAYLOAD_BYTES = AeronReplicationConfiguration.DEFAULT_CHUNK_SIZE;
     private static final LazyConstant<UnsafeBuffer> EMPTY_BUFFER = LazyConstant.of(UnsafeBuffer::new);
 
-    /// Immutable publisher-wide framing state; transaction-specific values stay primitive.
-    record Configuration(UUID clusterId, long epoch, long wireNonce, int chunkSize, ByteBuffer storage) {
+    /// Publisher-wide framing values and reusable vector scratch.
+    record Configuration(UUID clusterId, long epoch, long wireNonce, int chunkSize, ByteBuffer storage,
+                         GatherScratch gatherScratch) {
         Configuration {
             Objects.requireNonNull(clusterId, "clusterId");
             Objects.requireNonNull(storage, "storage");
+            Objects.requireNonNull(gatherScratch, "gatherScratch");
             if (wireNonce == 0L || chunkSize <= 0) throw new IllegalArgumentException("invalid framing configuration");
+        }
+    }
+
+    /// Reuses source wrappers and exact-length vector arrays for the publisher's serialized writes.
+    /// It is not thread-safe; a publisher prepares only one transaction at a time.
+    static final class GatherScratch {
+        private static final ByteBuffer EMPTY_SOURCE = ByteBuffer.allocate(0).asReadOnlyBuffer();
+        private UnsafeBuffer[] sourceBuffers = new UnsafeBuffer[0];
+        private DirectBufferVector[] slots = new DirectBufferVector[0];
+        private DirectBufferVector[][] vectorsByCount = new DirectBufferVector[0][];
+
+        private void ensureSourceCapacity(final int sourceCount) {
+            if (sourceCount <= this.sourceBuffers.length) return;
+            final int capacity = Math.max(sourceCount, Math.max(4, this.sourceBuffers.length * 2));
+            this.sourceBuffers = Arrays.copyOf(this.sourceBuffers, capacity);
+            for (int i = 0; i < capacity; i++) {
+                if (this.sourceBuffers[i] == null) this.sourceBuffers[i] = new UnsafeBuffer();
+            }
+            final int oldLength = this.slots.length;
+            this.slots = Arrays.copyOf(this.slots, capacity + 1);
+            for (int i = oldLength; i < this.slots.length; i++) this.slots[i] = new DirectBufferVector();
+            this.vectorsByCount = Arrays.copyOf(this.vectorsByCount, this.slots.length + 1);
+        }
+
+        private UnsafeBuffer source(final int index, final ByteBuffer buffer) {
+            this.sourceBuffers[index].wrap(buffer);
+            return this.sourceBuffers[index];
+        }
+
+        private UnsafeBuffer source(final int index) {
+            return this.sourceBuffers[index];
+        }
+
+        private void clearSources(final int sourceCount) {
+            for (int i = 0; i < sourceCount; i++) this.sourceBuffers[i].wrap(EMPTY_SOURCE);
+        }
+
+        private DirectBufferVector slot(final int index) {
+            return this.slots[index];
+        }
+
+        private DirectBufferVector[] vectors(final int count) {
+            DirectBufferVector[] vectors = this.vectorsByCount[count];
+            if (vectors == null) this.vectorsByCount[count] = vectors = Arrays.copyOf(this.slots, count);
+            return vectors;
         }
     }
 
@@ -39,6 +89,7 @@ final class EnvelopeFramer implements AutoCloseable {
     private final long fencingToken;
     private final ByteBuffer storage;
     private final UnsafeBuffer buffer;
+    private final GatherScratch gatherScratch;
     private long lastOfferPosition;
     private final AeronReplicationEnvelope.ChecksumContext checksum =
             new AeronReplicationEnvelope.ChecksumContext();
@@ -60,6 +111,7 @@ final class EnvelopeFramer implements AutoCloseable {
         this.fencingToken = fencingToken;
         this.storage = configuration.storage();
         this.buffer = new UnsafeBuffer(this.storage);
+        this.gatherScratch = configuration.gatherScratch();
     }
 
     /// Encodes the type dictionary into one frame per chunk and offers each.
@@ -85,6 +137,9 @@ final class EnvelopeFramer implements AutoCloseable {
     /// written before local Store acceptance.
     int offerDataChunks(final ByteBuffer[] sources, final int sourceCount, final int length) {
         if (this.closed.get()) throw new IllegalStateException("Aeron envelope framer is closed");
+        if (length >= MIN_GATHER_PAYLOAD_BYTES && this.offerer.supportsVectors()) {
+            return this.offerGatheredDataChunks(sources, sourceCount, length);
+        }
         final CRC32C crc = this.dataCrc;
         crc.reset();
         if (length == 0) {
@@ -128,6 +183,48 @@ final class EnvelopeFramer implements AutoCloseable {
             logicalOffset += chunkLength;
         }
         return (int) crc.getValue();
+    }
+
+    private int offerGatheredDataChunks(final ByteBuffer[] sources, final int sourceCount, final int length) {
+        final CRC32C crc = this.dataCrc;
+        crc.reset();
+        this.gatherScratch.ensureSourceCapacity(sourceCount);
+        try {
+            for (int i = 0; i < sourceCount; i++) this.gatherScratch.source(i, sources[i]);
+            final int count = chunkCount(length, this.chunkSize);
+            int sourceIndex = 0;
+            int sourcePosition = sources[0].position();
+            int logicalOffset = 0;
+            for (int chunkIndex = 0; chunkIndex < count; chunkIndex++) {
+                final int chunkLength = Math.min(this.chunkSize, length - logicalOffset);
+                this.chunkCrc.reset();
+                int copied = 0;
+                int vectorCount = 1;
+                while (copied < chunkLength) {
+                    while (sourcePosition >= sources[sourceIndex].limit()) {
+                        if (++sourceIndex >= sourceCount) {
+                            throw new IllegalArgumentException("data buffer length changed");
+                        }
+                        sourcePosition = sources[sourceIndex].position();
+                    }
+                    final ByteBuffer source = sources[sourceIndex];
+                    final int amount = Math.min(source.limit() - sourcePosition, chunkLength - copied);
+                    updateCrc(crc, source, sourcePosition, amount);
+                    updateCrc(this.chunkCrc, source, sourcePosition, amount);
+                    this.gatherScratch.slot(vectorCount++).reset(
+                            this.gatherScratch.source(sourceIndex), sourcePosition, amount);
+                    sourcePosition += amount;
+                    copied += amount;
+                }
+                this.offerGatheredDataChunk(length, chunkIndex, count, logicalOffset, chunkLength,
+                        (int) this.chunkCrc.getValue(), this.gatherScratch.vectors(vectorCount));
+                FaultInjection.invoke("DATA_CHUNK", this.sequence);
+                logicalOffset += chunkLength;
+            }
+            return (int) crc.getValue();
+        } finally {
+            this.gatherScratch.clearSources(sourceCount);
+        }
     }
 
     /// Encodes and offers a terminal commit or abort marker.
@@ -218,6 +315,24 @@ final class EnvelopeFramer implements AutoCloseable {
             throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
         }
         this.lastOfferPosition = this.offerer.offer(this.buffer, encodedLength);
+    }
+
+    private void offerGatheredDataChunk(final int payloadLength, final int chunkIndex,
+                                        final int chunkCount, final int chunkOffset,
+                                        final int payloadChunkLength, final int payloadCrc32c,
+                                        final DirectBufferVector[] vectors) {
+        /* Encode only the header; Aeron reads its payload from the remaining vectors. */
+        final int encodedLength = AeronReplicationEnvelope.encodeWithPayloadCrc(this.buffer, 0,
+                this.clusterId, this.epoch, this.fencingToken, this.wireNonce, this.sequence,
+                AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
+                chunkIndex, chunkCount, chunkOffset, 0, this.buffer,
+                AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,
+                payloadCrc32c, this.checksum);
+        if (encodedLength > this.maxMessageLength) {
+            throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
+        }
+        vectors[0].reset(this.buffer, 0, AeronReplicationEnvelope.HEADER_LENGTH);
+        this.lastOfferPosition = this.offerer.offer(vectors);
     }
 
     /// Marks this transaction framer complete; the publisher owns and reuses the buffer.

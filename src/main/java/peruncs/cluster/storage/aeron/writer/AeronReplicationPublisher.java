@@ -1,6 +1,7 @@
 package peruncs.cluster.storage.aeron.writer;
 
 import io.aeron.Aeron;
+import io.aeron.DirectBufferVector;
 import io.aeron.ExclusivePublication;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -23,8 +24,8 @@ import java.util.zip.CRC32C;
 ///
 /// Data chunks are prepared first. A commit marker makes the complete
 /// transaction visible; an abort marker closes a rejected or abandoned one.
-/// Every transaction reuses the same direct staging buffer; publication ownership
-/// prevents a second transaction from writing it while one is pending.
+/// Small payloads use one reusable direct staging buffer; full chunks can be offered
+/// as vectors without a staging copy. Publication ownership prevents overlapping writes.
 final class AeronReplicationPublisher implements AutoCloseable {
     private record Configuration(AeronOfferRetryer.Offerer offerer, int maxMessageLength,
                                  AeronReplicationConfiguration replication, UUID clusterId,
@@ -56,6 +57,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
     private volatile AutoCloseable closeAction;
     private volatile LongUnaryOperator commitPositionAwaiter;
     private final ByteBuffer framingStorage;
+    private final EnvelopeFramer.GatherScratch gatherScratch = new EnvelopeFramer.GatherScratch();
     private final EnvelopeFramer.Configuration framerConfiguration;
     /* transactionMetadata is synchronized, so its CRC accumulator is confined
      * to one publisher call at a time and can be reset for each transaction. */
@@ -162,7 +164,7 @@ final class AeronReplicationPublisher implements AutoCloseable {
                 settings.replication().chunkSize() + AeronReplicationEnvelope.HEADER_LENGTH);
         this.framerConfiguration = new EnvelopeFramer.Configuration(
                 settings.clusterId(), settings.epoch(), settings.wireNonce(),
-                settings.replication().chunkSize(), this.framingStorage);
+                settings.replication().chunkSize(), this.framingStorage, this.gatherScratch);
     }
 
     private static AeronOfferRetryer.Offerer offerer(final ExclusivePublication publication) {
@@ -175,6 +177,16 @@ final class AeronReplicationPublisher implements AutoCloseable {
             @Override
             public boolean isConnected() {
                 return publication.isConnected();
+            }
+
+            @Override
+            public boolean supportsVectors() {
+                return true;
+            }
+
+            @Override
+            public long offer(final DirectBufferVector[] vectors) {
+                return publication.offer(vectors);
             }
         };
     }
