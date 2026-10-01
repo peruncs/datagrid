@@ -8,4 +8,6 @@
 /// nodes. The exported `api` and `errors` packages are the application
 /// boundary.
 ///
+///
+/// @since 1.0
 package peruncs.cluster;

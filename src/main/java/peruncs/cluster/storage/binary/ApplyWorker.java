@@ -20,9 +20,9 @@ import java.util.function.Consumer;
 /// One worker thread waits out the coalescing delay, drains the whole queue
 /// into reused scratch arrays, replays the Store import, materializes the
 /// object graph transaction by transaction, refreshes the index barrier, and
-/// releases the native batch exactly once. The loop never allocates on its
-/// steady-state path: the drain scratch grows once to the largest batch seen
-/// and every error is captured into the owner's terminal failure latch.
+/// releases the native batch exactly once. The drain scratch grows once to
+/// the largest batch seen; each batch still schedules two small watchdog tasks.
+/// Every error is captured into the owner's terminal failure latch.
 final class ApplyWorker {
     private static final System.Logger LOGGER =
             System.getLogger(StorageBinaryDataMerger.class.getName());
@@ -43,11 +43,9 @@ final class ApplyWorker {
      * caller's retries instead of being declared terminal by the worker on
      * the first per-attempt expiry. */
     private final long materializationBudgetMs;
-    /* The index refresh scans the whole store, so its bound is a multiple of
-     * the materialization budget rather than the same value: a large,
-     * progressing rebuild deserves headroom, while a wedged one still fails
-     * bounded. */
-    static final long INDEX_REFRESH_BUDGET_MULTIPLIER = 10L;
+    /* The index refresh scans the whole store, so it gets a configured bound of its own instead
+     * of sharing the batch-proportional materialization budget: a large, progressing rebuild
+     * deserves headroom, while a wedged one still fails bounded. */
     private final long indexRefreshBudgetMs;
     /* Reused batch drain: only ever touched under the materialization
      * lock, which serializes the worker drain and any await-thread drain,
@@ -63,6 +61,8 @@ final class ApplyWorker {
      * fires exactly when a phase completes must lose, so the cancel and the
      * stamp run inside the same critical section the expiry check reads. */
     private final Object budgetLock = new Object();
+    /* Applications cannot read the graph while a batch holds the coordinator write section. */
+    private static final long BLOCKED_WARNING_MS = 5_000L;
     private long materializedAtNanos;
     private long indexRefreshedAtNanos;
     private ScheduledFuture<?> indexRefreshWatchdog;
@@ -78,7 +78,8 @@ final class ApplyWorker {
             final Consumer<Runnable> graphUpdater,
             final long cachingTimeoutMs,
             final int maxValidatedIndexObjects,
-            final long materializationBudgetMs) {
+            final long materializationBudgetMs,
+            final long indexRefreshBudgetMs) {
         this.owner = owner;
         this.queue = queue;
         this.bufferPool = bufferPool;
@@ -92,13 +93,7 @@ final class ApplyWorker {
         this.cachingTimeoutMs = cachingTimeoutMs;
         this.maxValidatedIndexObjects = maxValidatedIndexObjects;
         this.materializationBudgetMs = materializationBudgetMs;
-        try {
-            this.indexRefreshBudgetMs = Math.multiplyExact(materializationBudgetMs, INDEX_REFRESH_BUDGET_MULTIPLIER);
-        } catch (final ArithmeticException overflow) {
-            throw new IllegalArgumentException(
-                    "materializationBudgetMs is too large for the index-refresh bound: %s".formatted(materializationBudgetMs),
-                    overflow);
-        }
+        this.indexRefreshBudgetMs = indexRefreshBudgetMs;
     }
 
     /// Coalesces and applies queued batches until the queue runs dry.
@@ -142,7 +137,7 @@ final class ApplyWorker {
         {
             /* Drain into the reused scratch array: no list, no exact-size
              * copy, no fork, and no per-batch Duration or scope — steady
-             * state allocates nothing on the heap on this path. The
+             * state allocates only the per-batch watchdog tasks. The
              * scratch grows once to the largest batch seen. */
             final int pending = this.queue.drainInto(this.drain);
             if (pending == 0) return;
@@ -169,6 +164,8 @@ final class ApplyWorker {
                     () -> this.materializationBudgetExpired(startedNanos),
                     this.materializationBudgetMs,
                     TimeUnit.MILLISECONDS);
+            final long writeSectionStartNanos = System.nanoTime();
+            final boolean[] warmupNeeded = {false};
             try {
                 this.graphUpdater.accept(() ->
                         ClusterStoreIndexes.withRegistrationRead(() ->
@@ -239,14 +236,14 @@ final class ApplyWorker {
                      * invalidation share one root-graph traversal: an
                      * unsupported index fails this reader closed. The scan
                      * visits index metadata only, never entity payload. */
-                    if (this.indexMaintenance.afterApply(this.storage, this.maxValidatedIndexObjects)) {
-                        /* Keep graph creation inside this write boundary. Upstream JVector's lazy
-                         * first-use initialization is not safe when an application search can
-                         * enter at the same time as the post-import warmup. Once warm, concurrent
-                         * searches use its normal read path. */
-                        this.indexMaintenance.warmupVectorSearchGraphs();
-                    }
+                    warmupNeeded[0] = this.indexMaintenance.afterApply(this.storage, this.maxValidatedIndexObjects);
                 }));
+                /* The write section ends here: application reads resume. The invalidated graphs
+                 * rebuild lazily on their first search, exactly once under the index's own monitor,
+                 * so warming them up now only moves that cost off the first application query. It
+                 * must not hold the exclusive section: a large rebuild would block every read. */
+                this.noteBlockedTime(writeSectionStartNanos, pending);
+                if (warmupNeeded[0]) this.indexMaintenance.warmupVectorSearchGraphs();
             } catch (final RuntimeException | Error failure) {
                 /* A genuine failure says failed; only an overrun says timed
                  * out. The two are never conflated into one message. */
@@ -277,6 +274,16 @@ final class ApplyWorker {
             }
             this.verifyBatchBudgets(startedNanos);
         });
+    }
+
+    /// Warns when the last batch held the graph write section for a long time.
+    private void noteBlockedTime(final long startNanos, final int buffers) {
+        final long blockedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+        if (blockedMs >= BLOCKED_WARNING_MS) {
+            LOGGER.log(Level.WARNING,
+                    "Applying a replicated batch of %d buffers blocked application graph reads for %d ms"
+                            .formatted(buffers, blockedMs));
+        }
     }
 
     /// Latches a materialization-phase overrun unless the phase already ended.
@@ -347,7 +354,7 @@ final class ApplyWorker {
     ///
     /// The populated prefix holds the batch; slots past it are always
     /// `null` or zero. Grows to the largest batch seen and stays there, so
-    /// the steady-state apply path allocates nothing.
+    /// the drain itself allocates nothing after warm-up.
     static final class Drain {
         ByteBuffer[] buffers = new ByteBuffer[16];
         ByteBuffer[] views = new ByteBuffer[0];

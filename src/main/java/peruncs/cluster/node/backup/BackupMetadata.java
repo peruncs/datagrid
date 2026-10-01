@@ -44,12 +44,12 @@ public record BackupMetadata(
         UUID nodeId,
         UUID backupId,
         long digest) {
-        /// Sentinel for an unknown numeric identity, sequence, or digest.
+    /// Sentinel for an unknown numeric identity, sequence, or digest.
     public static final long UNKNOWN = -1L;
 
-        /// Orders backups oldest first: replication sequence when known, the
-        /// creation timestamp as the fallback, and the random backup id to
-        /// break exact ties deterministically.
+    /// Orders backups oldest first: replication sequence when known, the
+    /// creation timestamp as the fallback, and the random backup id to
+    /// break exact ties deterministically.
     ///
     /// Backups carrying a known sequence sort after sequence-less backups, so
     /// a mixed volume never interleaves the two ordering domains
@@ -62,10 +62,10 @@ public record BackupMetadata(
                             : backup.timestamp())
                     .thenComparing(BackupMetadata::backupId);
 
-        /// Orders backups newest first, the reverse of [OLDEST_FIRST].
+    /// Orders backups newest first, the reverse of [OLDEST_FIRST].
     public static final Comparator<BackupMetadata> NEWEST_FIRST = OLDEST_FIRST.reversed();
 
-        /// Validates the backup identity.
+    /// Validates the backup identity.
     public BackupMetadata {
         if (timestamp < 0L) {
             throw new IllegalArgumentException("timestamp must not be negative");
@@ -77,7 +77,7 @@ public record BackupMetadata(
         Objects.requireNonNull(backupId, "backupId");
     }
 
-        /// Creates a backup identity for a new publication.
+    /// Creates a backup identity for a new publication.
     ///
     /// The backup id is random, so two nodes publishing in the same
     /// millisecond still produce distinct archives. Generation fields come
@@ -105,7 +105,7 @@ public record BackupMetadata(
                 UNKNOWN);
     }
 
-        /// Returns a copy carrying the archived content digest.
+    /// Returns a copy carrying the archived content digest.
     ///
     /// @param digest CRC over the archived content
     /// @return copy with the digest set
@@ -116,7 +116,7 @@ public record BackupMetadata(
                 this.recordingPosition, this.nodeId, this.backupId, digest);
     }
 
-        /// Returns the comparison identity of this backup.
+    /// Returns the comparison identity of this backup.
     ///
     /// This is the view [Identity#matches] compares, so compatibility checks
     /// and post-restore validation share exactly one rule.
@@ -126,7 +126,7 @@ public record BackupMetadata(
         return new Identity(this.clusterId, this.storeGeneration, this.epoch, this.recordingId);
     }
 
-        /// Reports whether this backup may serve a node with the given identity.
+    /// Reports whether this backup may serve a node with the given identity.
     ///
     /// Every configured dimension must be present on the backup and agree. A
     /// backup from another cluster, generation, epoch, or recording — or one
@@ -151,7 +151,7 @@ public record BackupMetadata(
                 this.recordingId, this.logicalSequence, this.recordingPosition, this.fencingToken, this.nodeId);
     }
 
-        /// The node identity a backup is checked against.
+    /// The node identity a backup is checked against.
     ///
     /// Dimensions are unknown (`null` for UUIDs, `-1` for numbers) only when
     /// the node has no configured replication identity. A configured dimension
@@ -167,14 +167,14 @@ public record BackupMetadata(
             UUID storeGeneration,
             long epoch,
             long recordingId) {
-                /// Creates an identity with every dimension unknown.
+        /// Creates an identity with every dimension unknown.
         ///
         /// @return fully unknown identity, which accepts every backup
         public static Identity unknown() {
             return new Identity(null, null, UNKNOWN, UNKNOWN);
         }
 
-                /// Derives the identity from a replication position.
+        /// Derives the identity from a replication position.
         ///
         /// The store generation, cluster, epoch, and recording come from the
         /// typed position. Anything unavailable stays unknown.
@@ -186,7 +186,7 @@ public record BackupMetadata(
                     position.clusterId(), position.storeGeneration(), position.epoch(), position.recordingId());
         }
 
-                /// Fills unknown dimensions from a fallback identity.
+        /// Fills unknown dimensions from a fallback identity.
         ///
         /// Known dimensions of this identity win; only unknown ones are taken
         /// from the fallback. Used to merge the replication provider's view
@@ -203,7 +203,7 @@ public record BackupMetadata(
                     this.recordingId >= 0L ? this.recordingId : fallback.recordingId);
         }
 
-                /// Reports whether this configured identity accepts a candidate.
+        /// Reports whether this configured identity accepts a candidate.
         ///
         /// Every known configured dimension must be present and equal on the
         /// candidate. This is the single compatibility rule used both to

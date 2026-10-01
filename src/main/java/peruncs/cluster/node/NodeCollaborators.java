@@ -2,29 +2,20 @@ package peruncs.cluster.node;
 
 import org.eclipse.serializer.exceptions.MissingFoundationPartException;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
-import org.eclipse.store.storage.types.StorageConnection;
 import org.eclipse.store.storage.types.StorageManager;
 import peruncs.cluster.api.ClusterStorageManager;
 import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.api.NodeRole;
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.node.aeron.AeronTransport;
 import peruncs.cluster.node.backup.*;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.cluster.node.replication.ReplicationLogRetention;
-import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.node.store.StorageLimitGate;
 import peruncs.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.cluster.node.store.StorageTaskExecutor;
 import peruncs.cluster.node.store.StorageUsageGauge;
-import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.StorageGraphCoordinator;
-import peruncs.cluster.storage.binary.ReplicationApplier;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
-import peruncs.cluster.storage.binary.StorageBinaryDataMerger;
 import peruncs.cluster.storage.io.AtomicFileWriter;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -46,27 +37,21 @@ import java.util.function.Supplier;
 /// or build resources a probing node never needs. The close path relies on
 /// the holders' initialization tracking to dispose only what was created.
 final class NodeCollaborators {
-    final LazyHolder<StorageBackupBackend> backupBackend;
     final LazyHolder<EmbeddedStorageFoundation<?>> embeddedStorageFoundation;
     final LazyHolder<NodeMaintenanceScheduler> maintenanceScheduler;
     final LazyHolder<StorageLimitGate> storageLimitGate;
-    final LazyHolder<BackupNodeManager> backupNodeManager;
-    final LazyHolder<ReplicationApplier> dataClient;
-    final LazyHolder<ReplicationPublisher> dataDistributor;
     final LazyHolder<StorageNodeHealthCheck> healthCheck;
     final NodeConfig nodeConfig;
     final LazyHolder<StorageTaskExecutor> storageTaskExecutor;
-    final LazyHolder<StorageBackupTaskExecutor> storageBackupTaskExecutor;
     final LazyHolder<StorageUsageGauge> storageUsageGauge;
     final LazyHolder<StorageNodeManager> storageNodeManager;
     final LazyHolder<Supplier<Object>> rootSupplier;
-    final LazyHolder<StorageBackupManager> storageBackupManager;
-    final LazyHolder<StorageBinaryDataMerger> dataMerger;
     final StorageGraphCoordinator graphCoordinator;
-    final LazyHolder<ClusterReplicationTransport> replicationTransport;
-    final LazyHolder<ReplicationPositionProvider> positionProvider;
-    final LazyHolder<ReplicationLogRetention> replicationRetention;
     final NodeRole nodeRole;
+    /// Backup backend, manager, task executor and backup-node manager.
+    final BackupCollaborators backup;
+    /// Replication transport, position provider, retention, reader client, merger and writer-side state.
+    final ReplicationCollaborators replication;
 
     /* Both managers are published to monitoring threads; the volatile
      * fields make the cross-thread observation safe even before a
@@ -97,27 +82,19 @@ final class NodeCollaborators {
                       final NodeConfig configuredConfig,
                       final StorageBackupBackend configuredBackupBackend,
                       final ClusterReplicationTransport configuredReplicationTransport) {
-        this.backupBackend = lazy(configuredBackupBackend, this::ensureBackupBackend);
         this.storageTaskExecutor = LazyHolder.of(this::ensureStorageTaskExecutor);
-        this.storageBackupTaskExecutor = LazyHolder.of(this::ensureStorageBackupTaskExecutor);
         this.maintenanceScheduler = LazyHolder.of(this::ensureNodeMaintenanceScheduler);
         this.storageLimitGate = LazyHolder.of(this::ensureStorageLimitGate);
-        this.replicationTransport = lazy(configuredReplicationTransport, this::ensureClusterReplicationTransport);
-        this.dataMerger = LazyHolder.of(this::ensureStorageBinaryDataMerger);
-        this.storageBackupManager = LazyHolder.of(this::ensureStorageBackupManager);
         this.rootSupplier = lazy(configuredRoot, this::ensureRootSupplier);
         this.embeddedStorageFoundation = lazy(configuredFoundation, this::ensureEmbeddedStorageFoundation);
-        this.backupNodeManager = LazyHolder.of(this::ensureBackupNodeManager);
-        this.dataClient = LazyHolder.of(this::ensureReplicationApplier);
-        this.dataDistributor = LazyHolder.of(this::ensureDataDistributor);
         this.healthCheck = LazyHolder.of(this::ensureStorageNodeHealthCheck);
         this.nodeConfig = configuredConfig == null ? NodeConfig.fromEnvironment() : configuredConfig;
         this.graphCoordinator = new StorageGraphCoordinator(this.nodeConfig.timeouts().graphDrain().toMillis());
         this.storageUsageGauge = LazyHolder.of(this::ensureStorageUsageGauge);
         this.storageNodeManager = LazyHolder.of(this::ensureStorageNodeManager);
-        this.positionProvider = LazyHolder.of(this::ensureReplicationPositionProvider);
-        this.replicationRetention = LazyHolder.of(this::ensureReplicationLogRetention);
         this.nodeRole = this.nodeConfig.role();
+        this.backup = new BackupCollaborators(this, configuredBackupBackend);
+        this.replication = new ReplicationCollaborators(this, configuredReplicationTransport);
     }
 
     private static <T> LazyHolder<T> lazy(final T configured, final Supplier<? extends T> factory) {
@@ -171,24 +148,7 @@ final class NodeCollaborators {
     /// @param directory directory to inspect
     /// @return `true` when the directory does not exist or is empty
     static boolean isMissingOrEmpty(final Path directory) {
-        if (!Files.isDirectory(directory)) {
-            return true;
-        }
-        try (var entries = Files.list(directory)) {
-            return entries.noneMatch(entry -> !entry.getFileName().toString().equals("writer.lock"));
-        } catch (final IOException failure) {
-            throw new NodeException("Cannot inspect storage directory %s".formatted(directory), failure);
-        }
-    }
-
-    /// Creates the configured backup backend.
-    ///
-    /// @return backup backend
-    private StorageBackupBackend ensureBackupBackend() {
-        return FilesystemVolumeBackupBackend.create(
-                this.nodeConfig.backup().volume().toAbsolutePath().normalize(),
-                this.nodeConfig.operations()
-        );
+        return AtomicFileWriter.isMissingOrEmptyStore(directory);
     }
 
     /// Creates the storage task executor.
@@ -196,18 +156,10 @@ final class NodeCollaborators {
     /// @return storage task executor
     private StorageTaskExecutor ensureStorageTaskExecutor() {
         if (this.nodeRole == NodeRole.BACKUP_READER) {
-            return this.getStorageBackupTaskExecutor();
+            return this.backup.taskExecutor.get();
         }
         return StorageTaskExecutor.create(this.clusterStorageManager,
                 this.nodeConfig.operations().storageCheckCloseTimeout());
-    }
-
-    /// Creates the backup task executor.
-    ///
-    /// @return backup task executor
-    private StorageBackupTaskExecutor ensureStorageBackupTaskExecutor() {
-        return StorageBackupTaskExecutor.create(this.clusterStorageManager, this.getStorageBackupManager(),
-                this.nodeConfig.backup().closeTimeout().toMillis(), this.nodeConfig.operations());
     }
 
     /// Creates the node maintenance scheduler.
@@ -226,50 +178,9 @@ final class NodeCollaborators {
         return StorageLimitGate.create(limitBytes);
     }
 
-    /// Creates the Aeron replication transport, or a no-op transport when disabled.
-    ///
-    /// @return replication transport
-    private ClusterReplicationTransport ensureClusterReplicationTransport() {
-        return switch (this.nodeConfig.replicationTransport()) {
-            case NONE -> ClusterReplicationTransport.noOp();
-            case AERON -> new AeronTransport(this.nodeConfig);
-        };
-    }
-
-    /// Creates the replication position provider.
-    ///
-    /// @return position provider
-    private ReplicationPositionProvider ensureReplicationPositionProvider() {
-        return this.getClusterReplicationTransport().positionProvider();
-    }
-
-    /// Creates the replication retention policy.
-    ///
-    /// @return retention policy
-    private ReplicationLogRetention ensureReplicationLogRetention() {
-        return this.getClusterReplicationTransport().retention();
-    }
-
     /// Returns the configured storage root, defaulting to a node-local directory.
     Path storageParentPath() {
         return this.nodeConfig.storage().root().toAbsolutePath().normalize();
-    }
-
-    /// Creates the storage backup manager.
-    ///
-    /// @return storage backup manager
-    private StorageBackupManager ensureStorageBackupManager() {
-        final Supplier<ReplicationPosition> positionProvider = this.getReplicationApplier()::position;
-
-        return StorageBackupManager.create(
-                this.clusterStorageManager,
-                this.nodeConfig.backup().kept(),
-                this.getStorageBackupBackend(),
-                positionProvider,
-                this.getReplicationApplier(),
-                this.getReplicationLogRetention(),
-                this.nodeConfig.operations()
-        );
     }
 
     /// Returns the configured root supplier.
@@ -286,41 +197,15 @@ final class NodeCollaborators {
         return EmbeddedStorageFoundation.New();
     }
 
-    /// Creates the backup node manager.
-    ///
-    /// @return backup node manager
-    private BackupNodeManager ensureBackupNodeManager() {
-        return BackupNodeManager.create(
-                this.getStorageBackupTaskExecutor(),
-                this.getReplicationApplier(),
-                this.clusterStorageManager,
-                this.getStorageUsageGauge()::readUsedDiskSpaceBytes,
-                this.hasReplicationMark()
-        );
-    }
-
-    /// Creates the replication data client.
-    ///
-    /// The merger receives replicated binaries directly; it stays owned
-    /// by this assembly, which disposes it on close.
-    ///
-    /// @return replication data client
-    private ReplicationApplier ensureReplicationApplier() {
-        return this.getClusterReplicationTransport().clientFromMark(
-                this.getStorageBinaryDataMerger(),
-                this.getClusterReplicationTransport().replicationMark()
-        );
-    }
-
     /// Creates the storage node health check.
     ///
     /// @return storage health check
     private StorageNodeHealthCheck ensureStorageNodeHealthCheck() {
         return StorageNodeHealthCheck.create(
                 this.clusterStorageManager,
-                this.getClusterReplicationTransport().health(
+                this.replication.transport.get().health(
                         () -> this.clusterStorageManager.isRunning() && !this.clusterStorageManager.isStartingUp(),
-                        this.getReplicationApplier()
+                        this.replication.applier.get()
                 ),
                 () -> this.getNodeMaintenanceScheduler().failure() == null
         );
@@ -344,54 +229,13 @@ final class NodeCollaborators {
     private StorageNodeManager ensureStorageNodeManager() {
         final boolean replicationEnabled = this.hasReplicationMark();
         return StorageNodeManager.create(new StorageNodeManager.Configuration(
-                this.getReplicationPublisher(),
                 this.getStorageTaskExecutor(),
-                this.getReplicationApplier(),
+                this.replication.applier.get(),
                 this.getStorageNodeHealthCheck(),
                 this.getStorageUsageGauge()::readUsedDiskSpaceBytes,
-                this.getReplicationPositionProvider(),
+                this.replication.positionProvider.get(),
                 replicationEnabled,
                 this.nodeRole,
-                this.graphCoordinator));
-    }
-
-    /// Creates the configured replication publisher.
-    ///
-    /// @return replication publisher
-    private ReplicationPublisher ensureDataDistributor() {
-        return ReplicationPublisher.Caching(
-                this.getClusterReplicationTransport().distributor()
-        );
-    }
-
-    /// Creates the binary merger with configured limits.
-    ///
-    /// @return binary merger
-    private StorageBinaryDataMerger ensureStorageBinaryDataMerger() {
-        final StorageConnection replicationStorage = this.embeddedStorageManager != null
-                ? this.embeddedStorageManager
-                : this.clusterStorageManager;
-        if (replicationStorage == null) {
-            throw new NodeException(
-                    "cannot create the replication merger before embedded storage has started");
-        }
-        final var defaults = StorageBinaryDataMerger.Configuration.create(
-                this.getEmbeddedStorageFoundation().getConnectionFoundation(),
-                replicationStorage,
-                this.graphCoordinator::write,
-                this.graphCoordinator);
-        return StorageBinaryDataMerger.create(new StorageBinaryDataMerger.Configuration(
-                defaults.foundation(),
-                defaults.storage(),
-                defaults.graphUpdater(),
-                this.nodeConfig.timeouts().mergerCache().toMillis(),
-                this.nodeConfig.limits().applyQueueBytes(),
-                this.nodeConfig.limits().applyQueueMaxBytes(),
-                this.nodeConfig.limits().bufferPoolRetainedBytes(),
-                this.nodeConfig.timeouts().applyBudget().toMillis(),
-                defaults.disposeOrderlyTimeoutMs(),
-                defaults.disposeInterruptTimeoutMs(),
-                this.nodeConfig.limits().maxValidatedIndexObjects(),
                 this.graphCoordinator));
     }
 
@@ -405,8 +249,8 @@ final class NodeCollaborators {
     /// @return a new backup restore policy
     BackupRestorePolicy createBackupRestorePolicy() {
         return new BackupRestorePolicy(
-                this.getClusterReplicationTransport(),
-                this.getReplicationPositionProvider(),
+                this.replication.transport.get(),
+                this.replication.positionProvider.get(),
                 new BackupRestorePolicy.RestoreActions(this::storageParentPath, this::deleteDirectory),
                 this.nodeRole.canWrite());
     }
@@ -430,7 +274,7 @@ final class NodeCollaborators {
     ///
     /// @return `true` when the configured replication transport is Aeron
     boolean hasReplicationMark() {
-        return this.getClusterReplicationTransport().replicationMark() != null;
+        return this.replication.transport.get().replicationMark() != null;
     }
 
     /// Deletes a directory tree after checking that the path is safe to delete.
@@ -443,16 +287,8 @@ final class NodeCollaborators {
         AtomicFileWriter.deleteDirectory(path);
     }
 
-    StorageBackupBackend getStorageBackupBackend() {
-        return this.backupBackend.get();
-    }
-
     private StorageTaskExecutor getStorageTaskExecutor() {
         return this.storageTaskExecutor.get();
-    }
-
-    StorageBackupTaskExecutor getStorageBackupTaskExecutor() {
-        return this.storageBackupTaskExecutor.get();
     }
 
     NodeMaintenanceScheduler getNodeMaintenanceScheduler() {
@@ -463,32 +299,12 @@ final class NodeCollaborators {
         return this.storageLimitGate.get();
     }
 
-    ClusterReplicationTransport getClusterReplicationTransport() {
-        return this.replicationTransport.get();
-    }
-
-    StorageBackupManager getStorageBackupManager() {
-        return this.storageBackupManager.get();
-    }
-
     Supplier<Object> getRootSupplier() {
         return this.rootSupplier.get();
     }
 
     EmbeddedStorageFoundation<?> getEmbeddedStorageFoundation() {
         return this.embeddedStorageFoundation.get();
-    }
-
-    BackupNodeManager getBackupNodeManager() {
-        return this.backupNodeManager.get();
-    }
-
-    ReplicationApplier getReplicationApplier() {
-        return this.dataClient.get();
-    }
-
-    ReplicationPublisher getReplicationPublisher() {
-        return this.dataDistributor.get();
     }
 
     private StorageNodeHealthCheck getStorageNodeHealthCheck() {
@@ -507,15 +323,4 @@ final class NodeCollaborators {
         return this.storageNodeManager.get();
     }
 
-    private StorageBinaryDataMerger getStorageBinaryDataMerger() {
-        return this.dataMerger.get();
-    }
-
-    ReplicationPositionProvider getReplicationPositionProvider() {
-        return this.positionProvider.get();
-    }
-
-    private ReplicationLogRetention getReplicationLogRetention() {
-        return this.replicationRetention.get();
-    }
 }

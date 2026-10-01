@@ -43,7 +43,7 @@ public final class AeronEnvelopeBenchmark {
         }
     }
 
-        /// Measures one payload size using the same per-chunk framing as the writer.
+    /// Measures one payload size using the same per-chunk framing as the writer.
     static BenchmarkResult measure(
             final UUID clusterId,
             final long epoch,
@@ -93,7 +93,7 @@ public final class AeronEnvelopeBenchmark {
         final long wireNonce = AeronReplicationEnvelope.defaultWireNonce(clusterId);
         for (int chunkIndex = 0, offset = 0; chunkIndex < chunkCount; chunkIndex++) {
             final int length = Math.min(chunkSize, payloadLength - offset);
-            AeronReplicationEnvelope.encode(target, 0, clusterId, epoch, 1L, wireNonce, sequence,
+            AeronReplicationEnvelopeTestSupport.encodeFrame(target, 0, clusterId, epoch, 1L, wireNonce, sequence,
                     AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength, chunkIndex, chunkCount, offset, 0,
                     payload, offset, length, checksum);
             offset += length;

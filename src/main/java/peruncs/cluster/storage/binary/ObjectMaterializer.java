@@ -17,7 +17,7 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
     private final PersistenceManager<?> persistenceManager;
     private final Set_long oids = Set_long.New();
 
-        /// Creates a materializer for one persistence manager.
+    /// Creates a materializer for one persistence manager.
     ///
     /// @param persistenceManager manager that owns the target graph
     ObjectMaterializer(final PersistenceManager<?> persistenceManager) {
@@ -28,7 +28,7 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
         this.persistenceManager = persistenceManager;
     }
 
-        /// Collects one entity's object id, or fails on a malformed entity header.
+    /// Collects one entity's object id, or fails on a malformed entity header.
     ///
     /// A truncated header means the containing batch is corrupt: the entity
     /// data cannot be skipped without silently dropping the rest of the
@@ -78,7 +78,7 @@ class ObjectMaterializer implements BinaryEntityRawDataAcceptor {
         return true;
     }
 
-        /// Materializes each object collected by [#acceptEntityData(long, long)].
+    /// Materializes each object collected by [#acceptEntityData(long, long)].
     void materialize() {
         this.materialize(this.persistenceManager.createLoader());
     }

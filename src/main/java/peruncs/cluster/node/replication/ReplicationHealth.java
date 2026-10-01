@@ -14,46 +14,46 @@ import peruncs.cluster.errors.NodeException;
 /// health probes and the exported [NodeStatus]
 /// can never drift apart.
 public interface ReplicationHealth extends AutoCloseable {
-        /// Returns true only when the node may serve the configured replication role.
+    /// Returns true only when the node may serve the configured replication role.
     ///
     /// @return `true` when ready
     /// @throws NodeException if readiness cannot be checked
     boolean isReady() throws NodeException;
 
-        /// Returns true when the provider is operating without a fatal condition.
+    /// Returns true when the provider is operating without a fatal condition.
     ///
     /// @return `true` when healthy
     boolean isHealthy();
 
-        /// Returns local Archive usable bytes, or `-1` when not applicable/known.
+    /// Returns local Archive usable bytes, or `-1` when not applicable/known.
     ///
     /// @return usable bytes
     default long archiveUsableSpaceBytes() {
         return -1L;
     }
 
-        /// Returns the last durable writer position, or `-1` when unavailable.
+    /// Returns the last durable writer position, or `-1` when unavailable.
     ///
     /// @return durable position
     default long writerDurablePosition() {
         return -1L;
     }
 
-        /// Returns the last durable writer sequence, or `-1` when unavailable.
+    /// Returns the last durable writer sequence, or `-1` when unavailable.
     ///
     /// @return durable sequence
     default long writerDurableSequence() {
         return -1L;
     }
 
-        /// Returns the locally applied reader sequence, or `-1` when unavailable.
+    /// Returns the locally applied reader sequence, or `-1` when unavailable.
     ///
     /// @return applied sequence
     default long appliedSequence() {
         return -1L;
     }
 
-        /// Returns the current health state.
+    /// Returns the current health state.
     ///
     /// A provider whose readiness probe throws is reported as
     /// [ReplicationState#FAILED] and the failure is logged at debug level so

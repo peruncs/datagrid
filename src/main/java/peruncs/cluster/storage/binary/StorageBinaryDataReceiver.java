@@ -3,6 +3,7 @@ package peruncs.cluster.storage.binary;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 /// Receives complete Store binaries and type dictionaries from a provider.
 ///
@@ -18,14 +19,16 @@ public interface StorageBinaryDataReceiver {
     /// @param minimumCapacity required capacity in bytes
     /// @return writable native buffer with at least the requested capacity
     default ByteBuffer allocateNativeBuffer(final int minimumCapacity) {
-        return NativeMemory.allocateDirect(minimumCapacity);
+        return ByteBuffer.allocateDirect(minimumCapacity).order(ByteOrder.nativeOrder());
     }
 
     /// Releases native storage acquired for a transaction for this receiver.
     ///
+    /// The default leaves the buffer to the garbage collector; a receiver that pools or
+    /// scopes its buffers overrides this together with [#allocateNativeBuffer(int)].
+    ///
     /// @param buffer native buffer to release
     default void releaseNativeBuffer(final ByteBuffer buffer) {
-        NativeMemory.releaseDirect(buffer);
     }
 
     /// Returns a terminal receiver failure, or `null` while healthy.

@@ -1,6 +1,4 @@
-package peruncs.cluster.node.backup;
-
-import peruncs.cluster.errors.NodeException;
+package peruncs.cluster.errors;
 
 /// Signals that an archive is conclusively incomplete or corrupt.
 ///
@@ -11,7 +9,7 @@ public final class IncompleteArchiveException extends NodeException {
     /// Creates an incomplete-archive failure.
     ///
     /// @param message failure message
-    IncompleteArchiveException(final String message) {
+    public IncompleteArchiveException(final String message) {
         super(message);
     }
 
@@ -19,7 +17,7 @@ public final class IncompleteArchiveException extends NodeException {
     ///
     /// @param message failure message
     /// @param cause   evidence of truncation or corruption
-    IncompleteArchiveException(final String message, final Throwable cause) {
+    public IncompleteArchiveException(final String message, final Throwable cause) {
         super(message, cause);
     }
 }

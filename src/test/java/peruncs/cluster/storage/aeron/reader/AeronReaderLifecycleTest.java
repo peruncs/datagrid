@@ -211,7 +211,7 @@ class AeronReaderLifecycleTest {
         assertEquals(2, polls.get());
     }
 
-        /// Verifies shared polling loop reports archive tail timeout.
+    /// Verifies shared polling loop reports archive tail timeout.
     @Test
     void sharedPollingLoopReportsArchiveTailTimeout() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -225,7 +225,7 @@ class AeronReaderLifecycleTest {
         assertTrue(timedOut.get());
     }
 
-        /// Verifies a timeout callback failure still publishes the stopped state.
+    /// Verifies a timeout callback failure still publishes the stopped state.
     @Test
     void pollingLoopClearsActiveWhenTimeoutCallbackFails() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -243,7 +243,7 @@ class AeronReaderLifecycleTest {
         assertFalse(active.get());
     }
 
-        /// Verifies an assembler failure stops polling before another fragment is consumed.
+    /// Verifies an assembler failure stops polling before another fragment is consumed.
     @Test
     void pollingLoopStopsWhenAssemblerFails() {
         final AtomicBoolean active = new AtomicBoolean(true);
@@ -255,8 +255,8 @@ class AeronReaderLifecycleTest {
         assertEquals(0, polls.get());
     }
 
-        /// Verifies the polling loop paces with the supplied strategy, so the
-        /// reader's configured retry policy actually drives idle behavior.
+    /// Verifies the polling loop paces with the supplied strategy, so the
+    /// reader's configured retry policy actually drives idle behavior.
     @Test
     void pollingLoopUsesTheSuppliedIdleStrategy() {
         final AtomicBoolean active = new AtomicBoolean(true);

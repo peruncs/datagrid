@@ -15,7 +15,6 @@ import peruncs.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.cluster.node.replication.ReplicationLogRetention;
 import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
 
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
@@ -267,7 +266,7 @@ class AeronWriterReaderSoakIT {
                                 controlPort, livePort, watermarkPort, retentionReaders)), retentionReaders)) {
             final ClusterReplicationTransport writerTransport = writerHandle.transport();
             writerTransport.positionProvider().init();
-            final ReplicationPublisher distributor = writerTransport.distributor();
+            final Distribution distributor = new Distribution();
             final Random seedRandom = new Random(seed);
             final IndexRoot initial = new IndexRoot();
             initial.articles = GigaMap.New();
@@ -2518,7 +2517,7 @@ class AeronWriterReaderSoakIT {
         }
     }
 
-        /// The soak writer's restartable state: transport, Store manager, and
+    /// The soak writer's restartable state: transport, Store manager, and
     /// the live root, swappable as one unit.
     ///
     /// Writer threads resolve the pair under the soak's mutation lock before
@@ -2585,7 +2584,7 @@ class AeronWriterReaderSoakIT {
             AeronStoreIntegrationIT.store(this.transport, this.manager, instances);
         }
 
-            /// Stops the Store and releases the transport, then brings both back
+        /// Stops the Store and releases the transport, then brings both back
         /// with the same identities: the new transport extends the recording
         /// and the reloaded Store graph keeps every previously stored entity.
         /// An abrupt restart kills the transport before the Store quiesces (a
@@ -2604,7 +2603,7 @@ class AeronWriterReaderSoakIT {
                     AeronStoreIntegrationIT.properties(this.nodeRoot, this.clusterId, this.nodeId,
                             this.generation, "writer", -1L,
                             this.controlPort, this.livePort, this.watermarkPort, this.retentionReaders));
-            final ReplicationPublisher distributor = this.transport.distributor();
+            final Distribution distributor = new Distribution();
             final EmbeddedStorageManager restarted = AeronStoreIntegrationIT.startExistingIndex(
                     this.storePath, distributor, this.transport);
             this.manager = restarted;
@@ -2650,7 +2649,7 @@ class AeronWriterReaderSoakIT {
             final ReplicationPosition snapshot = this.transport.positionProvider().latest();
             AeronStoreIntegrationIT.delete(snapshotDir);
             AeronStoreIntegrationIT.copyDirectory(this.storePath, snapshotDir);
-            final ReplicationPublisher distributor = this.transport.distributor();
+            final Distribution distributor = new Distribution();
             final EmbeddedStorageManager restarted = AeronStoreIntegrationIT.startExistingIndex(
                     this.storePath, distributor, this.transport);
             this.manager = restarted;

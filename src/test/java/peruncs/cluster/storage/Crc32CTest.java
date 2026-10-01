@@ -22,7 +22,7 @@ class Crc32cTest {
         assertThrows(IllegalArgumentException.class, () -> context.compute(buffer, 5, 2));
     }
 
-        /// A caller-owned accumulator must start each message from zero.
+    /// A caller-owned accumulator must start each message from zero.
     @Test
     void accumulatorResetsBetweenMessages() {
         final var first = Crc32C.accumulator();
@@ -34,7 +34,7 @@ class Crc32cTest {
         assertEquals(Crc32C.compute(new byte[]{4, 5}), (int) second.getValue());
     }
 
-        /// The reuse overload resets a dirty accumulator instead of continuing it.
+    /// The reuse overload resets a dirty accumulator instead of continuing it.
     @Test
     void reuseOverloadResetsADirtyAccumulator() {
         final byte[] bytes = new byte[]{9, 8, 7, 6, 5};
@@ -45,7 +45,7 @@ class Crc32cTest {
         assertEquals(Crc32C.compute(bytes, 1, 3), Crc32C.compute(bytes, 1, 3, dirty));
     }
 
-        /// The whole-array overload matches the explicit range overload.
+    /// The whole-array overload matches the explicit range overload.
     @Test
     void wholeArrayMatchesExplicitRange() {
         final byte[] bytes = new byte[]{4, 5, 6};
@@ -53,7 +53,7 @@ class Crc32cTest {
         assertEquals(Crc32C.compute(bytes, 1, 2, Crc32C.accumulator()), Crc32C.compute(bytes, 1, 2));
     }
 
-        /// Out-of-range slices and a null reuse accumulator are rejected.
+    /// Out-of-range slices and a null reuse accumulator are rejected.
     @Test
     void rejectsInvalidRangeAndNullReuse() {
         final byte[] bytes = new byte[]{1, 2, 3};
@@ -63,7 +63,7 @@ class Crc32cTest {
         assertThrows(NullPointerException.class, () -> Crc32C.compute(bytes, 0, 3, null));
     }
 
-        /// Null input is rejected consistently instead of failing while reading its length.
+    /// Null input is rejected consistently instead of failing while reading its length.
     @Test
     void rejectsNullInput() {
         assertThrows(NullPointerException.class, () -> Crc32C.compute(null));

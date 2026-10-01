@@ -71,10 +71,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     private final AtomicBoolean watermarkRetryScheduled = new AtomicBoolean();
     private static final System.Logger LOGGER = System.getLogger(AeronArchiveRetention.class.getName());
 
-        /// Default bound for one queued retention command, in milliseconds.
-    /// Archive segment purges run under the writer-paused fence and can take
-    /// a while on large histories; callers wait at most this long before the
-    /// wait itself fails.
+    /// Default bound of one queued retention command and of stopping the agent, in milliseconds.
     static final long DEFAULT_OPERATION_TIMEOUT_MILLIS = 60_000L;
 
     private final long operationTimeoutMillis;
@@ -127,14 +124,14 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         this.agent = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(Math.max(16, readers.size() * 2)),
                 task -> {
-                    final Thread thread = Thread.ofVirtual().name("datagrid-retention-agent").unstarted(task);
+                    final Thread thread = Thread.ofVirtual().name("peruncs-retention-agent").unstarted(task);
                     this.agentThread = thread;
                     return thread;
                 },
                 new ThreadPoolExecutor.AbortPolicy());
     }
 
-        /// Runs one retention command on the single agent thread.
+    /// Runs one retention command on the single agent thread.
     ///
     /// Calls already on the agent thread (nested retention calls) run
     /// directly; every other caller queues behind ongoing Archive work and
@@ -182,7 +179,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         return this.watermarkFailure.get();
     }
 
-        /// Runs one void retention command on the single agent thread.
+    /// Runs one void retention command on the single agent thread.
     private void onAgent(final Action operation) {
         this.<Void>onAgent(() -> {
             operation.execute();
@@ -248,6 +245,8 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             final long targetSequence = Math.min(quorumWatermark.sequence(), requested.sequence());
             this.requireWithinDurableBoundary(targetSequence, targetPosition);
             final long start = this.recordingPositions.startPosition().applyAsLong(activeRecordingId);
+            /* A reader watermark is the position a restart resumes at, so the segment that holds it
+             * is the oldest one that must survive. */
             final long boundary = AeronArchive.segmentFileBasePosition(start, targetPosition,
                     this.termLength.getAsInt(), this.segmentLength.getAsInt());
             if (boundary <= start) {
@@ -279,7 +278,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         }
     }
 
-        /// Permanently retires a reader, deleting its quorum entry and state.
+    /// Permanently retires a reader, deleting its quorum entry and state.
     ///
     /// @param readerId permanently retired reader identity
     @Override
@@ -338,7 +337,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                 position.recordingId(), position.sequence(), position.prepareStartPosition()));
     }
 
-        /// Accepts a watermark already decoded by the Aeron control subscription.
+    /// Accepts a watermark already decoded by the Aeron control subscription.
     void recordReaderWatermark(final AeronReaderWatermark watermark) {
         this.onAgent(() -> this.recordReaderWatermarkOnAgent(watermark));
     }
@@ -464,21 +463,21 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         this.closed = true;
         if (this.cleanupComplete) return;
         /* Queued commands drain first: shutdown() lets the running and queued
-         * retention work finish, so no purge is abandoned mid-decision. */
+         * retention work finish, so no purge is abandoned mid-decision. The
+         * agent is never interrupted: an Archive RPC is not interrupt-safe, and
+         * a close that cannot confirm termination must fail so the owner keeps
+         * the Aeron runtime open beneath the still-running operation. */
         this.agent.shutdown();
         try {
-            if (!this.agent.awaitTermination(30, TimeUnit.SECONDS)) {
-                this.agent.shutdownNow();
-                if (!this.agent.awaitTermination(5, TimeUnit.SECONDS)) {
-                    LOGGER.log(System.Logger.Level.WARNING,
-                            "Aeron retention agent did not terminate after shutdown");
-                    return;
-                }
+            if (!this.agent.awaitTermination(this.operationTimeoutMillis, TimeUnit.MILLISECONDS)) {
+                throw new ReplicationUnavailableException(
+                        "Aeron retention agent did not stop within %d ms; an Archive operation may still be running"
+                                .formatted(this.operationTimeoutMillis));
             }
         } catch (final InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            this.agent.shutdownNow();
-            return;
+            throw new ReplicationUnavailableException("interrupted while stopping the Aeron retention agent",
+                    interrupted);
         }
         this.quorum.close();
         this.pendingWatermarks.clear();
@@ -628,7 +627,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
         }
     }
 
-        /// Restores durable quorum state only once the watermark channel is usable.
+    /// Restores durable quorum state only once the watermark channel is usable.
     private void ensureStateRestored() {
         if (!this.stateRestored && this.watermarkDeliveryAvailable.getAsBoolean()) {
             this.restoreState();
@@ -697,7 +696,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
                current.position() > this.persistedBoundary.position();
     }
 
-        /// Minimal Archive position view required by retention decisions.
+    /// Minimal Archive position view required by retention decisions.
     record RecordingPositions(LongUnaryOperator startPosition, LongUnaryOperator stopPosition,
                               LongUnaryOperator recordingPosition) {
         RecordingPositions {

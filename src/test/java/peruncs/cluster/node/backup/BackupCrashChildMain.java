@@ -64,8 +64,8 @@ final class BackupCrashChildMain {
          * before the hook is bound still observes it, because the lookup
          * happens inside createBackup at the crash point itself. */
         FaultInjection.runWithHook((name, sequence, path) -> {
-            if (point.equals(name)) {
-                mark(control.resolve("milestone.reached"), name);
+            if (point.equals(name.name())) {
+                mark(control.resolve("milestone.reached"), name.name());
                 awaitParent(control.resolve("release"));
             }
         }, () -> backend.createBackup(new TestStorageConnection(), BackupMetadata.create(11L, false, CURSOR)));

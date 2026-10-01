@@ -115,6 +115,55 @@ class ClusterIndexCommitPrefilterTest {
         assertTrue(failure.getMessage().contains("PERUNCS_INDEX_VALIDATION_MAX_OBJECTS"));
     }
 
+    /// Mutual recursion must not cache a false "index-free" answer, whichever type is asked first.
+    @Test
+    void cyclicTypesReachingAnIndexAreRelevantInEitherQueryOrder() {
+        for (final boolean askOwnerFirst : new boolean[]{true, false}) {
+            final PersistenceTypeDictionary dictionary = unknownTypeDictionary();
+            registerType(dictionary, 1L, CycleOwner.class, member("b", CycleMember.class), member("map", GigaMap.class));
+            registerType(dictionary, 2L, CycleMember.class, member("owner", CycleOwner.class));
+            final ClusterIndexValidation.CommitPrefilterScratch scratch =
+                    new ClusterIndexValidation.CommitPrefilterScratch();
+            if (askOwnerFirst) {
+                assertTrue(ClusterIndexValidation.commitTouchesIndexes(binary(1), dictionary, scratch));
+            }
+            assertTrue(ClusterIndexValidation.commitTouchesIndexes(binary(2), dictionary, scratch),
+                    "the member type reaches an index through the cycle (owner first: " + askOwnerFirst + ")");
+            assertTrue(ClusterIndexValidation.commitTouchesIndexes(binary(1), dictionary, scratch));
+        }
+    }
+
+    /// A self-recursive plain type stays index-free, so ordinary linked data is not scanned.
+    @Test
+    void selfRecursivePlainTypesStayIndexFree() {
+        final PersistenceTypeDictionary dictionary = unknownTypeDictionary();
+        registerType(dictionary, 1L, PlainNode.class, member("next", PlainNode.class), member("value", String.class));
+        assertFalse(ClusterIndexValidation.commitTouchesIndexes(binary(1), dictionary,
+                new ClusterIndexValidation.CommitPrefilterScratch()));
+    }
+
+    static final class CycleOwner {
+    }
+
+    static final class CycleMember {
+    }
+
+    static final class PlainNode {
+    }
+
+    private static PersistenceTypeDefinitionMember member(final String name, final Class<?> type) {
+        return PersistenceTypeDefinitionMemberFieldGenericSimple.New(type.getName(), null, name, type, true, 8L, 8L);
+    }
+
+    private static void registerType(final PersistenceTypeDictionary dictionary, final long typeId,
+                                     final Class<?> type, final PersistenceTypeDefinitionMember... fields) {
+        final var members = EqHashEnum.<PersistenceTypeDefinitionMember>New(
+                PersistenceTypeDescriptionMember.identityHashEqualator());
+        for (final PersistenceTypeDefinitionMember field : fields) members.add(field);
+        dictionary.registerTypeDefinition(PersistenceTypeDefinition.New(
+                typeId, type.getName(), type.getName(), type, members, members));
+    }
+
     private static boolean touchesIndexes(final Class<?> type) {
         return ClusterIndexValidation.commitTouchesIndexes(binary(1), dictionary(type),
                 new ClusterIndexValidation.CommitPrefilterScratch());

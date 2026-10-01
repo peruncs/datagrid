@@ -49,10 +49,10 @@ class AeronReaderWatermarkTest {
         final byte[] expected = AeronReaderWatermark.of(
                 READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096).encode();
         final byte[] actual = new byte[AeronReaderWatermark.ENCODED_LENGTH];
-        AeronReaderWatermark.encodeInto(actual, READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096);
+        AeronReaderWatermark.of(READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096).encodeInto(actual);
         assertArrayEquals(expected, actual);
-        assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.encodeInto(
-                new byte[91], READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096));
+        assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.of(
+                READER_ONE, CLUSTER, GENERATION, 3, 17, 42, 4_096).encodeInto(new byte[91]));
     }
 
     /// Verifies buffer decoding at an offset preserves every identity field.
@@ -74,7 +74,7 @@ class AeronReaderWatermarkTest {
         assertEquals(AeronReaderWatermark.decode(encoded), decoded);
     }
 
-        /// A long-lived caller-owned CRC scratch must compute one independent
+    /// A long-lived caller-owned CRC scratch must compute one independent
     /// CRC per frame: the second decode of a different watermark with the
     /// same scratch fails its CRC check if the one-shot path ever stops
     /// resetting the accumulator.
@@ -91,7 +91,7 @@ class AeronReaderWatermarkTest {
         assertEquals(42, AeronReaderWatermark.decode(scratch, new UnsafeBuffer(first), 0, first.length).sequence());
     }
 
-        /// Verifies decoding rejects truncated frames and frames with the wrong magic, version, or flags.
+    /// Verifies decoding rejects truncated frames and frames with the wrong magic, version, or flags.
     @Test
     void decodeRejectsTruncatedFramesAndWrongMagicOrVersion() {
         final byte[] encoded = AeronReaderWatermark.of(
@@ -140,7 +140,7 @@ class AeronReaderWatermarkTest {
         }
     }
 
-        /// Sequence values must remain incrementable by the writer and validator.
+    /// Sequence values must remain incrementable by the writer and validator.
     @Test
     void rejectsSequenceThatWouldOverflowNextReservation() {
         assertThrows(IllegalArgumentException.class, () -> new AeronReaderWatermark(
@@ -158,8 +158,6 @@ class AeronReaderWatermarkTest {
                 READER_ONE, CLUSTER, GENERATION, 3, 17, -2, 100));
         assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.of(
                 READER_ONE, CLUSTER, GENERATION, 3, 17, 1, -2));
-        assertThrows(IllegalArgumentException.class, () -> AeronReaderWatermark.encodeInto(
-                new byte[AeronReaderWatermark.ENCODED_LENGTH], READER_ONE, CLUSTER, GENERATION, 3, 17, -2, 100));
     }
 
     /// Verifies a quorum requires every reader and aggregates to the least advanced sequence and position.

@@ -18,26 +18,26 @@ public interface StorageNodeControl {
     /// @return `true` for the writer
     boolean isWriter();
 
-        /// Starts periodic storage checks.
+    /// Starts periodic storage checks.
     void startStorageChecks();
 
-        /// Reports whether storage checks are running.
+    /// Reports whether storage checks are running.
     ///
     /// @return `true` when checks are running
     boolean isRunningStorageChecks();
 
-        /// Reports whether the node can serve requests.
+    /// Reports whether the node can serve requests.
     ///
     /// @return `true` when the node is ready
     /// @throws NodeException if readiness cannot be determined
     boolean isReady() throws NodeException;
 
-        /// Reports whether the node and its transport are healthy.
+    /// Reports whether the node and its transport are healthy.
     ///
     /// @return `true` when the node is healthy
     boolean isHealthy();
 
-        /// Reads the current Store size.
+    /// Reads the current Store size.
     ///
     /// @return storage size in bytes
     /// @throws NodeException if the size cannot be read

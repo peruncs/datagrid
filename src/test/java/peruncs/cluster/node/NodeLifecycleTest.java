@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -90,7 +91,7 @@ class NodeLifecycleTest {
         assertThrows(IllegalStateException.class, foundation::startStorageManager);
     }
 
-        /// A failed start runs close on its way out, and that close must be
+    /// A failed start runs close on its way out, and that close must be
     /// terminal: the node never hands out a manager again, a later close is
     /// an idempotent no-op instead of a second teardown, and the raw Store
     /// opened before the failure is shut down rather than leaked.
@@ -118,7 +119,7 @@ class NodeLifecycleTest {
         assertDoesNotThrow(foundation::close, "a repeated close after a failed start is a no-op");
     }
 
-        /// A wrong-role probe is rejected before anything starts: no Store,
+    /// A wrong-role probe is rejected before anything starts: no Store,
     /// Aeron, recovery, or background threads may come up just to answer
     /// `IllegalStateException`. The provider below explodes on any property
     /// read beyond the role itself, so a start-first order cannot pass.
@@ -147,7 +148,7 @@ class NodeLifecycleTest {
                 NodeConfig.Setting.PROD_MODE.key(), "true"));
     }
 
-        /// A dev node owns neither role manager: the role accessors reject it
+    /// A dev node owns neither role manager: the role accessors reject it
     /// instead of manufacturing a manager the started node never created.
     @Test
     void devNodeExposesNoRoleManagers(@TempDir final Path storagePath) {
@@ -287,6 +288,45 @@ class NodeLifecycleTest {
         assertDoesNotThrow(lifecycle::close, "the retried close re-runs only the unfinished Store stage");
         assertFalse(delegate.isRunning(), "the raw Store must be down after the retried close");
         assertEquals(2, shutdownCalls.get(), "the Store stage was executed exactly twice, not skipped");
+    }
+
+    /// A failed Store shutdown must keep the writer process lock held until a retry succeeds.
+    @Test
+    void failedStoreShutdownKeepsTheWriterLockUntilTheRetrySucceeds(
+            @TempDir final Path storagePath, @TempDir final Path lockPath) throws Exception {
+        final NodeCollaborators collaborators = new NodeCollaborators(
+                Object::new,
+                EmbeddedStorageFoundation.New()
+                        .setConfiguration(StorageConfiguration.Builder()
+                                .setStorageFileProvider(Storage.FileProvider(storagePath))
+                                .createConfiguration()),
+                TestNodeConfig.local(storagePath, Map.of()));
+        final NodeLifecycle lifecycle = new NodeLifecycle(collaborators);
+        lifecycle.startStorageManager();
+        final var delegate = collaborators.embeddedStorageManager;
+        final AtomicInteger shutdownCalls = new AtomicInteger();
+        collaborators.embeddedStorageManager = (org.eclipse.store.storage.types.StorageManager)
+                java.lang.reflect.Proxy.newProxyInstance(
+                        NodeLifecycleTest.class.getClassLoader(),
+                        new Class<?>[]{org.eclipse.store.storage.types.StorageManager.class},
+                        (proxy, method, args) -> {
+                            if (method.getName().equals("shutdown") && shutdownCalls.getAndIncrement() == 0) {
+                                return Boolean.FALSE;
+                            }
+                            try {
+                                return method.invoke(delegate, args);
+                            } catch (final java.lang.reflect.InvocationTargetException failure) {
+                                throw failure.getTargetException();
+                            }
+                        });
+        lifecycle.adoptWriterLock(WriterProcessLock.acquire(lockPath));
+
+        assertThrows(RuntimeException.class, lifecycle::close);
+        assertThrows(RuntimeException.class, () -> WriterProcessLock.acquire(lockPath).close(),
+                "a failed close must not release the writer lock");
+        assertDoesNotThrow(lifecycle::close);
+        assertDoesNotThrow(() -> WriterProcessLock.acquire(lockPath).close(),
+                "a completed close releases the writer lock");
     }
 
     /// A failed application drain keeps the Store open until the active section exits.

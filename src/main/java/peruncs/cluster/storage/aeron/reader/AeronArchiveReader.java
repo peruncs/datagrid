@@ -5,6 +5,7 @@ import io.aeron.archive.client.*;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import org.agrona.concurrent.IdleStrategy;
 import org.eclipse.serializer.typing.Disposable;
+import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.ReplicationRetry;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
@@ -34,9 +35,9 @@ import java.util.function.Consumer;
 /// every failed attempt through [PersistentSubscriptionListener#onError] —
 /// is bounded by a per-incident budget of the configured reader stop timeout:
 /// while the incident lasts the replay makes no resolved progress, and once
-/// the budget expires the reader latches a typed [ReseedRequiredException]
-/// so the node fails closed with a RESEED_REQUIRED diagnosis instead of
-/// stalling silently or dying on a raw transport stack. Resolved progress or
+/// the budget expires the reader latches a typed [ReplicationUnavailableException]
+/// so the node fails closed instead of stalling silently or dying on a raw
+/// transport stack; the Store mark is intact, so a restart resumes from it. Resolved progress or
 /// reaching the live stream clears the incident and resets the budget.
 public final class AeronArchiveReader implements Disposable {
     /// Immutable setup for one Archive replay and live reader.
@@ -78,7 +79,7 @@ public final class AeronArchiveReader implements Disposable {
             StorageBinaryDataReceiver receiver,
             Consumer<CursorSnapshot> transactionResolved
     ) {
-        /// Validates required reader collaborators and recovered cursor bounds.
+    /// Validates required reader collaborators and recovered cursor bounds.
     public Configuration {
             Objects.requireNonNull(aeron, "aeron");
             Objects.requireNonNull(archiveContext, "archiveContext");
@@ -330,7 +331,7 @@ public final class AeronArchiveReader implements Disposable {
         }
     }
 
-        /// Creates a reader with the supplied Archive, live, and cursor setup.
+    /// Creates a reader with the supplied Archive, live, and cursor setup.
     /// The reader does not close the shared Aeron or Archive clients.
     ///
     /// @param configuration immutable reader configuration
@@ -362,7 +363,7 @@ public final class AeronArchiveReader implements Disposable {
         }
     }
 
-        /// Builds the subscription context for one replay attempt.
+    /// Builds the subscription context for one replay attempt.
     ///
     /// Shared by the initial create and by a mid-replay reconnect so both
     /// paths wire identical channels, stream ids, and Archive settings; only
@@ -386,7 +387,7 @@ public final class AeronArchiveReader implements Disposable {
                 .aeronArchiveContext(subscriptionArchiveContext);
     }
 
-        /// Reports Archive control-channel problems into the incident signal.
+    /// Reports Archive control-channel problems into the incident signal.
     ///
     /// The Archive client inside a [PersistentSubscription] self-heals a lost
     /// control channel by reconnecting forever; it never throws and only
@@ -413,7 +414,7 @@ public final class AeronArchiveReader implements Disposable {
         };
     }
 
-        /// Sets the next stop outcome unless a terminal outcome already won.
+    /// Sets the next stop outcome unless a terminal outcome already won.
     ///
     /// Every transition goes through here so a later event can never downgrade a
     /// reader that already failed, timed out, or closed to a cleaner-looking
@@ -426,7 +427,7 @@ public final class AeronArchiveReader implements Disposable {
         });
     }
 
-        /// Starts replay and live polling; repeated calls have no effect.
+    /// Starts replay and live polling; repeated calls have no effect.
     public synchronized void start() {
         this.seedingClosed = true;
         if (this.disposed || this.disposeRequested) {
@@ -466,7 +467,7 @@ public final class AeronArchiveReader implements Disposable {
          * idle), and AgentRunner's duty-cycle re-invocation would add a
          * second idling layer on top of the fragment-pull loop while this
          * thread must also bridge blockingly to the Store importer. */
-        this.thread = Thread.ofPlatform().daemon().name("datagrid-aeron-archive-reader").unstarted(this::run);
+        this.thread = Thread.ofPlatform().daemon().name("peruncs-archive-reader").unstarted(this::run);
         this.thread.start();
     }
 
@@ -505,7 +506,7 @@ public final class AeronArchiveReader implements Disposable {
         }
     }
 
-        /// Polls the current subscription, reconnecting once per Archive loss.
+    /// Polls the current subscription, reconnecting once per Archive loss.
     ///
     /// An [ArchiveException] escaping [PersistentSubscription#controlledPoll]
     /// never carries a replay-protocol verdict (those arrive through the
@@ -573,7 +574,7 @@ public final class AeronArchiveReader implements Disposable {
         }
     }
 
-        /// Tracks Archive control-channel incidents signalled by the subscription
+    /// Tracks Archive control-channel incidents signalled by the subscription
     /// listener and clears them on confirmed recovery.
     ///
     /// The Archive client self-heals a lost channel silently, so an incident
@@ -601,12 +602,12 @@ public final class AeronArchiveReader implements Disposable {
         }
     }
 
-        /// Latches the typed reseed failure once an incident outlives its budget.
+    /// Latches the typed reseed failure once an incident outlives its budget.
     private void failIfReconnectBudgetExpired() {
         if (this.reconnectDeadlineNanos != 0L && ReplicationRetry.expired(this.reconnectDeadlineNanos)) {
-            throw new ReseedRequiredException(
+            throw new ReplicationUnavailableException(
                     ("Aeron Archive response channel stayed disconnected past the %dns reconnect budget " +
-                     "after %d attempts; recording %d cannot be replayed further from position %d without a reseed")
+                     "after %d attempts; recording %d could not be replayed further from position %d")
                             .formatted(this.reconnectTimeoutNanos, this.reconnectAttempts,
                                     this.configuration.recordingId(), this.assembler.lastResolvedPosition()),
                     this.reconnectCause);
@@ -637,7 +638,7 @@ public final class AeronArchiveReader implements Disposable {
         }
     }
 
-        /// Attempts one reconnect, or fails closed once the reconnect budget is spent.
+    /// Attempts one reconnect, or fails closed once the reconnect budget is spent.
     ///
     /// The budget is the configured reader stop timeout: a writer restart —
     /// the only healthy cause of an Archive disconnect — completes in seconds,
@@ -645,9 +646,8 @@ public final class AeronArchiveReader implements Disposable {
     /// restart but an operator problem, and a fresh reader from the durable
     /// cursor has no better odds of succeeding. Each attempt is paced by the
     /// retry policy's idle strategy so a dead Archive is not hammered in a
-    /// tight loop. Expiry latches a typed [ReseedRequiredException]
-    /// so the node reports RESEED_REQUIRED instead of an anonymous transport
-    /// stack.
+    /// tight loop. Expiry latches a typed [ReplicationUnavailableException]
+    /// so the node reports FAILED instead of an anonymous transport stack.
     private void reconnectAfterArchiveLoss() {
         if (this.reconnectDeadlineNanos == 0L) {
             this.reconnectDeadlineNanos = ReplicationRetry.deadlineNanos(this.reconnectTimeoutNanos);
@@ -678,7 +678,7 @@ public final class AeronArchiveReader implements Disposable {
         this.idleStrategy.idle(0);
     }
 
-        /// Maps a terminal subscription failure to a reader failure type.
+    /// Maps a terminal subscription failure to a reader failure type.
     ///
     /// A replay that can no longer start because the recording no longer covers
     /// the reader's position — or no longer exists at all — is unrecoverable
@@ -728,7 +728,7 @@ public final class AeronArchiveReader implements Disposable {
         lifecycleStopped.countDown();
     }
 
-        /// Restarts a reader stopped at the live tail. A replay or validation failure
+    /// Restarts a reader stopped at the live tail. A replay or validation failure
     /// is terminal; create a new reader from the Store mark instead of
     /// reusing incomplete transaction state.
     public synchronized void resume() {
@@ -741,7 +741,7 @@ public final class AeronArchiveReader implements Disposable {
         this.start();
     }
 
-        /// Requests a stop after replay reaches the current live tail.
+    /// Requests a stop after replay reaches the current live tail.
     public synchronized void stopAtLatestMessage() {
         if (this.disposed) {
             return;
@@ -770,7 +770,7 @@ public final class AeronArchiveReader implements Disposable {
         if (this.active.get()) this.updateOutcome(ReplicationApplier.StopOutcome.STOPPING);
     }
 
-        /// Pushes the stop deadline out while replay resolution or Store
+    /// Pushes the stop deadline out while replay resolution or Store
     /// materialization advances.
     ///
     /// Each newly resolved transaction — or newly materialized one, when the
@@ -802,21 +802,21 @@ public final class AeronArchiveReader implements Disposable {
         return true;
     }
 
-        /// Returns the last sequence delivered after commit and checksum validation.
+    /// Returns the last sequence delivered after commit and checksum validation.
     ///
     /// @return last resolved transaction sequence
     public long lastResolvedSequence() {
         return this.assembler.lastResolvedSequence();
     }
 
-        /// Returns the last sequence materialized by the Store receiver.
+    /// Returns the last sequence materialized by the Store receiver.
     ///
     /// @return last applied transaction sequence
     public long lastAppliedSequence() {
         return this.assembler.lastAppliedSequence();
     }
 
-        /// Returns whether the polling lifecycle is still active and has not failed.
+    /// Returns whether the polling lifecycle is still active and has not failed.
     ///
     /// @return `true` when the reader is running
     public boolean isRunning() {
@@ -826,14 +826,14 @@ public final class AeronArchiveReader implements Disposable {
                this.failure() == null;
     }
 
-        /// Returns whether replay has transitioned to the live subscription.
+    /// Returns whether replay has transitioned to the live subscription.
     ///
     /// @return `true` after replay reaches the live stream
     public boolean isLive() {
         return this.live;
     }
 
-        /// Returns the delivered transactions not yet published by a barrier flush.
+    /// Returns the delivered transactions not yet published by a barrier flush.
     ///
     /// Cursor callbacks persist their durable boundary only when this is zero:
     /// every earlier cursor in one delivery barrier is immediately superseded
@@ -845,14 +845,14 @@ public final class AeronArchiveReader implements Disposable {
         return this.assembler.unflushedDeliveryCount();
     }
 
-        /// Returns the Archive position of the last resolved commit.
+    /// Returns the Archive position of the last resolved commit.
     ///
     /// @return last resolved Archive position
     public long lastResolvedPosition() {
         return this.assembler.lastResolvedPosition();
     }
 
-        /// Returns an atomic sequence/position snapshot for cursor persistence.
+    /// Returns an atomic sequence/position snapshot for cursor persistence.
     ///
     /// @return current cursor snapshot
     public CursorSnapshot cursorSnapshot() {
@@ -875,28 +875,28 @@ public final class AeronArchiveReader implements Disposable {
         this.assembler.startingFencingToken(fencingToken);
     }
 
-        /// Returns the greatest writer fencing token accepted so far.
+    /// Returns the greatest writer fencing token accepted so far.
     ///
     /// @return greatest accepted fencing token
     public long fencingToken() {
         return this.assembler.fencingToken();
     }
 
-        /// Returns the terminal polling failure, or `null` while healthy.
+    /// Returns the terminal polling failure, or `null` while healthy.
     ///
     /// @return terminal failure, or `null`
     public RuntimeException failure() {
         return this.assembler.failure();
     }
 
-        /// Returns the stop boundary outcome and never infers success from a dead thread.
+    /// Returns the stop boundary outcome and never infers success from a dead thread.
     ///
     /// @return current stop outcome
     public ReplicationApplier.StopOutcome stopOutcome() {
         return this.stopOutcome.get();
     }
 
-        /// Returns the terminal stop state and the last resolved sequence/position.
+    /// Returns the terminal stop state and the last resolved sequence/position.
     ///
     /// @return current stop result
     public ReplicationApplier.StopResult stopResult() {
@@ -904,7 +904,7 @@ public final class AeronArchiveReader implements Disposable {
         return new ReplicationApplier.StopResult(this.stopOutcome.get(), cursor.sequence(), cursor.position());
     }
 
-        /// Stops polling after a terminal Aeron client or MediaDriver failure.
+    /// Stops polling after a terminal Aeron client or MediaDriver failure.
     ///
     /// @param failure terminal failure
     public synchronized void fail(final RuntimeException failure) {
@@ -914,7 +914,7 @@ public final class AeronArchiveReader implements Disposable {
         this.updateOutcome(ReplicationApplier.StopOutcome.FAILED);
     }
 
-        /// Stops polling and releases this reader's subscriptions.
+    /// Stops polling and releases this reader's subscriptions.
     ///
     /// Disposal is idempotent and retry-safe. If the polling thread does not
     /// terminate within the bounded shutdown window this method throws and

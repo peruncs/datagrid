@@ -23,7 +23,7 @@ final class AeronReaderLifecycle {
     private AeronReaderLifecycle() {
     }
 
-        /// Runs the subscription duty cycle used by both readers. Keeping idle and
+    /// Runs the subscription duty cycle used by both readers. Keeping idle and
     /// stop-at-tail handling here prevents the test reader and the production
     /// reader from acquiring different lifecycle semantics.
     ///

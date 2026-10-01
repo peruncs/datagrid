@@ -101,7 +101,7 @@ public final class AeronFullPathBenchmark {
                 AeronStoreIntegrationIT.properties(writerAeron, clusterId, UUID.randomUUID(), generation,
                         "writer", -1L, ports[0], ports[1], ports[2]))) {
             transport.positionProvider().init();
-            final var distributor = transport.distributor();
+            final var distributor = new Distribution();
             final AeronStoreIntegrationIT.Root seedRoot = new AeronStoreIntegrationIT.Root();
             seedRoot.payload = new byte[payloadBytes];
             final EmbeddedStorageManager seed = AeronStoreIntegrationIT.start(writerStore, seedRoot, distributor, transport);

@@ -13,7 +13,6 @@ import peruncs.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticle;
 import peruncs.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.cluster.storage.ReplicationPosition;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -86,7 +85,7 @@ class ReaderLiveIndexFreshnessTest {
                 AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, UUID.randomUUID(), generation, "writer", -1L,
                         controlPort, livePort, watermarkPort))) {
             writerTransport.positionProvider().init();
-            final ReplicationPublisher distributor = writerTransport.distributor();
+            final Distribution distributor = new Distribution();
             final IndexRoot initial = new IndexRoot();
             initial.articles = GigaMap.New();
             AeronStoreIntegrationIT.configureIndexes(initial.articles);

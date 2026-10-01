@@ -226,7 +226,7 @@ class BackupArchiveTest {
         assertTrue(BackupArchiveLimits.of(1L).maxArchiveEntries() >= 1);
         assertEquals(BackupArchiveLimits.MAX_ENTRY_BUDGET,
                 BackupArchiveLimits.of(Long.MAX_VALUE).maxArchiveEntries());
-        assertEquals(1 << 16, BackupArchiveLimits.MAX_ENTRY_BUDGET);
+        assertEquals(1 << 20, BackupArchiveLimits.MAX_ENTRY_BUDGET);
     }
 
     private static void writeDuplicateArchive(final Path archive) throws IOException {

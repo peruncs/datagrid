@@ -17,9 +17,10 @@ import static org.eclipse.serializer.memory.XMemory.getDirectByteBufferAddress;
 
 /// Applies imported native Store binary buffers to the object graph.
 final class StorageBinaryDataMaterializer {
-    /* The merger calls this on one worker. BinaryLoader clears its load items
-     * after each successful collect, so its source and scratch can be reused. */
-    private static final BinaryEntityRawDataIterator ITERATOR = BinaryEntityRawDataIterator.New();
+    /* The merger calls this on one worker, so each materializer owns its iterator instead of
+     * sharing one across every merger in the JVM. BinaryLoader clears its load items after each
+     * successful collect, so its source and scratch can be reused. */
+    private final BinaryEntityRawDataIterator iterator = BinaryEntityRawDataIterator.New();
     private ByteBuffer[] batchViews = new ByteBuffer[0];
     private PersistenceManager<Binary> boundManager;
     private BinaryPersistenceFoundation<?> boundFoundation;
@@ -64,7 +65,7 @@ final class StorageBinaryDataMaterializer {
                  * framing first; this upstream API still requires the direct-buffer address. */
                 final long address = getDirectByteBufferAddress(buffer);
                 if (materializer != null) {
-                    ITERATOR.iterateEntityRawData(address, address + buffer.limit(), materializer);
+                    this.iterator.iterateEntityRawData(address, address + buffer.limit(), materializer);
                 }
             }
         } catch (final RuntimeException | Error failure) {

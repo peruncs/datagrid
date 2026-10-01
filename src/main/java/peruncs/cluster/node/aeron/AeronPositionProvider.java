@@ -1,7 +1,7 @@
 package peruncs.cluster.node.aeron;
 
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.errors.internal.ReplicationPositionUnavailableException;
+import peruncs.cluster.errors.ReplicationPositionUnavailableException;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.storage.ReplicationPosition;
 
@@ -82,8 +82,8 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
                 boundary.recordingId(), boundary.sequence(), boundary.position(), fencingToken, this.nodeId.get());
     }
 
-        /// Releases nothing: the provider reads the transport's published
-        /// boundary and never owns reader or writer resources.
+    /// Releases nothing: the provider reads the transport's published
+    /// boundary and never owns reader or writer resources.
     @Override
     public void close() {
     }

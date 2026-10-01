@@ -23,4 +23,6 @@
 /// enum to drift, and no free-form transport id: Aeron is the only transport,
 /// and a node without replication reports `NOT_CONFIGURED` with unknown
 /// metric sentinels.
+///
+/// @since 1.0
 package peruncs.cluster.api;

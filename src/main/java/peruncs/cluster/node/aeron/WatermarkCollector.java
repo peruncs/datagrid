@@ -59,7 +59,7 @@ final class WatermarkCollector {
         this.writerReady = writerReady;
     }
 
-        /// Reports whether the writer-side watermark channel is receiving.
+    /// Reports whether the writer-side watermark channel is receiving.
     ///
     /// @return `true` when the channel exists and has an available image
     boolean available() {
@@ -67,14 +67,14 @@ final class WatermarkCollector {
         return current != null && current.available();
     }
 
-        /// Reports whether the channel has been created.
+    /// Reports whether the channel has been created.
     ///
     /// @return `true` when the channel exists
     boolean hasChannel() {
         return this.channel != null;
     }
 
-        /// Returns the current watermark or retention failure, or `null`.
+    /// Returns the current watermark or retention failure, or `null`.
     ///
     /// @return channel failure, or `null` while healthy
     RuntimeException channelFailure() {
@@ -85,12 +85,12 @@ final class WatermarkCollector {
         return current == null ? null : current.failure();
     }
 
-        /// Discards deferred reader watermarks during full teardown.
+    /// Discards deferred reader watermarks during full teardown.
     void discardDeferred() {
         this.deferredWatermarks.clear();
     }
 
-        /// Publishes one reader progress watermark, or drops it when no
+    /// Publishes one reader progress watermark, or drops it when no
     /// channel exists.
     ///
     /// @param snapshot    last resolved reader boundary
@@ -98,12 +98,12 @@ final class WatermarkCollector {
     void publish(final CursorSnapshot snapshot, final long recordingId) {
         final AeronWatermarkChannel current = this.channel;
         if (current == null) return;
-        current.publishEncoded(this.settings.topology().identity().nodeId(), this.settings.topology().clusterId(),
-                this.settings.topology().identity().storeGeneration(),
-                this.settings.topology().epoch(), recordingId, snapshot.sequence(), snapshot.position());
+        current.publishEncoded(AeronReaderWatermark.of(this.settings.topology().identity().nodeId(),
+                this.settings.topology().clusterId(), this.settings.topology().identity().storeGeneration(),
+                this.settings.topology().epoch(), recordingId, snapshot.sequence(), snapshot.position()));
     }
 
-        /// Creates the channel once, in the role-appropriate mode.
+    /// Creates the channel once, in the role-appropriate mode.
     ///
     /// The transport creates the retention controller before this call on
     /// the writer, so the fan-in can wire its callbacks to it directly.
@@ -156,7 +156,7 @@ final class WatermarkCollector {
         }
     }
 
-        /// Replays reader progress received during writer recovery.
+    /// Replays reader progress received during writer recovery.
     void drainDeferred() {
         if (this.deferredWatermarks.isEmpty() || !this.writerReady.getAsBoolean()) {
             return;
@@ -179,7 +179,7 @@ final class WatermarkCollector {
         }
     }
 
-        /// Stops the writer-side watermark worker before any writer/retention
+    /// Stops the writer-side watermark worker before any writer/retention
     /// resource is closed. The worker invokes retention callbacks and must
     /// never race a transport shutdown while the writer monitor is being
     /// dismantled.
@@ -205,7 +205,7 @@ final class WatermarkCollector {
         }
     }
 
-        /// Rejections caused by an interrupt are shutdown noise, not data
+    /// Rejections caused by an interrupt are shutdown noise, not data
     /// problems: close interrupts the watermark worker mid-wait (retention
     /// hands off through a blocking {@code Future#get}), and the surviving
     /// interrupted-state signal must not surface as a warning that suggests a

@@ -9,7 +9,7 @@ import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryExporte
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageConnectionFoundation;
 import org.eclipse.store.storage.embedded.types.EmbeddedStorageFoundation;
 import peruncs.cluster.storage.binary.DistributingTypeDictionaryExporter;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
+import peruncs.cluster.storage.binary.TypeDictionaryOutbox;
 
 import java.util.function.UnaryOperator;
 
@@ -19,14 +19,14 @@ import static org.eclipse.serializer.util.X.notNull;
 ///
 /// The configured foundation keeps its normal local target and type
 /// dictionary, then wraps both so committed binary data and type definitions
-/// reach the supplied distributor. The utility changes the foundation in place
+/// reach the supplied outbox. The utility changes the foundation in place
 /// and returns it for fluent setup.
 public final class DistributedStorage {
     private DistributedStorage() {
         throw new UnsupportedOperationException();
     }
 
-        /// Adds distributed writing to an embedded storage foundation.
+    /// Adds distributed writing to an embedded storage foundation.
     ///
     /// The target factory owns the durability semantics: production must use
     /// the transport's coordinated factory so local acceptance and publication
@@ -44,31 +44,31 @@ public final class DistributedStorage {
     /// distributed writing once.
     ///
     /// @param foundation    foundation to configure
-    /// @param distributor   destination for committed data
+    /// @param outbox        receives the exported type dictionaries
     /// @param targetFactory wrapper for the local persistence target
     /// @return the configured foundation
     public static EmbeddedStorageFoundation<?> configureWriting(
             final EmbeddedStorageFoundation<?> foundation,
-            final ReplicationPublisher distributor,
+            final TypeDictionaryOutbox outbox,
             final UnaryOperator<PersistenceTarget<Binary>> targetFactory) {
         final EmbeddedStorageConnectionFoundation<?> connectionFoundation = foundation.getConnectionFoundation();
-        connectionFoundation.setInstanceDispatcher(new Configurator(distributor, targetFactory));
+        connectionFoundation.setInstanceDispatcher(new Configurator(outbox, targetFactory));
         return foundation;
     }
 
-        /// Internal assembly helper that wraps Store components with
+    /// Internal assembly helper that wraps Store components with
     /// distributed-writing behavior. It is not an application API.
     ///
     /// Persistence targets distribute committed binary data, and type dictionary
     /// exporters distribute type definitions. Other objects pass through unchanged
     /// so the normal Store foundation keeps its existing behavior.
     static final class Configurator implements InstanceDispatcherLogic {
-        private final ReplicationPublisher distributor;
+        private final TypeDictionaryOutbox outbox;
         private final UnaryOperator<PersistenceTarget<Binary>> targetFactory;
 
-        Configurator(final ReplicationPublisher distributor, final UnaryOperator<PersistenceTarget<Binary>> targetFactory) {
+        Configurator(final TypeDictionaryOutbox outbox, final UnaryOperator<PersistenceTarget<Binary>> targetFactory) {
             super();
-            this.distributor = notNull(distributor);
+            this.outbox = notNull(outbox);
             this.targetFactory = notNull(targetFactory);
         }
 
@@ -83,19 +83,19 @@ public final class DistributedStorage {
                      * preserve both contracts in one adapter. */
                         (T) new TargetAndDictionaryExporter(
                                 this.targetFactory.apply((PersistenceTarget<Binary>) target),
-                                DistributingTypeDictionaryExporter.create(dictionaryExporter, this.distributor)
+                                DistributingTypeDictionaryExporter.create(dictionaryExporter, this.outbox)
                         );
                 case PersistenceTarget<?> target -> (T) this.targetFactory.apply((PersistenceTarget<Binary>) target);
                 case PersistenceTypeDictionaryExporter persistenceTypeDictionaryExporter -> (T) DistributingTypeDictionaryExporter.create(
                         persistenceTypeDictionaryExporter,
-                        this.distributor
+                        this.outbox
                 );
                 default -> subject;
             };
 
         }
 
-            /// Combines the two Store extension contracts when one subject implements both.
+        /// Combines the two Store extension contracts when one subject implements both.
         private record TargetAndDictionaryExporter(PersistenceTarget<Binary> target, PersistenceTypeDictionaryExporter dictionaryExporter)
                     implements PersistenceTarget<Binary>, PersistenceTypeDictionaryExporter {
 

@@ -58,7 +58,7 @@ class TransactionAssemblerFencingTest {
         if (assembler.deliveryBarrierFull()) assembler.flushDeliveries();
     }
 
-        /// Verifies a poison frame with a higher token fails without lifting the floor.
+    /// Verifies a poison frame with a higher token fails without lifting the floor.
     @Test
     void poisonFrameWithHigherTokenDoesNotRaiseFloor() {
         final CountingReceiver receiver = new CountingReceiver();
@@ -78,7 +78,7 @@ class TransactionAssemblerFencingTest {
         }
     }
 
-        /// Verifies a commit adopts its token only after the transaction validates.
+    /// Verifies a commit adopts its token only after the transaction validates.
     @Test
     void commitAdoptsHigherTokenAfterFullValidation() {
         final CountingReceiver receiver = new CountingReceiver();

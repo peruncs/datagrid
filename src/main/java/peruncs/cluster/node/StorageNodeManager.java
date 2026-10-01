@@ -4,13 +4,11 @@ import peruncs.cluster.api.NodeRole;
 import peruncs.cluster.api.ReplicationState;
 import peruncs.cluster.api.ReplicationStatus;
 import peruncs.cluster.errors.NodeException;
-import peruncs.cluster.errors.ReplicationPendingException;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.node.store.StorageNodeHealthCheck;
 import peruncs.cluster.node.store.StorageTaskExecutor;
 import peruncs.cluster.storage.StorageGraphCoordinator;
 import peruncs.cluster.storage.binary.ReplicationApplier;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
 
 import java.util.Objects;
 import java.util.function.LongSupplier;
@@ -25,7 +23,6 @@ import java.util.function.LongSupplier;
 final class StorageNodeManager implements StorageNodeControl, AutoCloseable {
     /// Immutable collaborators and role used to create a storage node manager.
     ///
-    /// @param dataDistributor        replication publisher
     /// @param storageTaskExecutor    storage task executor, owned by the caller
     /// @param dataClient             replication client
     /// @param healthCheck            health check
@@ -36,7 +33,6 @@ final class StorageNodeManager implements StorageNodeControl, AutoCloseable {
     /// @param graphCoordinator       the Store graph coordinator whose latched invalidity
     ///                               makes the node unhealthy and not ready
     record Configuration(
-            ReplicationPublisher dataDistributor,
             StorageTaskExecutor storageTaskExecutor,
             ReplicationApplier dataClient,
             StorageNodeHealthCheck healthCheck,
@@ -48,7 +44,6 @@ final class StorageNodeManager implements StorageNodeControl, AutoCloseable {
     ) {
         /// Validates the manager wiring once at the configuration boundary.
         public Configuration {
-            Objects.requireNonNull(dataDistributor, "dataDistributor");
             Objects.requireNonNull(storageTaskExecutor, "storageTaskExecutor");
             Objects.requireNonNull(dataClient, "dataClient");
             Objects.requireNonNull(healthCheck, "healthCheck");
@@ -81,7 +76,6 @@ final class StorageNodeManager implements StorageNodeControl, AutoCloseable {
 
     private static final System.Logger LOGGER = System.getLogger(StorageNodeManager.class.getName());
 
-    private final ReplicationPublisher dataDistributor;
     private final StorageTaskExecutor storageTaskExecutor;
     private final ReplicationApplier dataClient;
     private final StorageNodeHealthCheck healthCheck;
@@ -94,7 +88,6 @@ final class StorageNodeManager implements StorageNodeControl, AutoCloseable {
     /* Per-collaborator completion: a failed close must stay retryable so
      * the remaining disposals finish on a later attempt instead of being
      * silently swallowed by a fail-final flag. */
-    private boolean distributorDisposed;
     private boolean clientDisposed;
     private boolean healthCheckClosed;
     private boolean positionProviderClosed;
@@ -103,7 +96,6 @@ final class StorageNodeManager implements StorageNodeControl, AutoCloseable {
     ///
     /// @param configuration collaborators selected for this manager
     private StorageNodeManager(final Configuration configuration) {
-        this.dataDistributor = configuration.dataDistributor();
         this.dataClient = configuration.dataClient();
         this.healthCheck = configuration.healthCheck();
         this.storageSizeBytes = configuration.storageSizeBytes();
@@ -146,17 +138,15 @@ final class StorageNodeManager implements StorageNodeControl, AutoCloseable {
         return this.graphCoordinator.graphFailure() == null;
     }
 
-    /// Reports replication readiness for the current role.
-    ///
-    /// A writer reports its own failure state instead of consulting
-    /// the reader health check, which never observes the publication path.
+    /// Reports replication readiness for every role through the health view,
+    /// so a writer also reports Archive capacity, driver and watermark failures.
     private boolean replicationReady() throws NodeException {
-        return this.isWriter() ? this.dataDistributor.failure() == null : this.healthCheck.isReady();
+        return !this.replicationEnabled || this.healthCheck.isReady();
     }
 
-    /// Reports replication health for the current role.
+    /// Reports replication health for every role.
     private boolean replicationHealthy() {
-        return this.isWriter() ? this.dataDistributor.failure() == null : this.healthCheck.isHealthy();
+        return !this.replicationEnabled || this.healthCheck.isHealthy();
     }
 
     @Override
@@ -180,16 +170,14 @@ final class StorageNodeManager implements StorageNodeControl, AutoCloseable {
     public ReplicationStatus replicationStatus() {
         if (!this.replicationEnabled) return ReplicationStatus.notConfigured();
         final boolean writer = this.isWriter();
-        final long currentSequence = writer
-                ? this.dataDistributor.messageIndex() : this.dataClient.currentSequence();
+        final long latestSequence = this.latestSequence();
         return new ReplicationStatus(
-                this.replicationState(),
-                unknownIfNegative(currentSequence),
-                this.latestSequence(),
-                unknownIfNegative(writer ? -1L : this.healthCheck.archiveUsableSpaceBytes()),
-                unknownIfNegative(writer ? -1L : this.healthCheck.writerDurablePosition()),
-                unknownIfNegative(writer ? currentSequence
-                        : this.healthCheck.writerDurableSequence()),
+                this.healthCheck.replicationState(),
+                unknownIfNegative(writer ? latestSequence : this.dataClient.currentSequence()),
+                latestSequence,
+                unknownIfNegative(this.healthCheck.archiveUsableSpaceBytes()),
+                unknownIfNegative(this.healthCheck.writerDurablePosition()),
+                unknownIfNegative(this.healthCheck.writerDurableSequence()),
                 unknownIfNegative(writer ? -1L : this.healthCheck.appliedSequence()));
     }
 
@@ -197,22 +185,13 @@ final class StorageNodeManager implements StorageNodeControl, AutoCloseable {
         return Math.max(-1L, value);
     }
 
-    private ReplicationState replicationState() {
-        if (this.isWriter()) {
-            final RuntimeException failure = this.dataDistributor.failure();
-            if (failure instanceof ReplicationPendingException) return ReplicationState.REPLICATION_SUSPENDED;
-            return failure == null ? ReplicationState.LIVE : ReplicationState.FAILED;
-        }
-        return this.healthCheck.replicationState();
-    }
-
-    /// Closes publisher, reader, health check, and position provider,
+    /// Closes the reader, health check, and position provider,
     /// aggregating every failure. Each disposal is tracked separately, so
     /// a failed close is retryable: a later call finishes exactly the
     /// disposals that did not complete instead of returning silently.
     @Override
     public void close() {
-        if (this.distributorDisposed && this.clientDisposed &&
+        if (this.clientDisposed &&
             this.healthCheckClosed && this.positionProviderClosed) {
             return;
         }
@@ -220,14 +199,6 @@ final class StorageNodeManager implements StorageNodeControl, AutoCloseable {
          * close attempts; the per-resource flags preserve retry progress. */
         LOGGER.log(System.Logger.Level.INFO, "Closing StorageNodeManager");
         final CloseFailures failures = new CloseFailures();
-        if (!this.distributorDisposed) {
-            try {
-                this.dataDistributor.dispose();
-                this.distributorDisposed = true;
-            } catch (final RuntimeException | Error closeFailure) {
-                failures.add(closeFailure);
-            }
-        }
         if (!this.clientDisposed) {
             try {
                 this.dataClient.dispose();

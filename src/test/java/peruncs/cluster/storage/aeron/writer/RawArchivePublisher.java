@@ -7,7 +7,7 @@ public final class RawArchivePublisher {
     private RawArchivePublisher() {
     }
 
-        /// Publishes a fixture transaction without exposing the raw path in production APIs.
+    /// Publishes a fixture transaction without exposing the raw path in production APIs.
     ///
     /// @param publisher target writer publisher
     /// @param dictionary optional type dictionary bytes, or `null`

@@ -13,11 +13,41 @@ public final class FaultInjection {
     private FaultInjection() {
     }
 
+    /// Every named point at which a test may inject a fault.
+    public enum Point {
+        AFTER_ABORT_OFFERED,
+        AFTER_COMMIT_OFFER,
+        AFTER_COMMIT_RECORDED,
+        AFTER_COMMIT_RECORDED_BEFORE_BOUNDARY_UPDATE,
+        AFTER_DATA_CHUNKS,
+        AFTER_DICTIONARY_CHUNKS,
+        AFTER_EXISTING_PUBLICATION_INSPECTION,
+        AFTER_LOCAL_WRITE_BEFORE_COMMIT,
+        AFTER_PREPARE,
+        AFTER_PREPARE_BEFORE_LOCAL_WRITE,
+        AFTER_PREPARE_FAILURE_ABORT_OFFERED,
+        AFTER_PREVIOUS_STORAGE_MOVED,
+        AFTER_RECOVERY_PUBLISHER_CREATED,
+        AFTER_REGULAR_DELETE,
+        AFTER_RENAME_BEFORE_DIRECTORY_SYNC,
+        AFTER_STORAGE_RENAME_BEFORE_DIRECTORY_SYNC,
+        AFTER_STORE_BACKUP_BEFORE_READY,
+        AFTER_TEMP_WRITE_BEFORE_RENAME,
+        BEFORE_COMMIT_GATE,
+        BEFORE_COMMIT_OFFER,
+        BEFORE_PREPARE,
+        BEFORE_PUBLICATION_CONNECTED,
+        BEFORE_PUBLISH_RENAME,
+        BEFORE_TEMP_WRITE,
+        DATA_CHUNK,
+        DURING_FILE_WRITE
+    }
+
     /// One fault point, with either a transaction sequence or filesystem path.
     @FunctionalInterface
     public interface Hook {
         /// Handles the named point; unused context is `-1` or `null`.
-        void at(String point, long sequence, Path path);
+        void at(Point point, long sequence, Path path);
     }
 
     /// Runs an operation with a hook bound to its dynamic scope.
@@ -45,13 +75,13 @@ public final class FaultInjection {
     }
 
     /// Invokes a transaction fault point.
-    public static void invoke(final String point, final long sequence) {
+    public static void invoke(final Point point, final long sequence) {
         final Hook hook = CURRENT.isBound() ? CURRENT.get() : null;
         if (hook != null) hook.at(point, sequence, null);
     }
 
     /// Invokes a filesystem fault point.
-    public static void invoke(final String point, final Path path) {
+    public static void invoke(final Point point, final Path path) {
         final Hook hook = CURRENT.isBound() ? CURRENT.get() : null;
         if (hook != null) hook.at(point, -1L, path);
     }

@@ -14,7 +14,7 @@ import java.util.Objects;
 /// domain so the node layer can model disabled replication and test readers
 /// without importing transport classes.
 public interface ReplicationApplier extends Disposable {
-        /// Starts reading from the configured transport.
+    /// Starts reading from the configured transport.
     void start();
 
     /// Creates a neutral client for tests and disabled replication.
@@ -57,29 +57,29 @@ public interface ReplicationApplier extends Disposable {
         };
     }
 
-        /// Stops at the latest complete message boundary.
+    /// Stops at the latest complete message boundary.
     void stopAtLatestMessage();
 
-        /// Returns the latest applied replication position.
+    /// Returns the latest applied replication position.
     ///
     /// @return replication position
     ReplicationPosition position();
 
-        /// Returns the latest applied logical sequence without materializing a
+    /// Returns the latest applied logical sequence without materializing a
     /// position. The default delegates to [#position()]; hot monitoring paths
-        /// should override it.
+    /// should override it.
     ///
     /// @return applied logical sequence, or `-1` when none
     default long currentSequence() {
         return this.position().sequence();
     }
 
-        /// Reports whether the reader is running.
+    /// Reports whether the reader is running.
     ///
     /// @return `true` when running
     boolean isRunning();
 
-        /// Returns a terminal reader failure, or `null` while the client is healthy.
+    /// Returns a terminal reader failure, or `null` while the client is healthy.
     /// Implementations must expose the same terminal failure observed by their
     /// polling/consumer thread; returning a synthetic `null` hides a failed
     /// reader from readiness and backup coordination.
@@ -87,7 +87,7 @@ public interface ReplicationApplier extends Disposable {
     /// @return terminal failure, or `null`
     RuntimeException failure();
 
-        /// Returns the latest lifecycle result. Implementations that can distinguish a
+    /// Returns the latest lifecycle result. Implementations that can distinguish a
     /// resolved transaction boundary should override this method; the fallback
     /// treats a stopped client without a reported failure as a resolved boundary.
     ///
@@ -97,7 +97,7 @@ public interface ReplicationApplier extends Disposable {
         return this.isRunning() ? StopOutcome.RUNNING : StopOutcome.RESOLVED_BOUNDARY;
     }
 
-        /// Returns the stop outcome together with the last resolved position.
+    /// Returns the stop outcome together with the last resolved position.
     ///
     /// The fallback is best-effort and allocates only the result record: the
     /// transport position is unknowable without provider state, so it is
@@ -113,20 +113,20 @@ public interface ReplicationApplier extends Disposable {
         return new StopResult(this.stopOutcome(), resolved.sequence(), resolved.prepareStartPosition());
     }
 
-        /// Reports whether the reader is live.
+    /// Reports whether the reader is live.
     ///
     /// @return `true` when live
     default boolean isLive() {
         return isRunning();
     }
 
-        /// Resumes reading after a stop.
+    /// Resumes reading after a stop.
     ///
     /// Implementations fail with an unchecked transport exception when resume
     /// is not possible; the node layer wraps it for reporting.
     void resume();
 
-        /// Lifecycle outcomes for a replication reader.
+    /// Lifecycle outcomes for a replication reader.
     enum StopOutcome {
         /// Client has not started.
         NOT_STARTED,
@@ -146,7 +146,7 @@ public interface ReplicationApplier extends Disposable {
         CLOSED
     }
 
-        /// Immutable result of a stop-at-latest request.
+    /// Immutable result of a stop-at-latest request.
     ///
     /// @param outcome lifecycle outcome
     /// @param sequence last resolved logical sequence, or `-1` when unknown

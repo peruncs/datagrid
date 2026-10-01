@@ -23,7 +23,7 @@ class ReplicationRetryTest {
         assertTrue(ReplicationRetry.expired(System.nanoTime() - 1_000_000L));
     }
 
-        /// A manual clock makes deadline arithmetic deterministic.
+    /// A manual clock makes deadline arithmetic deterministic.
     @Test
     void manualClockBoundsDeadlineAndExpiry() {
         final var now = new java.util.concurrent.atomic.AtomicLong(1_000_000L);
@@ -40,7 +40,7 @@ class ReplicationRetryTest {
         assertThrows(IllegalArgumentException.class, () -> ReplicationRetry.deadlineNanos(0L, now::get));
     }
 
-        /// Full-jitter backoff stays inside the exponential cap and rejects
+    /// Full-jitter backoff stays inside the exponential cap and rejects
     /// non-positive inputs.
     @Test
     void fullJitterDelayStaysWithinTheExponentialCap() {

@@ -70,7 +70,7 @@ import static org.eclipse.serializer.util.X.notNull;
 /// before a blocking graph update, or a slow Store would stall the Aeron
 /// polling thread and look like transport loss.
 public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver, Disposable, MergerLifecycle {
-        /// Immutable configuration for one bounded binary merger.
+    /// Immutable configuration for one bounded binary merger.
     ///
     /// Every limit lives here so operators can tune coalescing, disposal
     /// grace, and index-validation bounds without code changes; the constants
@@ -91,6 +91,7 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
     /// @param disposeOrderlyTimeoutMs   orderly worker termination window during disposal
     /// @param disposeInterruptTimeoutMs interrupt-based worker termination window during disposal
     /// @param maxValidatedIndexObjects  bound on index-relevant objects visited by one root scan
+    /// @param indexRefreshBudgetMs      longest the post-import index validation and vector warm-up may take
     /// @param graphCoordinator          per-Store graph coordinator, or `null`
     public record Configuration(
             BinaryPersistenceFoundation<?> foundation,
@@ -104,6 +105,7 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
             long disposeOrderlyTimeoutMs,
             long disposeInterruptTimeoutMs,
             int maxValidatedIndexObjects,
+            long indexRefreshBudgetMs,
             StorageGraphCoordinator graphCoordinator
     ) {
         /// Validates the merger collaborators and limits.
@@ -127,6 +129,21 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
             if (maxValidatedIndexObjects <= 0) {
                 throw new IllegalArgumentException("maxValidatedIndexObjects must be positive");
             }
+            if (indexRefreshBudgetMs <= 0L) {
+                throw new IllegalArgumentException("indexRefreshBudgetMs must be positive");
+            }
+        }
+
+        /// Creates a configuration with the default index-refresh budget.
+        public Configuration(
+                final BinaryPersistenceFoundation<?> foundation, final StorageConnection storage,
+                final Consumer<Runnable> graphUpdater, final long cachingTimeoutMs, final long cachedBytesLimit,
+                final long maxCachedBytes, final long bufferPoolRetainedBytes, final long applyTimeoutMs,
+                final long disposeOrderlyTimeoutMs, final long disposeInterruptTimeoutMs,
+                final int maxValidatedIndexObjects, final StorageGraphCoordinator graphCoordinator) {
+            this(foundation, storage, graphUpdater, cachingTimeoutMs, cachedBytesLimit, maxCachedBytes,
+                    bufferPoolRetainedBytes, applyTimeoutMs, disposeOrderlyTimeoutMs, disposeInterruptTimeoutMs,
+                    maxValidatedIndexObjects, INDEX_REFRESH_BUDGET_MS, graphCoordinator);
         }
 
         /// Creates a configuration with every documented default.
@@ -153,12 +170,27 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
                     DISPOSE_ORDERLY_TIMEOUT_MS,
                     DISPOSE_INTERRUPT_TIMEOUT_MS,
                     MAX_VALIDATED_INDEX_OBJECTS,
+                    INDEX_REFRESH_BUDGET_MS,
                     graphCoordinator
             );
         }
     }
 
-        /// Creates a merger with bounded deferred materialization.
+    /// Creates the timeout-detection scheduler.
+    ///
+    /// Each batch schedules and then cancels its watchdog tasks; removing a cancelled task
+    /// immediately keeps the delay queue empty instead of holding every task until its deadline.
+    ///
+    /// @return a single-thread scheduler that drops cancelled tasks
+    static ScheduledThreadPoolExecutor newWatchdog() {
+        final ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(1, runnable ->
+                Thread.ofPlatform().daemon().name("peruncs-apply-watchdog").unstarted(runnable));
+        scheduler.setRemoveOnCancelPolicy(true);
+        scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        return scheduler;
+    }
+
+    /// Creates a merger with bounded deferred materialization.
     ///
     /// @param configuration immutable merger configuration
     /// @return binary merger
@@ -179,19 +211,19 @@ public final class StorageBinaryDataMerger implements StorageBinaryDataReceiver,
     static final long DISPOSE_ORDERLY_TIMEOUT_MS = 30_000L;
     /// Default interrupt-based worker termination window during disposal, in milliseconds.
     static final long DISPOSE_INTERRUPT_TIMEOUT_MS = 5_000L;
+    /// Default longest index validation and vector warm-up after one applied batch, in milliseconds.
+    static final long INDEX_REFRESH_BUDGET_MS = 600_000L;
     /// Default bound on index-relevant objects and collection entries visited by one root scan.
     static final int MAX_VALIDATED_INDEX_OBJECTS = NodeConfig.Limits.DEFAULT_MAX_VALIDATED_INDEX_OBJECTS;
-    private final ExecutorService executor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
-            .name("eclipse-datagrid-store-materializer", 0L)
-            .factory());
+    /* Materialization is CPU-bound (index validation, vector rebuild) plus blocking
+     * Store I/O, so it gets a platform thread that never competes with the
+     * virtual-thread carriers used by maintenance and retention. */
+    private final ExecutorService executor = Executors.newSingleThreadExecutor(runnable ->
+            Thread.ofPlatform().daemon().name("peruncs-apply").unstarted(runnable));
     /* A Store callback can ignore interruption forever. Keep timeout
      * detection off that worker so health and acknowledgement paths fail
      * closed even when the callback itself never returns. */
-    private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor(runnable ->
-            Thread.ofPlatform()
-                    .daemon()
-                    .name("eclipse-datagrid-store-watchdog")
-                    .unstarted(runnable));
+    private final ScheduledExecutorService watchdog = newWatchdog();
     private final LockedExecutor materialization = LockedExecutor.New();
     private final BinaryPersistenceFoundation<?> foundation;
     private final StorageConnection storage;
@@ -237,7 +269,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         this.disposeInterruptTimeoutMs = configuration.disposeInterruptTimeoutMs();
         try {
             this.materializationBudgetMs = Math.multiplyExact(applyTimeoutMs, APPLY_TIMEOUT_RETRIES + 1L);
-            this.awaitAppliedBudgetMs = Math.multiplyExact(this.materializationBudgetMs, 1L + ApplyWorker.INDEX_REFRESH_BUDGET_MULTIPLIER);
+            this.awaitAppliedBudgetMs = Math.addExact(this.materializationBudgetMs, configuration.indexRefreshBudgetMs());
         } catch (final ArithmeticException overflow) {
             throw new IllegalArgumentException("applyTimeoutMs is too large for the full materialization and index-refresh wait: %s"
                     .formatted(applyTimeoutMs), overflow);
@@ -255,7 +287,8 @@ private StorageBinaryDataMerger(final Configuration configuration) {
                 this.graphUpdater,
                 cachingTimeoutMs,
                 configuration.maxValidatedIndexObjects(),
-                this.materializationBudgetMs);
+                this.materializationBudgetMs,
+                configuration.indexRefreshBudgetMs());
         final BinaryPersistenceFoundation<?> parsingFoundation = BinaryPersistence.Foundation()
                 .setClassLoaderProvider(this.foundation.getClassLoaderProvider())
                 .setFieldEvaluatorPersister(this.foundation.getFieldEvaluatorPersistable());
@@ -266,7 +299,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         this.dictionaryFoundation = parsingFoundation;
     }
 
-            /// Aeron transfers its assembled direct buffers before this callback starts.
+    /// Aeron transfers its assembled direct buffers before this callback starts.
     ///
     /// @return `true` because this merger releases the transferred buffers
     @Override
@@ -289,7 +322,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         this.bufferPool.release(buffer);
     }
 
-            /// Receives a borrowed binary. Must be called by the single
+    /// Receives a borrowed binary. Must be called by the single
     /// transport delivery thread; see the class javadoc.
     ///
     /// @param data complete binary to receive
@@ -315,7 +348,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         this.scheduleMaterialization(ownedBuffers);
     }
 
-            /// Imports Aeron-owned direct buffers without a second native allocation.
+    /// Imports Aeron-owned direct buffers without a second native allocation.
     ///
     /// Must be called by the single transport delivery thread; see the
     /// class javadoc. Every precondition and the buffer extraction itself
@@ -444,7 +477,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         return this.queue.inFlightBytes();
     }
 
-        /// Returns the graph coordinator this merger joins for its own Store reads.
+    /// Returns the graph coordinator this merger joins for its own Store reads.
     ///
     /// Node-owned read paths adopt the read side through the returned
     /// coordinator:
@@ -462,7 +495,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         return this.graphCoordinator;
     }
 
-            /// Read-phase counterpart of [#readJoined(Supplier)] for scans
+    /// Read-phase counterpart of [#readJoined(Supplier)] for scans
     /// that produce a plan for a later write-side mutation.
     private <T> T readJoined(final Supplier<T> read) {
         final StorageGraphCoordinator coordinator = this.graphCoordinator;
@@ -517,7 +550,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         });
     }
 
-            /// Parses the writer's dictionary snapshot into remote definitions.
+    /// Parses the writer's dictionary snapshot into remote definitions.
     ///
     /// Runs before the materialization lock on one cached parsing
     /// foundation: only the delivery thread parses, and the dedicated
@@ -545,7 +578,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         }
     }
 
-            /// Filters remote definitions against the local dictionary.
+    /// Filters remote definitions against the local dictionary.
     ///
     /// Read-only: unknown remote types are collected, structurally
     /// conflicting types fail with [CorruptReplicationDataException]. Runs on
@@ -579,7 +612,7 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         }
     }
 
-            /// Registers planned remote definitions and persists them immediately.
+    /// Registers planned remote definitions and persists them immediately.
     ///
     /// Runs on the update handler (the coordinator's write side), before
     /// the transaction's binary is imported, so a restart can still

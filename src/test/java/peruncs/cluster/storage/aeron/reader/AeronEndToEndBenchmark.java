@@ -4,6 +4,7 @@ import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
+import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelopeTestSupport;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
@@ -37,7 +38,7 @@ public final class AeronEndToEndBenchmark {
                         Long.toString(result.allocatedBytesPerTransaction()));
     }
 
-        /// Measures the complete application framing and reader assembly path.
+    /// Measures the complete application framing and reader assembly path.
     static Result measure(final int payloadLength, final int chunkSize, final int warmup, final int iterations) {
         if (payloadLength <= 0 || chunkSize <= 0 || warmup < 0 || iterations <= 0)
             throw new IllegalArgumentException("invalid end-to-end benchmark parameters");
@@ -79,13 +80,13 @@ public final class AeronEndToEndBenchmark {
         final int crc = AeronReplicationEnvelope.crc32c(source, 0, length, checksum);
         for (int index = 0, offset = 0; offset < length; index++) {
             final int size = Math.min(chunkSize, length - offset);
-            final int encoded = AeronReplicationEnvelope.encode(frame, 0, clusterId, 1, 1L, wireNonce,
+            final int encoded = AeronReplicationEnvelopeTestSupport.encodeFrame(frame, 0, clusterId, 1, 1L, wireNonce,
                     sequence, AeronReplicationEnvelope.Kind.STORE_BINARY, length, index, count, offset, 0,
                     source, offset, size, checksum);
             assembler.onFragment(frame, 0, encoded, null);
             offset += size;
         }
-        final int encoded = AeronReplicationEnvelope.encode(frame, 0, clusterId, 1, 1L, wireNonce, sequence,
+        final int encoded = AeronReplicationEnvelopeTestSupport.encodeFrame(frame, 0, clusterId, 1, 1L, wireNonce, sequence,
                 AeronReplicationEnvelope.Kind.COMMIT, length, 0, count, 0, crc, empty, 0, 0, checksum);
         assembler.onFragment(frame, 0, encoded, null);
     }

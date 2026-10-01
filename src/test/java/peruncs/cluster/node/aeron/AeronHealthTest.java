@@ -52,16 +52,11 @@ class AeronHealthTest {
                 this.writerReadyCalls.incrementAndGet();
                 return this.writerReady;
             };
-            return new AeronHealth(
-                    storage, client,
-                    () -> this.closed,
-                    () -> this.driverFailed,
-                    () -> this.capacityAvailable,
-                    writerReadyProbe,
-                    () -> this.writerRole,
-                    () -> this.replicationState,
-                    () -> -1L, () -> -1L, () -> -1L, () -> -1L,
-                    () -> this.watermarkFailed);
+            return new AeronHealth(storage, client,
+                    new AeronHealth.Signals(() -> this.closed, () -> this.driverFailed,
+                            () -> this.capacityAvailable, () -> this.watermarkFailed),
+                    new AeronHealth.WriterProbes(writerReadyProbe, () -> this.writerRole, () -> this.replicationState),
+                    new AeronHealth.Positions(() -> -1L, () -> -1L, () -> -1L, () -> -1L));
         }
 
         ReplicationApplier client() {
@@ -82,7 +77,7 @@ class AeronHealthTest {
         }
     }
 
-        /// A closed view is a pure failure: no lifecycle supplier runs.
+    /// A closed view is a pure failure: no lifecycle supplier runs.
     @Test
     void closedViewNeverInvokesWriterReadiness() {
         final Fixture fixture = new Fixture();
@@ -96,7 +91,7 @@ class AeronHealthTest {
         assertEquals(0, fixture.writerReadyCalls.get());
     }
 
-        /// Closing deactivates the view even when every probe reports healthy.
+    /// Closing deactivates the view even when every probe reports healthy.
     @Test
     void closeDeactivatesAHealthyWriter() {
         final Fixture fixture = new Fixture();
@@ -111,7 +106,7 @@ class AeronHealthTest {
         assertEquals(ReplicationState.FAILED, health.state());
     }
 
-        /// A failed watermark fails readiness without consulting the writer.
+    /// A failed watermark fails readiness without consulting the writer.
     @Test
     void watermarkFailureFailsReadiness() {
         final Fixture fixture = new Fixture();
@@ -124,7 +119,7 @@ class AeronHealthTest {
         assertEquals(0, fixture.writerReadyCalls.get());
     }
 
-        /// A failed driver fails the view even for a ready writer.
+    /// A failed driver fails the view even for a ready writer.
     @Test
     void driverFailureFailsAReadyWriter() {
         final Fixture fixture = new Fixture();
@@ -136,7 +131,7 @@ class AeronHealthTest {
         assertEquals(ReplicationState.FAILED, fixture.health().state());
     }
 
-        /// A ready writer with capacity is live.
+    /// A ready writer with capacity is live.
     @Test
     void readyWriterIsLive() {
         final Fixture fixture = new Fixture();
@@ -162,7 +157,7 @@ class AeronHealthTest {
         assertEquals(ReplicationState.STARTING, health.state());
     }
 
-        /// A writer without Archive capacity stays scrutable as degraded.
+    /// A writer without Archive capacity stays scrutable as degraded.
     @Test
     void writerWithoutCapacityIsDegraded() {
         final Fixture fixture = new Fixture();
@@ -184,7 +179,7 @@ class AeronHealthTest {
         assertEquals(ReplicationState.RESEED_REQUIRED, fixture.health().state());
     }
 
-        /// A reader without a subscription yet is starting, not failed.
+    /// A reader without a subscription yet is starting, not failed.
     @Test
     void readerWithoutClientIsStarting() {
         final Fixture fixture = new Fixture();
@@ -194,7 +189,7 @@ class AeronHealthTest {
         assertEquals(ReplicationState.STARTING, health.state());
     }
 
-        /// A live reader client is ready.
+    /// A live reader client is ready.
     @Test
     void liveReaderIsReady() {
         final Fixture fixture = new Fixture();
@@ -207,7 +202,7 @@ class AeronHealthTest {
         assertEquals(ReplicationState.LIVE, health.state());
     }
 
-        /// A running reader that has not caught up is replaying but still healthy.
+    /// A running reader that has not caught up is replaying but still healthy.
     @Test
     void catchingUpReaderIsReplaying() {
         final Fixture fixture = new Fixture();
@@ -220,7 +215,7 @@ class AeronHealthTest {
         assertEquals(ReplicationState.REPLAYING, health.state());
     }
 
-        /// A reader whose bounded reconnect budget expired reports RESEED_REQUIRED.
+    /// A reader whose bounded reconnect budget expired reports RESEED_REQUIRED.
     @Test
     void reseedReaderClientRequiresReseed() {
         final Fixture fixture = new Fixture();
@@ -233,7 +228,7 @@ class AeronHealthTest {
         assertEquals(ReplicationState.RESEED_REQUIRED, health.state());
     }
 
-        /// A failed reader client fails the view.
+    /// A failed reader client fails the view.
     @Test
     void failedReaderClientFails() {
         final Fixture fixture = new Fixture();

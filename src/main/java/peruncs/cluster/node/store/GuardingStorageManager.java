@@ -1,11 +1,9 @@
 package peruncs.cluster.node.store;
 
 import org.eclipse.serializer.afs.types.AFile;
-import org.eclipse.serializer.collections.Set_long;
 import org.eclipse.serializer.collections.types.XGettingEnum;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.types.*;
-import org.eclipse.serializer.persistence.types.PersistenceStorer.Creator;
 import org.eclipse.serializer.reference.Lazy;
 import org.eclipse.serializer.reference.Swizzling;
 import org.eclipse.store.storage.types.*;
@@ -16,12 +14,11 @@ import peruncs.cluster.storage.StorageGraphCoordinator;
 import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.*;
-
 
 /// Store facade with the write gates, the raw-target gate, and the shared
 /// graph-boundary adapter.
@@ -46,9 +43,9 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     private final GraphBoundary graphBoundary;
     private final LazyConstant<PersistenceManager<Binary>> persistenceManager;
     private final ApplicationSections appSections;
-    private final ReplicationMark replicationMark;
-    private final Consumer<ReplicationMark> prepareReplicationCommit;
-    private final Consumer<ReplicationMark> cancelReplicationCommit;
+    final ReplicationMark replicationMark;
+    final Consumer<ReplicationMark> prepareReplicationCommit;
+    final Consumer<ReplicationMark> cancelReplicationCommit;
     /* Set when this manager's shutdown() triggered the node close: reads are
      * then served by failing fast instead of resurrecting a closed Store. */
     private volatile boolean closed;
@@ -76,16 +73,16 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
          * one borrower's adapter closed Store's persistence manager for
          * everyone. */
         this.persistenceManager = LazyConstant.of(
-                () -> new BinaryPersistenceManagerAdapter(delegate.persistenceManager()));
+                () -> new BinaryPersistenceManagerAdapter(this, delegate.persistenceManager()));
         /* One adapter per manager lifetime: the raw Database lookup and the
          * guarded view are identity-stable, so no wrapper or delegate lookup
          * is needed per database() call. */
         this.delegateDatabase = delegate.database();
-        this.guardedDatabase = this.new GuardedDatabase();
+        this.guardedDatabase = new GuardedDatabase(this);
     }
 
     /* Cached once: identical to re-resolving on every accessor. */
-    private final Database delegateDatabase;
+    final Database delegateDatabase;
     private final Database guardedDatabase;
 
     /* The write gates cover every write entry point (store, storeAll,
@@ -132,7 +129,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     /// @param raw unwrapped target
     /// @return gated target
     PersistenceTarget<Binary> gateTarget(final PersistenceTarget<Binary> raw) {
-        return new GatedPersistenceTarget(raw, this::validateState);
+        return new GatedPersistenceTarget(this, raw, this::validateState);
     }
 
     @Override
@@ -171,90 +168,6 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
         this.ensureOpen();
         this.ensureGraphValid();
         return this.guardedDatabase;
-    }
-
-    /// A [Database] view over the guarded manager: every operation routes
-    /// through this facade, so import rejection, the boundary, and the node's
-    /// lifecycle/validity admission all still apply.
-    private final class GuardedDatabase implements Database {
-        @Override
-        public String databaseName() {
-            return GuardingStorageManager.this.delegateDatabase.databaseName();
-        }
-
-        @Override
-        public String toIdentifyingString() {
-            return GuardingStorageManager.this.delegateDatabase.toIdentifyingString();
-        }
-
-        @Override
-        public StorageManager storage() {
-            /* The facade itself: never the raw embedded manager. */
-            return GuardingStorageManager.this;
-        }
-
-        @Override
-        public StorageManager setStorage(final StorageManager storage) {
-            throw new UnsupportedOperationException(
-                    "a cluster node's Store is owned by its node lifecycle; setStorage is reserved");
-        }
-
-        @Override
-        public boolean hasStorage() {
-            return GuardingStorageManager.this.isRunning();
-        }
-
-        @Override
-        public Database guaranteeNoActiveStorage() {
-            throw new UnsupportedOperationException(
-                    "a cluster node's Store lifecycle is owned by the node, not the application Database");
-        }
-
-        @Override
-        public StorageManager guaranteeActiveStorage() {
-            GuardingStorageManager.this.ensureOpen();
-            GuardingStorageManager.this.ensureGraphValid();
-            return GuardingStorageManager.this;
-        }
-
-        @Override
-        public Object getObject(final long objectId) {
-            /* Object retrieval reads the managed graph: it joins the same
-             * coordinated read section as every other read, so a failed or
-             * draining Store never serves identifiers. */
-            return GuardingStorageManager.this.read(
-                    () -> GuardingStorageManager.this.delegateDatabase.getObject(objectId));
-        }
-
-        @Override
-        public long store(final Object instance) {
-            return GuardingStorageManager.this.store(instance);
-        }
-
-        @Override
-        public long[] storeAll(final Object... instances) {
-            return GuardingStorageManager.this.storeAll(instances);
-        }
-
-        @Override
-        public void storeAll(final Iterable<?> instances) {
-            GuardingStorageManager.this.storeAll(instances);
-        }
-
-        @Override
-        public Storer createLazyStorer() {
-            return GuardingStorageManager.this.createLazyStorer();
-        }
-
-        @Override
-        public Storer createStorer() {
-            return GuardingStorageManager.this.createStorer();
-        }
-
-        @Override
-        public Storer createEagerStorer() {
-            return GuardingStorageManager.this.createEagerStorer();
-        }
     }
 
     @Override
@@ -420,7 +333,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     /// directly through the owning lifecycle — leaves the raw Store shut
     /// down underneath; reads and writes on a dead Store must not resurrect
     /// or re-enter it.
-    private void ensureOpen() {
+    void ensureOpen() {
         /* An outer facade section is admitted and counted before it takes the
          * coordinator; nested calls on that thread must finish if close starts
          * while the section is active. Calls outside that section consult the
@@ -442,21 +355,35 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
         this.graphCoordinator.invalidate(failure);
     }
 
+    /// The deepest cause chain that is classified; anything longer is treated as unclassifiable.
+    private static final int MAX_CAUSE_DEPTH = 16;
+
+    /// Flattens a failure's cause chain, or reports that it cannot be classified.
+    ///
+    /// The depth bound also ends a cyclic chain, so no separate cycle detection is needed.
+    ///
+    /// @param failure delegated failure
+    /// @return the chain starting at `failure`, or `null` when it is deeper than the bound or contains an [Error]
+    private static List<Throwable> boundedChain(final Throwable failure) {
+        final List<Throwable> chain = new ArrayList<>();
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (chain.size() == MAX_CAUSE_DEPTH || current instanceof Error) return null;
+            chain.add(current);
+        }
+        return chain;
+    }
+
     /// Returns whether this cause chain proves rejection before local persistence.
     ///
     /// @param failure delegated failure
     /// @return `true` only when retry is safe
     static boolean isCleanRejection(final Throwable failure) {
-        if (failure == null) return false;
-        Throwable slow = failure;
-        Throwable fast = failure;
+        final List<Throwable> chain = boundedChain(failure);
+        if (chain == null) return false;
         boolean rejected = false;
         boolean rejectedRecordedAbort = false;
         boolean sawAbortCause = false;
-        int depth = 0;
-        for (Throwable current = failure; current != null; current = current.getCause()) {
-            if (depth++ == 16) return false;
-            if (current instanceof Error) return false;
+        for (final Throwable current : chain) {
             if (current instanceof WriteRejectedException rejection) {
                 rejected = true;
                 rejectedRecordedAbort |= rejection.hasRecordedAbort();
@@ -467,9 +394,6 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
                 }
                 sawAbortCause = true;
             }
-            slow = slow == null ? null : slow.getCause();
-            fast = fast == null || fast.getCause() == null ? null : fast.getCause().getCause();
-            if (slow != null && slow == fast) return false;
         }
         return rejected;
     }
@@ -479,32 +403,27 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     /// @param failure delegated failure
     /// @return `true` when the chain reports a locally accepted pending commit
     static boolean isPendingCommit(final Throwable failure) {
-        Throwable slow = failure;
-        Throwable fast = failure;
+        final List<Throwable> chain = boundedChain(failure);
+        if (chain == null) return false;
         boolean pending = false;
-        int depth = 0;
-        for (Throwable current = failure; current != null; current = current.getCause()) {
-            if (depth++ == 16 || current instanceof Error) return false;
+        for (final Throwable current : chain) {
             if (current instanceof ReplicationPendingException) {
                 pending = true;
             } else if (current instanceof ReplicationException &&
                        !(pending && current instanceof ReplicationUnavailableException)) {
                 return false;
             }
-            slow = slow == null ? null : slow.getCause();
-            fast = fast == null || fast.getCause() == null ? null : fast.getCause().getCause();
-            if (slow != null && slow == fast) return false;
         }
         return pending;
     }
 
     /// Runs one persistence step under the shared exclusive section:
     /// admission after lock acquisition, latch only on the delegate's failure.
-    private <R> R persist(final Supplier<R> step) {
+    <R> R persist(final Supplier<R> step) {
         return this.writeSection(step, true);
     }
 
-    private void persist(final Runnable step) {
+    void persist(final Runnable step) {
         this.writeSection(step, true);
     }
 
@@ -592,7 +511,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     @Override
     public long store(final Object instance) {
         return this.persist(() -> {
-            final ClusterStorerAdapter storer = new ClusterStorerAdapter(this.delegate.createStorer());
+            final ClusterStorerAdapter storer = new ClusterStorerAdapter(this, this.delegate.createStorer());
             final long objectId = storer.store(instance);
             storer.commitWithinWriteSection();
             return objectId;
@@ -602,7 +521,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     @Override
     public long[] storeAll(final Object... instances) {
         return this.persist(() -> {
-            final ClusterStorerAdapter storer = new ClusterStorerAdapter(this.delegate.createStorer());
+            final ClusterStorerAdapter storer = new ClusterStorerAdapter(this, this.delegate.createStorer());
             final long[] objectIds = storer.storeAll(instances);
             storer.commitWithinWriteSection();
             return objectIds;
@@ -612,7 +531,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     @Override
     public void storeAll(final Iterable<?> instances) {
         this.persist(() -> {
-            final ClusterStorerAdapter storer = new ClusterStorerAdapter(this.delegate.createStorer());
+            final ClusterStorerAdapter storer = new ClusterStorerAdapter(this, this.delegate.createStorer());
             storer.storeAll(instances);
             storer.commitWithinWriteSection();
         });
@@ -623,7 +542,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
         return this.persist(() -> {
             final PersistenceRootReferencing rootReference = this.delegate.viewRoots().rootReference();
             final Object root = rootReference.get();
-            final ClusterStorerAdapter storer = new ClusterStorerAdapter(this.delegate.createStorer());
+            final ClusterStorerAdapter storer = new ClusterStorerAdapter(this, this.delegate.createStorer());
             storer.store(rootReference);
             final long rootId = root == null ? Swizzling.nullId() : storer.store(root);
             storer.commitWithinWriteSection();
@@ -666,21 +585,21 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     public Storer createEagerStorer() {
         this.ensureOpen();
         this.ensureGraphValid();
-        return new ClusterStorerAdapter(this.delegate.createEagerStorer());
+        return new ClusterStorerAdapter(this, this.delegate.createEagerStorer());
     }
 
     @Override
     public Storer createLazyStorer() {
         this.ensureOpen();
         this.ensureGraphValid();
-        return new ClusterStorerAdapter(this.delegate.createLazyStorer());
+        return new ClusterStorerAdapter(this, this.delegate.createLazyStorer());
     }
 
     @Override
     public Storer createStorer() {
         this.ensureOpen();
         this.ensureGraphValid();
-        return new ClusterStorerAdapter(this.delegate.createStorer());
+        return new ClusterStorerAdapter(this, this.delegate.createStorer());
     }
 
     @Override
@@ -773,454 +692,15 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
         return this.read(() -> this.delegate.exportAdjacencyData(workingDir));
     }
 
-    private <R> R read(final Supplier<R> action) {
+    <R> R read(final Supplier<R> action) {
         return this.appSection(() -> this.graphCoordinator.read(action));
     }
 
-    private void read(final Runnable action) {
+    void read(final Runnable action) {
         this.read(() -> {
             action.run();
             return null;
         });
     }
 
-    /// Adapts the cluster manager to Store's binary persistence manager.
-    private final class BinaryPersistenceManagerAdapter implements PersistenceManager<Binary> {
-        private final PersistenceManager<Binary> delegate;
-
-        private BinaryPersistenceManagerAdapter(final PersistenceManager<Binary> delegate) {
-            this.delegate = delegate;
-        }
-
-        @Override
-        public long ensureObjectId(final Object object) {
-            return GuardingStorageManager.this.isReadOnly() ? this.lookupRegisteredId(object)
-                    : this.delegate.ensureObjectId(object);
-        }
-
-        @Override
-        public <U> long ensureObjectId(
-                final U object,
-                final PersistenceObjectIdRequestor<Binary> objectIdRequestor,
-                final PersistenceTypeHandler<Binary, U> optionalHandler
-        ) {
-            return GuardingStorageManager.this.isReadOnly() ? this.lookupRegisteredId(object)
-                    : this.delegate.ensureObjectId(object, objectIdRequestor, optionalHandler);
-        }
-
-        @Override
-        public <U> long ensureObjectIdGuaranteedRegister(
-                final U object,
-                final PersistenceObjectIdRequestor<Binary> objectIdRequestor,
-                final PersistenceTypeHandler<Binary, U> optionalHandler
-        ) {
-            return GuardingStorageManager.this.isReadOnly() ? this.lookupRegisteredId(object)
-                    : this.delegate.ensureObjectIdGuaranteedRegister(object, objectIdRequestor, optionalHandler);
-        }
-
-        @Override
-        public void consolidate() {
-            this.rejectReaderMutation();
-            this.delegate.consolidate();
-        }
-
-        @Override
-        public boolean registerLocalRegistry(final PersistenceLocalObjectIdRegistry<Binary> localRegistry) {
-            this.rejectReaderMutation();
-            return this.delegate.registerLocalRegistry(localRegistry);
-        }
-
-        @Override
-        public void mergeEntries(final PersistenceLocalObjectIdRegistry<Binary> localRegistry) {
-            this.rejectReaderMutation();
-            this.delegate.mergeEntries(localRegistry);
-        }
-
-        @Override
-        public long lookupObjectId(final Object object) {
-            return GuardingStorageManager.this.read(() -> this.delegate.lookupObjectId(object));
-        }
-
-        @Override
-        public Object lookupObject(final long objectId) {
-            return GuardingStorageManager.this.read(() -> this.delegate.lookupObject(objectId));
-        }
-
-        @Override
-        public Object get() {
-            return GuardingStorageManager.this.read(this.delegate::get);
-        }
-
-        @Override
-        public Object getObject(final long objectId) {
-            return GuardingStorageManager.this.read(() -> this.delegate.getObject(objectId));
-        }
-
-        @Override
-        public <C extends Consumer<Object>> C collect(final C collector, final long... objectIds) {
-            return GuardingStorageManager.this.read(() -> this.delegate.collect(collector, objectIds));
-        }
-
-        @Override
-        public <C extends Consumer<Object>> C collect(final C collector, final Set_long objectIds) {
-            return GuardingStorageManager.this.read(() -> this.delegate.collect(collector, objectIds));
-        }
-
-        @Override
-        public long store(final Object instance) {
-            /* Exclusive section like the facade's own store(): adapter writes
-             * must not race application write sections, and a delegate failure
-             * invalidates through the same latch. */
-            return GuardingStorageManager.this.persist(() -> {
-                final ClusterPersistenceStorerAdapter storer =
-                        new ClusterPersistenceStorerAdapter(this.delegate.createStorer());
-                final long objectId = storer.store(instance);
-                storer.commitWithinWriteSection();
-                return objectId;
-            });
-        }
-
-        @Override
-        public long[] storeAll(final Object... instances) {
-            return GuardingStorageManager.this.persist(() -> {
-                final ClusterPersistenceStorerAdapter storer =
-                        new ClusterPersistenceStorerAdapter(this.delegate.createStorer());
-                final long[] objectIds = storer.storeAll(instances);
-                storer.commitWithinWriteSection();
-                return objectIds;
-            });
-        }
-
-        @Override
-        public void storeAll(final Iterable<?> instances) {
-            GuardingStorageManager.this.persist(() -> {
-                final ClusterPersistenceStorerAdapter storer =
-                        new ClusterPersistenceStorerAdapter(this.delegate.createStorer());
-                storer.storeAll(instances);
-                storer.commitWithinWriteSection();
-            });
-        }
-
-        @Override
-        public ByteOrder getTargetByteOrder() {
-            return this.delegate.getTargetByteOrder();
-        }
-
-        @Override
-        public PersistenceStorer createLazyStorer() {
-            return new ClusterPersistenceStorerAdapter(this.delegate.createLazyStorer());
-        }
-
-        @Override
-        public PersistenceStorer createStorer() {
-            return new ClusterPersistenceStorerAdapter(this.delegate.createStorer());
-        }
-
-        @Override
-        public PersistenceStorer createEagerStorer() {
-            return new ClusterPersistenceStorerAdapter(this.delegate.createEagerStorer());
-        }
-
-        @Override
-        public PersistenceStorer createStorer(final Creator<Binary> storerCreator) {
-            return new ClusterPersistenceStorerAdapter(this.delegate.createStorer(storerCreator));
-        }
-
-        @Override
-        public PersistenceLoader createLoader() {
-            GuardingStorageManager.this.ensureGraphValid();
-            return this.delegate.createLoader();
-        }
-
-        @Override
-        public PersistenceRegisterer createRegisterer() {
-            this.rejectReaderMutation();
-            return this.delegate.createRegisterer();
-        }
-
-        @Override
-        public void updateMetadata(
-                final PersistenceTypeDictionary typeDictionary,
-                final long highestTypeId,
-                final long highestObjectId
-        ) {
-            if (GuardingStorageManager.this.replicationMark != null) {
-                throw new UnsupportedOperationException("replicated Store metadata is node-owned");
-            }
-            GuardingStorageManager.this.persist(() ->
-                    this.delegate.updateMetadata(typeDictionary, highestTypeId, highestObjectId));
-        }
-
-        @Override
-        public PersistenceObjectRegistry objectRegistry() {
-            this.rejectReaderMutation();
-            return this.delegate.objectRegistry();
-        }
-
-        @Override
-        public Object objectRegistryMonitor() {
-            return this.delegate.objectRegistryMonitor();
-        }
-
-        @Override
-        public PersistenceTypeDictionary typeDictionary() {
-            return GuardingStorageManager.this.read(this.delegate::typeDictionary);
-        }
-
-        private long lookupRegisteredId(final Object object) {
-            return GuardingStorageManager.this.read(() -> {
-                final long objectId = this.delegate.lookupObjectId(object);
-                if (Swizzling.isNotFoundId(objectId)) {
-                    throw new ReaderWriteRejectedException(
-                            "node role is read-only; assigning a new object id would diverge from the writer");
-                }
-                return objectId;
-            });
-        }
-
-        private void rejectReaderMutation() {
-            if (GuardingStorageManager.this.isReadOnly()) {
-                throw new ReaderWriteRejectedException(
-                        "node role is read-only; application registry changes are rejected");
-            }
-        }
-
-        @Override
-        public PersistenceRootsView viewRoots() {
-            return GuardingStorageManager.this.viewRoots();
-        }
-
-        @Override
-        public long currentObjectId() {
-            return this.delegate.currentObjectId();
-        }
-
-        @Override
-        public PersistenceManager<Binary> updateCurrentObjectId(final long currentObjectId) {
-            if (GuardingStorageManager.this.replicationMark != null) {
-                throw new UnsupportedOperationException("replicated Store object ids are node-owned");
-            }
-            GuardingStorageManager.this.persist(() ->
-                    this.delegate.updateCurrentObjectId(currentObjectId));
-            return this;
-        }
-
-        @Override
-        public PersistenceSource<Binary> source() {
-            return this.delegate.source();
-        }
-
-        @Override
-        public PersistenceTarget<Binary> target() {
-            if (GuardingStorageManager.this.replicationMark != null) {
-                throw new UnsupportedOperationException("replicated Store commits must use the storage manager");
-            }
-            return GuardingStorageManager.this.gateTarget(this.delegate.target());
-        }
-
-        @Override
-        public void close() {
-            /* This adapter is a borrowed view of the Store's shared
-             * persistence manager. The owning storage manager alone ends
-             * that lifecycle. */
-        }
-    }
-
-    /// Stores binary entities while applying the cluster's size rules.
-    private final class ClusterPersistenceStorerAdapter extends ClusterStorerAdapter implements PersistenceStorer {
-        private final PersistenceStorer delegate;
-
-        private ClusterPersistenceStorerAdapter(final PersistenceStorer delegate) {
-            super(delegate);
-            this.delegate = delegate;
-        }
-
-        @Override
-        public PersistenceStorer reinitialize() {
-            this.delegate.reinitialize();
-            return this;
-        }
-
-        @Override
-        public PersistenceStorer reinitialize(final long initialCapacity) {
-            this.delegate.reinitialize(initialCapacity);
-            return this;
-        }
-
-        @Override
-        public PersistenceStorer ensureCapacity(final long desiredCapacity) {
-            this.delegate.ensureCapacity(desiredCapacity);
-            return this;
-        }
-    }
-
-    /// Delegates Store storer operations while preserving cluster checks.
-    private class ClusterStorerAdapter implements Storer {
-        private final Storer storer;
-
-        private ClusterStorerAdapter(final Storer storer) {
-            this.storer = storer;
-        }
-
-        @Override
-        public long store(final Object instance) {
-            /* A cached storer must not keep accepting registrations after the
-             * graph is latched or the node closed — buffering into a visible
-             * write would otherwise still corrupt a later commit. */
-            GuardingStorageManager.this.validateState();
-            return this.storer.store(instance);
-        }
-
-        @Override
-        public long store(final Object instance, final long objectId) {
-            GuardingStorageManager.this.validateState();
-            return this.storer.store(instance, objectId);
-        }
-
-        @Override
-        public long[] storeAll(final Object... instances) {
-            GuardingStorageManager.this.validateState();
-            return this.storer.storeAll(instances);
-        }
-
-        @Override
-        public void storeAll(final Iterable<?> instances) {
-            GuardingStorageManager.this.validateState();
-            this.storer.storeAll(instances);
-        }
-
-        @Override
-        public Object commit() {
-            /* Same exclusive persist section as store()/storeRoot():
-             * admission before and after the lock, latch only on a delegate
-             * persistence failure. */
-            return GuardingStorageManager.this.persist(this::commitWithinWriteSection);
-        }
-
-        Object commitWithinWriteSection() {
-            if (GuardingStorageManager.this.replicationMark != null) {
-                final ReplicationMark mark = GuardingStorageManager.this.replicationMark;
-                try {
-                    GuardingStorageManager.this.prepareReplicationCommit.accept(mark);
-                    this.storer.store(mark);
-                    return this.storer.commit();
-                } finally {
-                    GuardingStorageManager.this.cancelReplicationCommit.accept(mark);
-                }
-            }
-            return this.storer.commit();
-        }
-
-        @Override
-        public void clear() {
-            this.storer.clear();
-        }
-
-        @Override
-        public boolean skipMapped(final Object instance, final long objectId) {
-            return this.storer.skipMapped(instance, objectId);
-        }
-
-        @Override
-        public boolean skip(final Object instance) {
-            return this.storer.skip(instance);
-        }
-
-        @Override
-        public boolean skipNulled(final Object instance) {
-            return this.storer.skipNulled(instance);
-        }
-
-        @Override
-        public long size() {
-            return this.storer.size();
-        }
-
-        @Override
-        public long currentCapacity() {
-            return this.storer.currentCapacity();
-        }
-
-        @Override
-        public long maximumCapacity() {
-            return this.storer.maximumCapacity();
-        }
-
-        @Override
-        public Storer reinitialize() {
-            this.storer.reinitialize();
-            return this;
-        }
-
-        @Override
-        public Storer reinitialize(final long initialCapacity) {
-            this.storer.reinitialize(initialCapacity);
-            return this;
-        }
-
-        @Override
-        public Storer ensureCapacity(final long desiredCapacity) {
-            this.storer.ensureCapacity(desiredCapacity);
-            return this;
-        }
-
-        @Override
-        public void registerCommitListener(final PersistenceCommitListener listener) {
-            this.storer.registerCommitListener(listener);
-        }
-
-        @Override
-        public boolean isEmpty() {
-            return this.storer.isEmpty();
-        }
-
-        @Override
-        public void registerRegistrationListener(final PersistenceObjectRegistrationListener listener) {
-            this.storer.registerRegistrationListener(listener);
-        }
-    }
-
-    /// Validates the write gate before every raw-target write.
-    ///
-    /// The persistence manager's raw target otherwise bypasses the storer
-    /// `commit` gate, so a fluent binary write would escape storage-limit
-    /// enforcement on writers and application-write rejection on readers.
-    /// Non-static because a delegate I/O failure must latch the owning
-    /// manager's graph invalidity.
-    final class GatedPersistenceTarget implements PersistenceTarget<Binary> {
-        private final PersistenceTarget<Binary> delegate;
-        private final Runnable writeGate;
-
-        private GatedPersistenceTarget(final PersistenceTarget<Binary> delegate, final Runnable writeGate) {
-            this.delegate = delegate;
-            this.writeGate = writeGate;
-        }
-
-        @Override
-        public boolean isWritable() {
-            return this.delegate.isWritable();
-        }
-
-        @Override
-        public void write(final Binary data) {
-            /* The admission gate stays OUTSIDE the delegate failure catch:
-             * a gate rejection is a policy refusal, never graph damage. The
-             * delegate write itself runs the exclusive section, so a raw
-             * fluent write cannot race an application boundary write. */
-            this.writeGate.run();
-            GuardingStorageManager.this.persist(() -> this.delegate.write(data));
-        }
-
-        @Override
-        public void prepareTarget() {
-            this.delegate.prepareTarget();
-        }
-
-        /// A borrowed view never owns the live target: closing it must be a
-        /// no-op so an application cannot shut the shared Store down through
-        /// the persistence-manager adapter.
-        @Override
-        public void closeTarget() {
-        }
-    }
 }

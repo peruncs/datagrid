@@ -1,5 +1,7 @@
 package peruncs.cluster.node.backup;
 
+import peruncs.cluster.storage.UuidCodec;
+import peruncs.cluster.errors.IncompleteArchiveException;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.storage.Crc32C;
 import peruncs.cluster.storage.io.AtomicFileWriter;
@@ -33,7 +35,7 @@ import java.util.zip.*;
 /// partial file. Transient I/O failures stay ordinary [NodeException]s
 /// and must never be treated as evidence that a durable archive is partial.
 final class BackupArchive {
-        /// Sidecar entry carrying the full backup identity and content digest.
+    /// Sidecar entry carrying the full backup identity and content digest.
     static final String BACKUP_IDENTITY_ENTRY = "backup-identity";
     private static final LazyConstant<Pattern> BACKUP_NAME = LazyConstant.of(
             () -> Pattern.compile(
@@ -125,7 +127,7 @@ final class BackupArchive {
         }
     }
 
-        /// Reports whether a file name is a current-generation backup archive.
+    /// Reports whether a file name is a current-generation backup archive.
     ///
     /// @param name file name to check, or `null`
     /// @return `true` when the name encodes a backup identity
@@ -133,7 +135,7 @@ final class BackupArchive {
         return name != null && BACKUP_NAME.get().matcher(name).matches();
     }
 
-        /// Formats the archive file name for a backup identity.
+    /// Formats the archive file name for a backup identity.
     ///
     /// The name pins every selection field of the backup, including the
     /// replication sequence, so archives can be selected without opening
@@ -153,7 +155,7 @@ final class BackupArchive {
                 backup.backupId() == null ? hexOrZero(null) : hex(backup.backupId()));
     }
 
-        /// Parses the selection fields back out of an archive file name.
+    /// Parses the selection fields back out of an archive file name.
     ///
     /// @param name   archive file name
     /// @param volume volume used for error reporting
@@ -206,7 +208,7 @@ final class BackupArchive {
         return NIL_UUID.equals(parsed) ? null : parsed;
     }
 
-        /// Writes the full backup identity as an archive sidecar entry.
+    /// Writes the full backup identity as an archive sidecar entry.
     ///
     /// The identity is framed with a magic value, a version, and a trailing
     /// CRC32C, and is replaced atomically through [AtomicFileWriter], so a
@@ -240,8 +242,7 @@ final class BackupArchive {
         data.putLong(backup.fencingToken());
         data.putLong(backup.recordingPosition());
         putUuid(data, backup.nodeId());
-        data.putLong(backup.backupId().getMostSignificantBits());
-        data.putLong(backup.backupId().getLeastSignificantBits());
+        UuidCodec.put(data, backup.backupId());
         data.putLong(backup.digest());
         final byte[] payload = Arrays.copyOf(data.array(), data.position());
         final ByteBuffer framed = ByteBuffer.allocate(payload.length + Integer.BYTES);
@@ -257,12 +258,11 @@ final class BackupArchive {
             data.putLong(0L);
         } else {
             data.put((byte) 1);
-            data.putLong(id.getMostSignificantBits());
-            data.putLong(id.getLeastSignificantBits());
+            UuidCodec.put(data, id);
         }
     }
 
-        /// Reads the backup identity sidecar from an archive.
+    /// Reads the backup identity sidecar from an archive.
     ///
     /// @param archive archive to inspect
     /// @return stored identity, or `null` when the archive has no identity entry
@@ -313,7 +313,7 @@ final class BackupArchive {
                     data.getLong(),
                     data.getLong(),
                     getUuid(data),
-                    new UUID(data.getLong(), data.getLong()),
+                    UuidCodec.get(data),
                     data.getLong());
             if (NIL_UUID.equals(identity.backupId())) {
                 throw new NodeException("Backup identity carries a nil backup id in %s".formatted(archive));
@@ -326,15 +326,13 @@ final class BackupArchive {
 
     private static UUID getUuid(final ByteBuffer data) {
         final boolean present = data.get() != 0;
-        final long most = data.getLong();
-        final long least = data.getLong();
-        if (!present && most == 0L && least == 0L) {
+        final UUID parsed = UuidCodec.get(data);
+        if (!present && parsed.getMostSignificantBits() == 0L && parsed.getLeastSignificantBits() == 0L) {
             return null;
         }
         if (!present) {
             throw new IllegalArgumentException("Backup identity UUID flag contradicts its value");
         }
-        final UUID parsed = new UUID(most, least);
         /* A nil UUID carries no identity, just like a zero filename field. */
         return NIL_UUID.equals(parsed) ? null : parsed;
     }
@@ -357,7 +355,7 @@ final class BackupArchive {
         return output.toByteArray();
     }
 
-        /// Digests the storage payload of an export directory.
+    /// Digests the storage payload of an export directory.
     ///
     /// The digest covers every regular file under `storage`, ordered by
     /// slash-separated relative path with each
@@ -398,7 +396,7 @@ final class BackupArchive {
         }
     }
 
-        /// Digests the storage payload carried by an archive.
+    /// Digests the storage payload carried by an archive.
     ///
     /// Entries are visited in the same order as [#contentDigestOfDirectory],
     /// so a digest taken before compression matches the archived bytes.
@@ -452,7 +450,7 @@ final class BackupArchive {
         }
     }
 
-        /// Compresses the export root into a new archive file.
+    /// Compresses the export root into a new archive file.
     ///
     /// @param workingDir      export workspace holding `storage`,
     ///                        `ready`, and optionally `backup-identity`
@@ -529,7 +527,7 @@ final class BackupArchive {
                 : new FileAttribute<?>[0];
     }
 
-        /// Extracts only archives with safe relative, non-link entries.
+    /// Extracts only archives with safe relative, non-link entries.
     ///
     /// The extraction budget is derived from the archive's declared entry
     /// sizes when all are known and falls back to the configured absolute

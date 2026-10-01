@@ -21,7 +21,7 @@ class ApplicationSectionDrainTest {
     @Test
     void drainWaitsForOuterApplicationSectionsAndCanRetry(@TempDir final Path directory) throws Exception {
         try (EmbeddedStorageManager delegate = StorageWriteGatingTest.start(directory)) {
-            final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+            final ClusterStorageManager<Object> manager = TestManagers.guarding(
                     delegate, () -> false, newNodeClose(), new StorageGraphCoordinator(100L));
             final CountDownLatch entered = new CountDownLatch(1);
             final CountDownLatch release = new CountDownLatch(1);
@@ -47,7 +47,7 @@ class ApplicationSectionDrainTest {
     @Test
     void sectionCountIsReleasedWhenTheCallbackThrows(@TempDir final Path directory) {
         try (EmbeddedStorageManager delegate = StorageWriteGatingTest.start(directory)) {
-            final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+            final ClusterStorageManager<Object> manager = TestManagers.guarding(
                     delegate, () -> false, newNodeClose(), new StorageGraphCoordinator());
             assertThrows(IllegalArgumentException.class, () -> manager.graphBoundary().read(() -> {
                 throw new IllegalArgumentException("expected");
@@ -61,7 +61,7 @@ class ApplicationSectionDrainTest {
         try (EmbeddedStorageManager delegate = StorageWriteGatingTest.start(directory)) {
             final AtomicReference<ClusterStorageManager<Object>> reference = new AtomicReference<>();
             final NodeClose close = drainingNodeClose(delegate, reference, Duration.ofMillis(100), new CountDownLatch(1));
-            final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+            final ClusterStorageManager<Object> manager = TestManagers.guarding(
                     delegate, () -> false, close, new StorageGraphCoordinator(100L));
             reference.set(manager);
             final CountDownLatch entered = new CountDownLatch(1);
@@ -95,7 +95,7 @@ class ApplicationSectionDrainTest {
             final AtomicReference<ClusterStorageManager<Object>> reference = new AtomicReference<>();
             final CountDownLatch closeEntered = new CountDownLatch(1);
             final NodeClose close = drainingNodeClose(delegate, reference, Duration.ofSeconds(5), closeEntered);
-            final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+            final ClusterStorageManager<Object> manager = TestManagers.guarding(
                     delegate, () -> false, close, new StorageGraphCoordinator(5_000L));
             reference.set(manager);
             final CountDownLatch entered = new CountDownLatch(1);
@@ -144,7 +144,7 @@ class ApplicationSectionDrainTest {
                     if (closing.get()) throw new IllegalStateException("cluster node is closed");
                 }
             };
-            final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+            final ClusterStorageManager<Object> manager = TestManagers.guarding(
                     delegate, () -> false, nodeClose, new StorageGraphCoordinator());
             closing.set(true);
             assertThrows(IllegalStateException.class, () -> manager.graphBoundary().read(() -> {}));

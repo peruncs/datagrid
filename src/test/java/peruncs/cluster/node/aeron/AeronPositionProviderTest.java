@@ -1,7 +1,7 @@
 package peruncs.cluster.node.aeron;
 
 import org.junit.jupiter.api.Test;
-import peruncs.cluster.errors.internal.ReplicationPositionUnavailableException;
+import peruncs.cluster.errors.ReplicationPositionUnavailableException;
 
 import java.util.UUID;
 

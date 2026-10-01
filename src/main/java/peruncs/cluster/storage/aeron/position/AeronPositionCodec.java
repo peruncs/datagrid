@@ -1,5 +1,6 @@
 package peruncs.cluster.storage.aeron.position;
 
+import peruncs.cluster.storage.UuidCodec;
 import java.util.UUID;
 
 /// Big-endian codec shared by Aeron replication metadata.
@@ -90,8 +91,7 @@ final class AeronPositionCodec {
 
     /// Writes one UUID as two big-endian longs and returns the next offset.
     static int putUuid(final byte[] target, final int offset, final UUID value) {
-        int cursor = putLong(target, offset, value.getMostSignificantBits());
-        return putLong(target, cursor, value.getLeastSignificantBits());
+        return UuidCodec.put(target, offset, value);
     }
 
     /// Reads one big-endian integer.
@@ -116,7 +116,7 @@ final class AeronPositionCodec {
 
     /// Reads one UUID stored as two big-endian longs.
     static UUID getUuid(final byte[] source, final int offset) {
-        return new UUID(getLong(source, offset), getLong(source, offset + Long.BYTES));
+        return UuidCodec.get(source, offset);
     }
 
     /// Sequential reader over one metadata frame; the counterpart to the `put*` writers.

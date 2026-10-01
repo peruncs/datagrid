@@ -763,11 +763,20 @@ class AeronArchiveRetentionTest {
             assertTrue(entered.await(30, TimeUnit.SECONDS), "agent did not start the blocking command");
             /* An agent command that outlives the first close attempt: interrupt
              * the closer mid-termination so quorum cleanup is skipped. */
-            final Thread closing = Thread.ofVirtual().start(retention::close);
+            final AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+            final Thread closing = Thread.ofVirtual().start(() -> {
+                try {
+                    retention.close();
+                } catch (final Throwable failure) {
+                    closeFailure.set(failure);
+                }
+            });
             Thread.sleep(500);
             closing.interrupt();
             closing.join(30_000L);
             assertFalse(closing.isAlive(), "interrupted close did not return");
+            assertInstanceOf(ReplicationUnavailableException.class, closeFailure.get(),
+                    "an interrupted close must fail instead of reporting success");
             assertFalse(retentionAgent(retention).isTerminated(),
                     "interrupted close must not have finished termination");
             release.countDown();
@@ -789,6 +798,43 @@ class AeronArchiveRetentionTest {
             retention.close();
         }
         assertNull(background.get(), "unexpected background failure " + background.get());
+    }
+
+    /// A close that cannot confirm agent termination within its bound fails, so the owner keeps the runtime open.
+    @Test
+    void closeFailsWhileTheAgentIsStillRunningAnArchiveOperation() throws Exception {
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        final AeronArchiveRetention retention = new AeronArchiveRetention(Set.of(READER), () -> {
+            entered.countDown();
+            while (true) {
+                try {
+                    if (release.await(50, TimeUnit.MILLISECONDS)) return;
+                } catch (final InterruptedException interrupted) {
+                    Thread.interrupted();
+                }
+            }
+        }, unavailableRecording(), () -> 17, () -> new AeronWriterRecoveryBoundary(4, 17, 8_192),
+                ignored -> 0L, CLUSTER, GENERATION, 1, () -> 1_048_576, () -> 8_388_608,
+                () -> true, null, 200L);
+        final Thread stuck = Thread.ofVirtual().start(() -> {
+            try {
+                retention.recordReaderWatermark(cursor(READER));
+            } catch (final RuntimeException expected) {
+                /* the caller may time out; only the agent matters here */
+            }
+        });
+        try {
+            assertTrue(entered.await(30, TimeUnit.SECONDS));
+            assertThrows(ReplicationUnavailableException.class, retention::close);
+            assertFalse(retentionAgent(retention).isTerminated(), "the running agent must not be abandoned");
+            release.countDown();
+            stuck.join(30_000L);
+            retention.close();
+            assertTrue(retentionAgent(retention).isTerminated());
+        } finally {
+            release.countDown();
+        }
     }
 
     private static ExecutorService retentionAgent(

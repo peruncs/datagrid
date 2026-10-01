@@ -95,19 +95,19 @@ class ReplicationMarkCrashMatrixIT {
         final var mark = new ReplicationMark(clusterId, generation, 1L, 17L);
         try (EmbeddedStorageManager storage = ReplicationMarkCrashChildMain.foundation(storePath, mark).start()) {
             final var root = (ReplicationMarkCrashChildMain.CrashRoot) storage.root();
-            assertEquals(clusterId, mark.clusterId);
-            assertEquals(generation, mark.storeGeneration);
-            if (mark.sequence == -1L) {
+            assertEquals(clusterId, mark.clusterId());
+            assertEquals(generation, mark.storeGeneration());
+            if (mark.sequence() == -1L) {
                 assertNull(root.latest, "uncommitted payload survived without its mark");
                 return;
             }
-            assertEquals(0L, mark.sequence, "unexpected recovered mark sequence");
+            assertEquals(0L, mark.sequence(), "unexpected recovered mark sequence");
             assertNotNull(root.latest, "mark survived without its transaction");
-            assertEquals(mark.sequence, root.latest.sequence);
+            assertEquals(mark.sequence(), root.latest.sequence);
             assertEquals(ReplicationMarkCrashChildMain.ENTITY_COUNT, root.latest.entities.length);
             for (int index = 0; index < root.latest.entities.length; index++) {
                 final var entity = root.latest.entities[index];
-                assertEquals(mark.sequence, entity.sequence);
+                assertEquals(mark.sequence(), entity.sequence);
                 assertEquals(index, entity.index);
                 assertEquals(ReplicationMarkCrashChildMain.ENTITY_BYTES, entity.payload.length);
                 for (final byte value : entity.payload) {

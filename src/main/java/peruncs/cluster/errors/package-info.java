@@ -2,9 +2,11 @@
 ///
 /// `NodeException` is the shared base for node lifecycle and storage
 /// failures; `ReplicationException` is the base for replication-boundary
-/// failures, with typed specializations for reader rejection, writer
-/// fencing, replication unavailability, corrupt data, the graph-invalidated
+/// failures, with typed specializations for reader rejection,
+/// replication unavailability, corrupt data, the graph-invalidated
 /// gate after a partial update, clean writer rejection, and the reseed demand.
 /// This package is exported so boundary code can name and map these
 /// failures directly.
+///
+/// @since 1.0
 package peruncs.cluster.errors;

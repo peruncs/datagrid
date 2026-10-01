@@ -1,5 +1,6 @@
 package peruncs.cluster.node.backup;
 
+import peruncs.cluster.errors.IncompleteArchiveException;
 import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.api.NodeConfig;
@@ -20,7 +21,6 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.LockSupport;
 
 import static org.eclipse.serializer.util.X.notNull;
 
@@ -33,11 +33,8 @@ import static org.eclipse.serializer.util.X.notNull;
 /// lock file, and the backend fails fast when the volume cannot provide atomic
 /// rename and directory synchronization.
 public final class FilesystemVolumeBackupBackend implements StorageBackupBackend {
-    private static void testPoint(final String point, final Path path) {
-        FaultInjection.invoke(point, path);
-    }
-
     static final String EXPORT_WORKSPACE_PREFIX = ".backup-export-";
+    private static final String STAGED_ARCHIVE_PREFIX = ".backup-staged-";
     private static final String RESTORE_WORKSPACE_PREFIX = ".backup-restore-";
     /// Age after which an abandoned export workspace is reaped on first use.
     /// A crash can leave a `.backup-export-*` directory behind; anything
@@ -45,7 +42,8 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     /// reasonable volume, so it is deleted and logged.
     static final Duration ORPHAN_WORKSPACE_MAX_AGE = Duration.ofHours(24);
     private static final Duration DEFAULT_PUBLICATION_LOCK_TIMEOUT = Duration.ofSeconds(30);
-    private static final long LOCK_RETRY_NANOS = Duration.ofMillis(10).toNanos();
+    private static final long LOCK_RETRY_BASE_NANOS = Duration.ofMillis(1).toNanos();
+    private static final long LOCK_RETRY_CAP_NANOS = Duration.ofMillis(50).toNanos();
 
     private static final System.Logger LOGGER = System.getLogger(FilesystemVolumeBackupBackend.class.getName());
     /* One advisory lock per volume serializes destination identity rechecks,
@@ -56,6 +54,9 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     private static final String WORKSPACE_LEASE_SUFFIX = ".lease";
 
     private final Path backupVolumePath;
+    /* Where backups are exported and compressed. Node-local by default configuration: a shared
+     * network volume should only ever see the finished archive, never the uncompressed Store. */
+    private final Path exportWorkspaceParent;
     private final Path userUploadedStorageArchivePath;
     private final BackupArchiveLimits limits;
     private final Duration publicationLockTimeout;
@@ -68,22 +69,26 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     /// @param backupVolumePath backup volume path
     /// @return filesystem backup backend
     public static FilesystemVolumeBackupBackend create(final Path backupVolumePath) {
-        return new FilesystemVolumeBackupBackend(notNull(backupVolumePath).toAbsolutePath().normalize(),
+        final Path volume = notNull(backupVolumePath).toAbsolutePath().normalize();
+        return new FilesystemVolumeBackupBackend(volume, volume,
                 BackupArchiveLimits.defaults(), DEFAULT_PUBLICATION_LOCK_TIMEOUT,
                 NodeConfig.Operations.DEFAULT.backupPublicationRetryAttempts());
     }
 
-    /// Creates a filesystem backend with the node's publication retry policy.
+    /// Creates a filesystem backend from the node configuration.
     ///
-    /// @param backupVolumePath backup volume path
+    /// @param backup     volume, node-local export workspace, entry budget and lock timeout
     /// @param operations configured retry policy
     /// @return filesystem backup backend
     public static FilesystemVolumeBackupBackend create(
-            final Path backupVolumePath,
+            final NodeConfig.BackupConfig backup,
             final NodeConfig.Operations operations
     ) {
-        return new FilesystemVolumeBackupBackend(notNull(backupVolumePath).toAbsolutePath().normalize(),
-                BackupArchiveLimits.defaults(), DEFAULT_PUBLICATION_LOCK_TIMEOUT,
+        Objects.requireNonNull(backup, "backup");
+        return new FilesystemVolumeBackupBackend(
+                backup.volume().toAbsolutePath().normalize(), backup.workspace().toAbsolutePath().normalize(),
+                BackupArchiveLimits.of(BackupArchiveLimits.DEFAULT_MAX_EXTRACTED_BYTES, backup.maxArchiveEntries()),
+                backup.publicationLockTimeout(),
                 Objects.requireNonNull(operations, "operations").backupPublicationRetryAttempts());
     }
 
@@ -96,8 +101,8 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             final Path backupVolumePath,
             final BackupArchiveLimits limits
     ) {
-        return new FilesystemVolumeBackupBackend(
-                notNull(backupVolumePath).toAbsolutePath().normalize(),
+        final Path volume = notNull(backupVolumePath).toAbsolutePath().normalize();
+        return new FilesystemVolumeBackupBackend(volume, volume,
                 notNull(limits), DEFAULT_PUBLICATION_LOCK_TIMEOUT,
                 NodeConfig.Operations.DEFAULT.backupPublicationRetryAttempts());
     }
@@ -113,8 +118,8 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             final BackupArchiveLimits limits,
             final Duration publicationLockTimeout
     ) {
-        return new FilesystemVolumeBackupBackend(
-                notNull(backupVolumePath).toAbsolutePath().normalize(),
+        final Path volume = notNull(backupVolumePath).toAbsolutePath().normalize();
+        return new FilesystemVolumeBackupBackend(volume, volume,
                 notNull(limits), notNull(publicationLockTimeout),
                 NodeConfig.Operations.DEFAULT.backupPublicationRetryAttempts());
     }
@@ -138,7 +143,8 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
         void run() throws NodeException;
     }
 
-    private FilesystemVolumeBackupBackend(final Path backupVolumePath, final BackupArchiveLimits limits,
+    private FilesystemVolumeBackupBackend(final Path backupVolumePath, final Path exportWorkspaceParent,
+                                          final BackupArchiveLimits limits,
                                           final Duration publicationLockTimeout,
                                           final int publicationRetryAttempts) {
         if (publicationLockTimeout.isNegative() || publicationLockTimeout.isZero()) {
@@ -146,6 +152,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
         }
         if (publicationRetryAttempts <= 0) throw new IllegalArgumentException("publicationRetryAttempts must be positive");
         this.backupVolumePath = backupVolumePath;
+        this.exportWorkspaceParent = exportWorkspaceParent;
         this.userUploadedStorageArchivePath = backupVolumePath.resolve(StorageBackupBackend.USER_UPLOADED_STORAGE_ARCHIVE);
         this.limits = limits;
         this.publicationLockTimeout = publicationLockTimeout;
@@ -339,7 +346,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             try {
                 Files.createDirectories(exportDirectory.resolve(StorageBackupBackend.STORAGE_ENTRY));
                 AtomicFileWriter.forceDirectory(exportDirectory.resolve(StorageBackupBackend.STORAGE_ENTRY));
-                testPoint("AFTER_STORE_BACKUP_BEFORE_READY", exportDirectory);
+                FaultInjection.invoke(FaultInjection.Point.AFTER_STORE_BACKUP_BEFORE_READY, exportDirectory);
                 AtomicFileWriter.write(exportDirectory.resolve(StorageBackupBackend.READY_ENTRY), channel -> {
                 });
             } catch (final IOException failure) {
@@ -348,11 +355,19 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
 
             /* Hash the Store bytes as compression reads them. This keeps the
              * publication identity check without a second full directory pass. */
+            this.requireRestorableEntryCount(exportDirectory.resolve(StorageBackupBackend.STORAGE_ENTRY));
             final Path temporaryArchive = exportDirectory.resolve(BackupArchive.toArchiveFileName(backup));
             final long digest = BackupArchive.compressStorage(exportDirectory, temporaryArchive, backup);
             final BackupMetadata stamped = backup.withDigest(digest);
             ensureNotInterrupted();
-            this.publishArchive(temporaryArchive, this.toArchivePath(backup), stamped);
+            /* A node-local workspace cannot be renamed onto a different filesystem: stage the
+             * finished archive on the volume first, so the publication rename stays atomic. */
+            final Path publishable = this.stageOnVolume(temporaryArchive);
+            try {
+                this.publishArchive(publishable, this.toArchivePath(backup), stamped);
+            } finally {
+                if (publishable != temporaryArchive) deleteStagedQuietly(publishable);
+            }
         } catch (final RuntimeException | Error failure) {
             primaryFailure = failure;
             throw failure;
@@ -363,6 +378,52 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Failed to clean up backup export workspace %s".formatted(exportDirectory), cleanupFailure);
             }
+        }
+    }
+
+    /// Fails the backup now when its Store has more files than a restore would accept.
+    private void requireRestorableEntryCount(final Path storageDirectory) throws NodeException {
+        final long files;
+        try (final var tree = Files.walk(storageDirectory)) {
+            files = tree.filter(Files::isRegularFile).count();
+        } catch (final IOException failure) {
+            throw new NodeException("Failed to count the files of the exported Store", failure);
+        }
+        /* Two further entries: the ready marker and the metadata. */
+        if (files + 2L > this.limits.maxArchiveEntries()) {
+            throw new NodeException(("The Store has %d files, but a restore accepts at most %d archive entries; "
+                    + "raise PERUNCS_BACKUP_MAX_ENTRIES or enlarge the Store's data files")
+                    .formatted(files, this.limits.maxArchiveEntries()));
+        }
+    }
+
+    /// Copies a finished archive onto the backup volume unless the workspace already lives there.
+    private Path stageOnVolume(final Path archive) throws NodeException {
+        try {
+            if (Files.getFileStore(archive).equals(Files.getFileStore(this.backupVolumePath))) return archive;
+            final Path staged = this.backupVolumePath.resolve(STAGED_ARCHIVE_PREFIX + UUID.randomUUID() + ".tmp");
+            try (FileChannel input = FileChannel.open(archive, StandardOpenOption.READ);
+                 FileChannel output = FileChannel.open(staged, StandardOpenOption.CREATE_NEW,
+                         StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                final long size = input.size();
+                long copied = 0L;
+                while (copied < size) copied += input.transferTo(copied, size - copied, output);
+                output.force(true);
+            } catch (final IOException | RuntimeException | Error failure) {
+                deleteStagedQuietly(staged);
+                throw failure;
+            }
+            return staged;
+        } catch (final IOException failure) {
+            throw new NodeException("Failed to stage the backup archive on the backup volume", failure);
+        }
+    }
+
+    private static void deleteStagedQuietly(final Path staged) {
+        try {
+            Files.deleteIfExists(staged);
+        } catch (final IOException failure) {
+            LOGGER.log(System.Logger.Level.WARNING, "Failed to delete staged backup %s".formatted(staged), failure);
         }
     }
 
@@ -384,7 +445,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
         return Files.isRegularFile(this.userUploadedStorageArchivePath, LinkOption.NOFOLLOW_LINKS);
     }
 
-        /// Validates the upload against the operator-configured budgets.
+    /// Validates the upload against the operator-configured budgets.
     ///
     /// The check runs before any caller destroys local storage: a partial,
     /// ambiguous, or over-budget upload is refused here with the local image
@@ -463,12 +524,12 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
                      StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
             final long size = input.size();
             if (size > budget) throw new IOException("Uploaded backup archive exceeds copy limit");
-            ByteBuffer fallback = null;
+            ByteBuffer fallback = null; /* heap scratch: a rare path must not pin native memory */
             long copied = 0L;
             while (copied < size) {
                 long transferred = input.transferTo(copied, size - copied, output);
                 if (transferred == 0L) {
-                    if (fallback == null) fallback = ByteBuffer.allocateDirect(1 << 20);
+                    if (fallback == null) fallback = ByteBuffer.allocate(1 << 20);
                     fallback.clear();
                     fallback.limit((int) Math.min(fallback.capacity(), size - copied));
                     final int read = input.read(fallback, copied);
@@ -522,7 +583,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     ) throws NodeException {
         for (int attempt = 0; attempt < this.publicationRetryAttempts; attempt++) {
             final PublicationInspection inspection = inspectPublication(destination, identity);
-            testPoint("AFTER_EXISTING_PUBLICATION_INSPECTION", destination);
+            FaultInjection.invoke(FaultInjection.Point.AFTER_EXISTING_PUBLICATION_INSPECTION, destination);
             try {
                 this.withPublicationLock(() -> this.publishArchiveLocked(temporaryArchive, destination, inspection));
                 return;
@@ -589,7 +650,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
         /* Kill window: the complete archive is compressed in the workspace and
          * the publication lock is held, but the atomic rename has not run, so
          * the volume must not expose any selectable archive. */
-        testPoint("BEFORE_PUBLISH_RENAME", destination);
+        FaultInjection.invoke(FaultInjection.Point.BEFORE_PUBLISH_RENAME, destination);
         try {
             /* An atomic rename replaces an existing destination on Unix
              * instead of failing, so the collision must be detected with
@@ -754,7 +815,8 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
     }
 
     private Workspace createExportWorkspace() throws NodeException {
-        final Path path = this.createTemporaryDirectory(EXPORT_WORKSPACE_PREFIX);
+        this.ensureVolumeDirectory();
+        final Path path = createTemporaryDirectory(this.exportWorkspaceParent, EXPORT_WORKSPACE_PREFIX);
         return this.leaseWorkspace(path, "backup export");
     }
 
@@ -834,14 +896,32 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             return;
         }
         final long cutoffMillis = System.currentTimeMillis() - ORPHAN_WORKSPACE_MAX_AGE.toMillis();
-        try (final var entries = Files.list(this.backupVolumePath)) {
-            entries.filter(path -> path.getFileName().toString().startsWith(EXPORT_WORKSPACE_PREFIX))
-                    .filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
+        for (final Path directory : new LinkedHashSet<>(List.of(this.backupVolumePath, this.exportWorkspaceParent))) {
+            if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) continue;
+            try (final var entries = Files.list(directory)) {
+                entries.filter(path -> path.getFileName().toString().startsWith(EXPORT_WORKSPACE_PREFIX))
+                        .filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
+                        .filter(path -> isOlderThan(path, cutoffMillis))
+                        .forEach(path -> this.deleteOrphanWorkspace(path, "backup export"));
+            } catch (final IOException failure) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Failed to scan %s for orphaned backup workspaces".formatted(directory), failure);
+            }
+        }
+        try (final var staged = Files.list(this.backupVolumePath)) {
+            staged.filter(path -> path.getFileName().toString().startsWith(STAGED_ARCHIVE_PREFIX))
                     .filter(path -> isOlderThan(path, cutoffMillis))
-                    .forEach(path -> this.deleteOrphanWorkspace(path, "backup export"));
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (final IOException failure) {
+                            LOGGER.log(System.Logger.Level.WARNING,
+                                    "Failed to delete orphaned staged backup %s".formatted(path), failure);
+                        }
+                    });
         } catch (final IOException failure) {
             LOGGER.log(System.Logger.Level.WARNING,
-                    "Failed to scan %s for orphaned backup workspaces".formatted(this.backupVolumePath), failure);
+                    "Failed to scan %s for orphaned staged backups".formatted(this.backupVolumePath), failure);
         }
     }
 
@@ -912,6 +992,7 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
             throws IOException {
         final long deadline = ReplicationRetry.deadlineNanos(timeout.toNanos());
         OverlappingFileLockException overlap = null;
+        long attempt = 0L;
         while (true) {
             try {
                 final FileLock lock = channel.tryLock();
@@ -923,9 +1004,8 @@ public final class FilesystemVolumeBackupBackend implements StorageBackupBackend
                 throw new IOException("timed out after %s ms waiting for backup publication lock at %s"
                         .formatted(timeout.toMillis(), path), overlap);
             }
-            LockSupport.parkNanos(LOCK_RETRY_NANOS);
-            if (Thread.interrupted()) {
-                Thread.currentThread().interrupt();
+            if (ReplicationRetry.parkInterrupted(
+                    ReplicationRetry.fullJitterDelayNanos(++attempt, LOCK_RETRY_BASE_NANOS, LOCK_RETRY_CAP_NANOS))) {
                 throw new IOException("interrupted while waiting for backup publication lock at %s".formatted(path));
             }
         }

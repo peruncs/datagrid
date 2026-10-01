@@ -5,10 +5,10 @@ import peruncs.cluster.storage.ReplicationPosition;
 
 /// Latest-position and provider-readiness contract used by neutral lifecycle code.
 public interface ReplicationPositionProvider extends AutoCloseable {
-        /// Initializes any provider client needed to resolve the current position.
+    /// Initializes any provider client needed to resolve the current position.
     void init() throws NodeException;
 
-        /// Returns the newest position that can be used as a backup/bootstrap boundary.
+    /// Returns the newest position that can be used as a backup/bootstrap boundary.
     ///
     /// @return latest replication position
     /// @throws NodeException when this role cannot obtain a writer latest

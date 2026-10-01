@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies the reader slot publishes replacements and never blocks readers on dispose.
 class CurrentReaderTest {
-        /// Verifies a health-style [CurrentReader#current()] read returns while a slow
+    /// Verifies a health-style [CurrentReader#current()] read returns while a slow
     /// dispose blocks inside the slot's lifecycle lock.
     @Test
     void currentDoesNotBlockBehindSlowDispose() throws Exception {
@@ -49,7 +49,7 @@ class CurrentReaderTest {
         assertNull(slot.current(), "the slot is cleared only after the dispose succeeded");
     }
 
-        /// Verifies replacement disposes the previous reader before publishing the new one.
+    /// Verifies replacement disposes the previous reader before publishing the new one.
     @Test
     void replaceDisposesPreviousBeforePublishingReplacement() {
         final AtomicInteger disposed = new AtomicInteger();

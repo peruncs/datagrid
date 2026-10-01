@@ -100,7 +100,7 @@ class StorageFormatCompatibilityTest {
         return EmbeddedStorage.Foundation(configuration);
     }
 
-        /// Opens a Store image written by the previous supported dependency set.
+    /// Opens a Store image written by the previous supported dependency set.
     ///
     /// The same-build reopen above cannot catch a format break that ships with
     /// a dependency upgrade, because writer and reader run one build. This

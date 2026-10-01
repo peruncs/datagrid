@@ -119,7 +119,7 @@ class WriterIndexValidationTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                 .build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -127,7 +127,7 @@ class WriterIndexValidationTest {
         });
         try {
             final List<String> localWrites = new ArrayList<>();
-            final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.create(
+            final AeronStorageBinaryReplicationTarget target = WriterTargets.create(
                     recordingTarget(localWrites), coordinator, null, ignored -> {
             }, () -> true);
             assertDoesNotThrow(target::validateWriterState,
@@ -145,7 +145,7 @@ class WriterIndexValidationTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                 .build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -154,9 +154,10 @@ class WriterIndexValidationTest {
         try {
             final List<String> localWrites = new ArrayList<>();
             final AeronStorageBinaryReplicationTarget target = new AeronStorageBinaryReplicationTarget(
-                    recordingTarget(localWrites), coordinator,
+                    recordingTarget(localWrites), () -> coordinator,
                     new AeronStorageBinaryReplicationTarget.TargetCallbacks(null, ignored -> {
-                    }, () -> true, () -> validationRan.set(true), ignored -> false));
+                    }, () -> true, () -> validationRan.set(true),
+                            binary -> ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK));
 
             assertDoesNotThrow(() -> target.write(binary()));
             assertFalse(validationRan.get());
@@ -196,7 +197,7 @@ class WriterIndexValidationTest {
             final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                     .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                     .build();
-            final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+            final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                     (buffer, offset, length) ->
                     {
                         this.publications.add("archive");
@@ -207,14 +208,14 @@ class WriterIndexValidationTest {
                     publisher, sequence -> {
             });
             this.target = new AeronStorageBinaryReplicationTarget(
-                    recordingTarget(this.localWrites), this.coordinator,
+                    recordingTarget(this.localWrites), () -> this.coordinator,
                     new AeronStorageBinaryReplicationTarget.TargetCallbacks(
                             null, this.committed::set, () -> true,
                             () -> {
                                 this.hookRan.set(true);
                                 ClusterStoreIndexes.validateStorageRoots(
                                         connection, ClusterIndexTestSupport.typeHandlers());
-                            }, ignored -> true));
+                            }, WriterTargets.VALIDATE_EVERYTHING));
         }
 
         @Override

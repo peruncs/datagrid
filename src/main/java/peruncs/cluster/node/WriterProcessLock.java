@@ -1,5 +1,6 @@
 package peruncs.cluster.node;
 
+import peruncs.cluster.storage.io.AtomicFileWriter;
 import peruncs.cluster.errors.NodeException;
 
 import java.io.IOException;
@@ -29,6 +30,7 @@ final class WriterProcessLock implements AutoCloseable {
     static WriterProcessLock acquire(final Path storagePath) {
         final Path path = storagePath.resolve("writer.lock");
         try {
+            AtomicFileWriter.ensureNoSymbolicLinks(storagePath);
             Files.createDirectories(storagePath);
             if (Files.isSymbolicLink(path)) {
                 throw new NodeException("writer lock must not be a symbolic link: " + path);

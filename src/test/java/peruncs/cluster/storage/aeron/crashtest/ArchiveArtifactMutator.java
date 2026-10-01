@@ -25,7 +25,7 @@ public final class ArchiveArtifactMutator {
     private ArchiveArtifactMutator() {
     }
 
-        /// Returns all recording segments in physical order.
+    /// Returns all recording segments in physical order.
     ///
     /// @param archiveDirectory Archive directory holding the segment files
     /// @param recordingId Archive recording to list segments for
@@ -52,7 +52,7 @@ public final class ArchiveArtifactMutator {
         return Long.parseLong(matcher.group(2));
     }
 
-        /// Flips one byte in the first envelope payload and forces the segment.
+    /// Flips one byte in the first envelope payload and forces the segment.
     ///
     /// @param segment recording segment file to corrupt
     /// @throws IOException when the segment cannot be read, mutated, or forced
@@ -95,7 +95,7 @@ public final class ArchiveArtifactMutator {
                AeronReplicationEnvelope.MAGIC;
     }
 
-        /// Envelope header fields the corruption fuzz can target.
+    /// Envelope header fields the corruption fuzz can target.
     public enum HeaderField {
         /// The envelope magic marker.
         MAGIC(0, 4),
@@ -137,7 +137,7 @@ public final class ArchiveArtifactMutator {
         }
     }
 
-        /// Byte patterns the corruption fuzz applies to a header field.
+    /// Byte patterns the corruption fuzz applies to a header field.
     public enum Mutation {
         /// Flips one bit of the field's first byte.
         XOR {
@@ -167,7 +167,7 @@ public final class ArchiveArtifactMutator {
         abstract void apply(byte[] bytes, HeaderField field);
     }
 
-        /// Corrupts one header field of the first envelope in the segment.
+    /// Corrupts one header field of the first envelope in the segment.
     ///
     /// With `recomputeHeaderCrc`, the stored header CRC is fixed up after the
     /// mutation, so the CRC check passes and only the decoder's semantic
@@ -242,7 +242,7 @@ public final class ArchiveArtifactMutator {
         }
     }
 
-        /// Shortens the final Aeron frame by one byte, leaving its replication envelope
+    /// Shortens the final Aeron frame by one byte, leaving its replication envelope
     /// incomplete while preserving the segment's preallocated physical length.
     ///
     /// @param segment recording segment file holding the recording tail
@@ -316,7 +316,7 @@ public final class ArchiveArtifactMutator {
         }
     }
 
-        /// Truncates the catalog only when it has a recognizable preallocation.
+    /// Truncates the catalog only when it has a recognizable preallocation.
     ///
     /// @param archiveDirectory Archive directory holding `archive.catalog`
     /// @throws IOException when the catalog is missing, too small, or cannot be forced

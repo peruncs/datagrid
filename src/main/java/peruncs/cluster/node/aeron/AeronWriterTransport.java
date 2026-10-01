@@ -10,17 +10,18 @@ import org.eclipse.serializer.reference.Swizzling;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.api.ClusterStorageManager;
 import peruncs.cluster.api.ReplicationState;
+import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.ReplicationPendingException;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.ReseedRequiredException;
-import peruncs.cluster.errors.internal.ReplicationPositionUnavailableException;
+import peruncs.cluster.errors.ReplicationPositionUnavailableException;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.node.store.RejectingPersistenceTarget;
 import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 import peruncs.cluster.storage.aeron.writer.AeronArchiveReplicationPublisher;
 import peruncs.cluster.storage.aeron.writer.AeronReplicationWriteCoordinator;
 import peruncs.cluster.storage.aeron.writer.AeronStorageBinaryReplicationTarget;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
+import peruncs.cluster.storage.binary.TypeDictionaryOutbox;
 import peruncs.cluster.storage.index.ClusterStoreIndexes;
 import peruncs.cluster.storage.io.FaultInjection;
 
@@ -28,6 +29,7 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
 import java.util.function.UnaryOperator;
@@ -49,7 +51,6 @@ final class AeronWriterTransport {
     private final int indexValidationMaxObjects;
     /* The next Store-mark token is fixed before recovery starts. */
     private volatile long writerFencingTokenSnapshot = -1L;
-    private final AtomicLong nextSequence = new AtomicLong();
     /// Recording identity selected at writer startup; retained when RecordingPos is briefly unavailable.
     private final AtomicLong writerRecordingId = new AtomicLong();
     private volatile AeronArchiveReplicationPublisher writer;
@@ -60,13 +61,14 @@ final class AeronWriterTransport {
      * Store mark until the startup fencing commit advances the mark. */
     private volatile long recoveredAbortSequence = -1L;
     private volatile boolean writerRecoveryInProgress;
+    /* Consecutive transient recovery failures; guarded by the transport monitor. */
+    private int consecutiveTransientFailures;
     private volatile ReplicationState writerRecoveryState;
     /* The classified failure behind writerRecoveryState. A later ensureWriter
      * rethrows it instead of retrying recovery: a RESEED_REQUIRED or terminal
      * FAILED outcome is sticky by contract, and the operator restart is the
      * only retry. */
     private volatile RuntimeException writerRecoveryFailure;
-    private ReplicationPublisher distributor;
     private ReplicationPositionProvider positionProvider;
 
     AeronWriterTransport(final AeronTransport facade, final int indexValidationMaxObjects) {
@@ -101,70 +103,60 @@ final class AeronWriterTransport {
         return failure;
     }
 
-    /// Atomically clears a failed writer candidate, reporting close noise as suppressed.
-    private static void closeFailedWriter(final AeronArchiveReplicationPublisher writer,
-                                          final Throwable failure) {
-        if (writer == null) return;
+    /// Separates a transient Archive outage from proof that the recording cannot serve this Store.
+    ///
+    /// Only a missing recording, an incompatible recording or corrupt history requires a reseed;
+    /// a timeout or an unreachable Archive leaves the recording and the Store mark intact, so the
+    /// failure is reported as unavailable and the next attempt may recover. Any other failure is a
+    /// defect, not evidence about the recording: it is returned unchanged and latches `FAILED`
+    /// instead of sending operators to reseed an intact recording.
+    ///
+    /// @param context what the writer was doing
+    /// @param failure the failure thrown by the Archive or the recovery scan
+    /// @return the typed failure to throw
+    static RuntimeException classifyArchiveFailure(final String context, final RuntimeException failure) {
+        if (failure instanceof NodeException) {
+            return failure;
+        }
+        if (failure instanceof ArchiveException archive) {
+            return archive.errorCode() == ArchiveException.UNKNOWN_RECORDING
+                    ? reseedRequired(context + ": the recording is missing", archive)
+                    : new ReplicationUnavailableException(context, archive);
+        }
+        if (failure instanceof IllegalArgumentException) {
+            /* The recording does not match the configured stream or framing: proof it is unusable. */
+            return reseedRequired(context, failure);
+        }
+        if (failure instanceof AeronException || failure instanceof IllegalStateException) {
+            return new ReplicationUnavailableException(context, failure);
+        }
+        return failure;
+    }
+
+    /// Clears a failed writer candidate, reporting close noise as suppressed.
+    ///
+    /// @return `true` when the candidate was closed cleanly, so its recording is not left active
+    private static boolean closeFailedWriter(final AeronArchiveReplicationPublisher writer,
+                                             final Throwable failure) {
+        if (writer == null) return true;
         try {
             writer.close();
+            return true;
         } catch (final Throwable cleanupFailure) {
             if (cleanupFailure != failure) failure.addSuppressed(cleanupFailure);
+            return false;
         }
-    }
-
-    /// Returns the replication publisher for the transport's single replication stream.
-    ///
-    /// The returned handle carries dictionaries and lifecycle control
-    /// only: data publication is deliberately unavailable through it and
-    /// flows exclusively through the persistence-target factory, where
-    /// local Store acceptance and replication fencing are one serialized
-    /// operation. One transport owns one stream.
-    /// @return replication publisher
-    ReplicationPublisher distributor() {
-        /* Aeron data publication is intentionally available only through the
-         * persistence target below, where local acceptance and replication fencing
-         * are one serialized operation. The publisher remains the dictionary and
-         * lifecycle control object required by the neutral Store integration. */
-        final AeronTransportShared shared = shared();
-        synchronized (shared) {
-            shared.ensureOpen();
-            if (this.distributor != null) {
-                return this.distributor;
-            }
-            this.distributor = new AeronDistributionGate(
-                    () -> settings().topology().role().isWriter(),
-                    value ->
-                    {
-                        this.nextSequence.accumulateAndGet(value, Math::max);
-                        if (this.writer != null) this.writer.synchronizeNextSequence(value);
-                    },
-                    this::pendingCommitFailure);
-            return this.distributor;
-        }
-    }
-
-    /// Raises the next write sequence after a reader applied a transaction.
-    ///
-    /// Reader replay of newly written history must advance the same sequence a
-    /// local Store write would, so a recovered writer never reuses it.
-    ///
-    /// @param value next sequence observed by a reader
-    void advanceSequence(final long value) {
-        this.nextSequence.accumulateAndGet(value, Math::max);
-    }
-
-    /// Clears the publisher reference after a completed transport close.
-    void clearDistributor() {
-        this.distributor = null;
     }
 
     /// Builds the write-path persistence target for the single stream.
     ///
-    /// @param distributor   publisher created for the stream
-    /// @param writerStorage writer-side storage connection supplier
+    /// @param outbox              receives the type dictionaries exported by Store commits
+    /// @param distributionEnabled whether writes are currently replicated
+    /// @param writerStorage       writer-side storage connection supplier
     /// @return persistence-target decorator
     UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
-            final ReplicationPublisher distributor,
+            final TypeDictionaryOutbox outbox,
+            final BooleanSupplier distributionEnabled,
             final Supplier<StorageConnection> writerStorage) {
         final AeronTransportShared shared = shared();
         synchronized (shared) {
@@ -188,11 +180,11 @@ final class AeronWriterTransport {
             return storage == null ? -1L : storage.persistenceManager().objectRegistry()
                     .lookupObjectId(this.facade.replicationMarkForWriter());
         };
-        final java.util.function.BooleanSupplier distributionEnabled =
-                () -> !(distributor instanceof ReplicationPublisher cluster) || !cluster.ignoreDistribution();
         final ToIntFunction<Binary> commitScan;
         if (!hasWriterStorage) {
-            commitScan = null;
+            /* Without Store access every commit is validated and accepted as a bootstrap write. */
+            commitScan = binary -> ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK |
+                                   ClusterStoreIndexes.COMMIT_TOUCHES_INDEXES | ClusterStoreIndexes.COMMIT_BOOTSTRAP;
         } else {
             final ToIntFunction<Binary> scan =
                     ClusterStoreIndexes.writerCommitScan(writerStorage, replicationMarkObjectId);
@@ -208,7 +200,7 @@ final class AeronWriterTransport {
                      * without exporting it through the configured dictionary hook.
                      * Type ids are append-only, so a count change needs one snapshot. */
                     if (dictionaryDefinitionCount.get() != currentDefinitionCount) {
-                        distributor.distributeTypeDictionary(assembler.assemble(typeDictionary));
+                        outbox.stageIncremental(assembler.assemble(typeDictionary));
                         dictionaryDefinitionCount.set(currentDefinitionCount);
                     }
                 }
@@ -217,15 +209,12 @@ final class AeronWriterTransport {
         }
         return delegate -> new AeronStorageBinaryReplicationTarget(delegate, this::ensureCoordinator,
                 new AeronStorageBinaryReplicationTarget.TargetCallbacks(
-                        distributor,
+                        outbox,
                         sequence -> {
-                            if (distributor instanceof ReplicationPublisher cluster) {
-                                cluster.messageIndex(sequence);
-                            }
                         },
                         distributionEnabled,
                         writerIndexValidation,
-                        null), commitScan);
+                        commitScan));
     }
 
     /// Returns the lazily created position provider.
@@ -345,13 +334,13 @@ final class AeronWriterTransport {
         this.validateMarkIdentity(mark);
         final var registry = storage.persistenceManager().objectRegistry();
         final long markObjectId = registry.lookupObjectId(mark);
-        if (mark.sequence >= 0L) {
+        if (mark.sequence() >= 0L) {
             if (Swizzling.isNotFoundId(markObjectId)) {
                 throw reseedRequired("replication mark has no Store object id", null);
             }
             this.ensureWriter();
             this.validateLoadedMark(mark);
-            if (mark.fencingToken < this.heldWriterFencingToken()) {
+            if (mark.fencingToken() < this.heldWriterFencingToken()) {
                 this.commitMark(mark, storage);
                 this.recoveredAbortSequence = -1L;
                 this.validateLoadedMark(mark);
@@ -385,7 +374,7 @@ final class AeronWriterTransport {
         }
 
         this.commitMark(mark, storage);
-        if (mark.sequence < 0L || Swizzling.isNotFoundId(registry.lookupObjectId(mark))) {
+        if (mark.sequence() < 0L || Swizzling.isNotFoundId(registry.lookupObjectId(mark))) {
             throw reseedRequired("writer failed to persist its initial replication mark", null);
         }
         this.recoveredAbortSequence = -1L;
@@ -410,25 +399,25 @@ final class AeronWriterTransport {
 
     private void validateMarkIdentity(final ReplicationMark mark) {
         final var topology = settings().topology();
-        if (!topology.clusterId().equals(mark.clusterId) ||
-            !topology.identity().storeGeneration().equals(mark.storeGeneration) ||
-            topology.epoch() != mark.epoch || mark.sequence < -1L || mark.sequence == Long.MAX_VALUE ||
-            mark.recordingId < -1L || mark.fencingToken < 0L ||
-            mark.sequence >= 0L && (mark.recordingId < 0L || mark.fencingToken <= 0L ||
-                                    mark.prepareStartPosition < 0L)) {
+        if (!topology.clusterId().equals(mark.clusterId()) ||
+            !topology.identity().storeGeneration().equals(mark.storeGeneration()) ||
+            topology.epoch() != mark.epoch() || mark.sequence() < -1L || mark.sequence() == Long.MAX_VALUE ||
+            mark.recordingId() < -1L || mark.fencingToken() < 0L ||
+            mark.sequence() >= 0L && (mark.recordingId() < 0L || mark.fencingToken() <= 0L ||
+                                    mark.prepareStartPosition() < 0L)) {
             throw reseedRequired("replication mark identity does not match writer configuration", null);
         }
     }
 
     private void validateLoadedMark(final ReplicationMark mark) {
         final AeronWriterRecoveryBoundary boundary = this.writerBoundary;
-        final boolean resolvedAbortAfterMark = mark.sequence < Long.MAX_VALUE &&
-                mark.sequence + 1L == this.recoveredAbortSequence &&
+        final boolean resolvedAbortAfterMark = mark.sequence() < Long.MAX_VALUE &&
+                mark.sequence() + 1L == this.recoveredAbortSequence &&
                 this.recoveredAbortSequence == boundary.sequence();
-        if ((mark.sequence != boundary.sequence() && !resolvedAbortAfterMark) ||
-            mark.recordingId != this.writerRecordingId.get() ||
-            mark.fencingToken <= 0L || mark.fencingToken > this.heldWriterFencingToken() ||
-            mark.prepareStartPosition < 0L || mark.prepareStartPosition > boundary.position()) {
+        if ((mark.sequence() != boundary.sequence() && !resolvedAbortAfterMark) ||
+            mark.recordingId() != this.writerRecordingId.get() ||
+            mark.fencingToken() <= 0L || mark.fencingToken() > this.heldWriterFencingToken() ||
+            mark.prepareStartPosition() < 0L || mark.prepareStartPosition() > boundary.position()) {
             throw reseedRequired("replication mark does not match the recovered writer boundary", null);
         }
     }
@@ -477,40 +466,35 @@ final class AeronWriterTransport {
             this.validateMarkIdentity(mark);
             this.writerFencingTokenSnapshot = nextFencingToken(mark);
             this.runtime().ensure();
-            long recordingId = mark.recordingId >= 0L
-                    ? mark.recordingId : settings().topology().recordingId();
+            long recordingId = mark.recordingId() >= 0L
+                    ? mark.recordingId() : settings().topology().recordingId();
             if (recordingId < 0L) {
                 recordingId = AeronArchiveReplicationPublisher.latestRecordingId(
                         this.runtime().archive(), settings().topology().streamId());
             }
             final AeronWriterTailRecovery.Result recovery = recordingId >= 0L
                     ? this.inspectWriterTail(mark, recordingId) : null;
-            final long initialSequence = recovery == null ? Math.max(0L, mark.sequence + 1L)
+            final long initialSequence = recovery == null ? Math.max(0L, mark.sequence() + 1L)
                     : recovery.nextSequence();
-            this.nextSequence.set(initialSequence);
             if (recordingId >= 0L) {
                 try {
-                    candidate = AeronArchiveReplicationPublisher.extend(this.runtime().archive(), recordingId,
-                            settings().topology().streamId(), settings().replication(), settings().topology().clusterId(),
-                            settings().topology().epoch(), initialSequence, settings().wireNonce());
+                    candidate = AeronArchiveReplicationPublisher.extend(this.runtime().archive(), recordingId, settings().topology().streamId(), new AeronArchiveReplicationPublisher.PublisherSetup(settings().replication(), settings().topology().clusterId(), settings().topology().epoch(), settings().wireNonce()), initialSequence);
                 } catch (final RuntimeException failure) {
-                    throw reseedRequired("cannot extend Archive recording %s after writer recovery".formatted(recordingId), failure);
+                    throw classifyArchiveFailure(
+                            "cannot extend Archive recording %s after writer recovery".formatted(recordingId), failure);
                 }
             } else {
-                if (mark.sequence >= 0L) {
+                if (mark.sequence() >= 0L) {
                     throw reseedRequired("committed Store mark has no Archive recording identity", null);
                 }
-                candidate = AeronArchiveReplicationPublisher.create(this.runtime().archive(),
-                        settings().topology().channels().live(), settings().topology().streamId(),
-                        settings().replication(), settings().topology().clusterId(), settings().topology().epoch(),
-                        initialSequence, settings().wireNonce());
+                candidate = AeronArchiveReplicationPublisher.create(this.runtime().archive(), settings().topology().channels().live(), settings().topology().streamId(), new AeronArchiveReplicationPublisher.PublisherSetup(settings().replication(), settings().topology().clusterId(), settings().topology().epoch(), settings().wireNonce()), initialSequence);
             }
             final long discoveredRecordingId = candidate.recordingId();
             final long recoveredRecordingId = discoveredRecordingId >= 0 ? discoveredRecordingId : recordingId;
             candidate.claimFencingToken(this.heldWriterFencingToken());
             AeronWriterRecoveryBoundary recoveredBoundary;
             if (recovery != null) {
-                final long markToken = mark.sequence >= 0L ? mark.fencingToken : this.heldWriterFencingToken();
+                final long markToken = mark.sequence() >= 0L ? mark.fencingToken() : this.heldWriterFencingToken();
                 long boundaryPosition = recovery.boundaryPosition();
                 if (recovery.markedCommit() != null) {
                     boundaryPosition = candidate.appendRecoveryMarker(
@@ -536,7 +520,8 @@ final class AeronWriterTransport {
                             this.runtime().getStartPosition(recoveredRecordingId);
                 } catch (final ArchiveException failure) {
                     if (failure.errorCode() != ArchiveException.UNKNOWN_RECORDING) {
-                        throw reseedRequired("cannot inspect new Aeron recording %s".formatted(recoveredRecordingId), failure);
+                        throw classifyArchiveFailure(
+                                "cannot inspect new Aeron recording %s".formatted(recoveredRecordingId), failure);
                     }
                     /* A fresh recording may not expose its catalog position until the
                      * first image is connected. Keep the boundary sequence explicit and
@@ -545,27 +530,42 @@ final class AeronWriterTransport {
                 recoveredBoundary = new AeronWriterRecoveryBoundary(initialSequence - 1,
                         recoveredRecordingId, startPosition);
             }
-            FaultInjection.invoke("AFTER_RECOVERY_PUBLISHER_CREATED", initialSequence);
+            FaultInjection.invoke(FaultInjection.Point.AFTER_RECOVERY_PUBLISHER_CREATED, initialSequence);
             /* Recovery offers carry the Store-mark token claimed before the
              * writer becomes visible. */
             this.writerRecordingId.set(recoveredRecordingId);
             this.writerBoundary = recoveredBoundary;
-            this.recoveredAbortSequence = recovery != null && mark.sequence < Long.MAX_VALUE &&
-                    recovery.boundarySequence() == mark.sequence + 1L ? recovery.boundarySequence() : -1L;
+            this.recoveredAbortSequence = recovery != null && mark.sequence() < Long.MAX_VALUE &&
+                    recovery.boundarySequence() == mark.sequence() + 1L ? recovery.boundarySequence() : -1L;
             this.writer = candidate;
             candidate = null;
             this.writerRecoveryState = null;
             this.writerRecoveryFailure = null;
+            this.consecutiveTransientFailures = 0;
             /* Publish the recovered boundary before the outer method drains
              * deferred reader watermarks. */
             this.writerRecoveryInProgress = false;
             return this.writer;
         } catch (final RuntimeException failure) {
             final RuntimeException classified = writerRecoveryFailure(failure);
-            closeFailedWriter(candidate, classified);
-            this.writerRecoveryState = classified instanceof ReseedRequiredException
-                    ? ReplicationState.RESEED_REQUIRED : ReplicationState.FAILED;
-            this.writerRecoveryFailure = classified;
+            final boolean cleanClose = closeFailedWriter(candidate, classified);
+            /* A transient outage is not latched: the next call recovers from scratch, which is
+             * safe because the tail scan is read-only and a recovery marker is only appended
+             * after the scan. It is retried only a configured number of consecutive times, so a
+             * failure that is not really transient cannot rescan on every write forever. A failed
+             * close may leave the recording active, so it latches at once. */
+            final boolean transientOutage = classified instanceof ReplicationUnavailableException && cleanClose &&
+                    ++this.consecutiveTransientFailures < settings().timeouts().writerRecoveryAttempts();
+            if (!transientOutage) {
+                if (classified instanceof ReplicationUnavailableException) {
+                    System.getLogger(AeronWriterTransport.class.getName()).log(System.Logger.Level.WARNING,
+                            "Writer recovery failed %d consecutive time(s); latching FAILED"
+                                    .formatted(this.consecutiveTransientFailures), classified);
+                }
+                this.writerRecoveryState = classified instanceof ReseedRequiredException
+                        ? ReplicationState.RESEED_REQUIRED : ReplicationState.FAILED;
+                this.writerRecoveryFailure = classified;
+            }
             throw classified;
         } catch (final Error failure) {
             closeFailedWriter(candidate, failure);
@@ -586,10 +586,13 @@ final class AeronWriterTransport {
             startPosition = this.runtime().getStartPosition(recordingId);
             stopPosition = this.runtime().getStopPosition(recordingId);
         } catch (final RuntimeException failure) {
-            throw reseedRequired("cannot inspect Archive recording %s before writer recovery".formatted(recordingId), failure);
+            throw classifyArchiveFailure(
+                    "cannot inspect Archive recording %s before writer recovery".formatted(recordingId), failure);
         }
         if (startPosition < 0L || stopPosition < 0L) {
-            throw reseedRequired("writer Archive recording is not stopped for recovery", null);
+            /* The Archive has not stopped the recording yet (a crashed writer's recording is
+             * stopped when the Archive notices); that resolves by itself, so it is a retry. */
+            throw new ReplicationUnavailableException("writer Archive recording is not stopped for recovery");
         }
         final long maxToken = this.heldWriterFencingToken();
         try {
@@ -598,18 +601,18 @@ final class AeronWriterTransport {
                     settings().topology().epoch(), settings().wireNonce(), maxToken, recordingId,
                     startPosition, stopPosition, settings().topology().streamId() + 1,
                     settings().replication().recordedPositionTimeoutNanos(),
-                    settings().replication().maxTransactionBytes(), settings().replication().chunkSize()));
-        } catch (final ReseedRequiredException failure) {
-            throw failure;
+                    new AeronWriterTailRecovery.Framing(settings().replication().maxTransactionBytes(),
+                            settings().replication().chunkSize(), settings().replication().mtuLength(),
+                            settings().replication().termLength())));
         } catch (final RuntimeException failure) {
-            throw reseedRequired("writer Archive tail could not be reconciled with its Store mark", failure);
+            throw classifyArchiveFailure("writer Archive tail could not be reconciled with its Store mark", failure);
         }
     }
 
     private static long nextFencingToken(final ReplicationMark mark) {
-        if (mark.sequence < 0L) return 1L;
+        if (mark.sequence() < 0L) return 1L;
         try {
-            return Math.addExact(mark.fencingToken, 1L);
+            return Math.addExact(mark.fencingToken(), 1L);
         } catch (final ArithmeticException overflow) {
             throw reseedRequired("writer fencing token is exhausted", overflow);
         }

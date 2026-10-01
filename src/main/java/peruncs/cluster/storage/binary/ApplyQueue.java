@@ -41,7 +41,7 @@ final class ApplyQueue {
      * flush checks), so an ArrayDeque is sufficient and avoids the
      * per-node allocation a concurrent queue pays on every offer. */
     private final ArrayDeque<ByteBuffer> cachedData = new ArrayDeque<>();
-    private final ArrayDeque<Integer> cachedTransactionLengths = new ArrayDeque<>();
+    private final IntDeque cachedTransactionLengths = new IntDeque();
     private final ArrayDeque<Long> cachedGenerations;
     private final MergerLifecycle owner;
     private final NativeBufferPool bufferPool;
@@ -101,22 +101,22 @@ final class ApplyQueue {
         }
     }
 
-    /// Admits owned buffers and returns the resident byte total afterwards.
-    ///
-    /// Runs the terminal-state re-check, the hard-cap check, the enqueue,
-    /// and the first worker submission atomically under the queue lock, so
-    /// a caller never loses the native buffers into a dead queue. When the
-    /// resident bytes cross the soft limit, the coalescing worker is flushed
-    /// with the flag set plus one signal before this method returns — that
-    /// sequence must stay under the lock or a waiting worker can miss the
-    /// wake-up. On any thrown failure the buffers have not been queued (or
-    /// have already been rolled back), so the caller releases them exactly
-    /// once.
-    ///
-    /// @param ownedBuffers  native buffers whose ownership transfers to the queue
-    /// @param incomingBytes total payload bytes of `ownedBuffers`
-    /// @param workerSubmission schedules the worker when none is running
-    /// @return resident bytes (queued plus in-flight) after this admission
+        /// Admits owned buffers and returns the resident byte total afterwards.
+        ///
+        /// Runs the terminal-state re-check, the hard-cap check, the enqueue,
+        /// and the first worker submission atomically under the queue lock, so
+        /// a caller never loses the native buffers into a dead queue. When the
+        /// resident bytes cross the soft limit, the coalescing worker is flushed
+        /// with the flag set plus one signal before this method returns — that
+        /// sequence must stay under the lock or a waiting worker can miss the
+        /// wake-up. On any thrown failure the buffers have not been queued (or
+        /// have already been rolled back), so the caller releases them exactly
+        /// once.
+        ///
+        /// @param ownedBuffers  native buffers whose ownership transfers to the queue
+        /// @param incomingBytes total payload bytes of `ownedBuffers`
+        /// @param workerSubmission schedules the worker when none is running
+        /// @return resident bytes (queued plus in-flight) after this admission
         long admit(
             final ByteBuffer[] ownedBuffers,
             final long incomingBytes,
@@ -506,6 +506,44 @@ final class ApplyQueue {
             return this.inFlightBytes;
         } finally {
             this.queueLock.unlock();
+        }
+    }
+    /// A growable int queue, so queuing a transaction length allocates no boxed `Integer`.
+    private static final class IntDeque {
+        private int[] values = new int[16];
+        private int head;
+        private int size;
+
+        int size() {
+            return this.size;
+        }
+
+        void addLast(final int value) {
+            if (this.size == this.values.length) {
+                final int[] grown = new int[this.values.length * 2];
+                for (int i = 0; i < this.size; i++) grown[i] = this.values[(this.head + i) % this.values.length];
+                this.values = grown;
+                this.head = 0;
+            }
+            this.values[(this.head + this.size) % this.values.length] = value;
+            this.size++;
+        }
+
+        int removeFirst() {
+            final int value = this.values[this.head];
+            this.head = (this.head + 1) % this.values.length;
+            this.size--;
+            return value;
+        }
+
+        int removeLast() {
+            this.size--;
+            return this.values[(this.head + this.size) % this.values.length];
+        }
+
+        void clear() {
+            this.head = 0;
+            this.size = 0;
         }
     }
 }

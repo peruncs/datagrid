@@ -1,4 +1,4 @@
-/// This package writes complete Store transactions to Aeron.
+/// Writes complete Store transactions to Aeron.
 ///
 /// The writer publishes data in order and records the same stream for later
 /// replay. A `COMMIT` marker is the hand-off point: consumers may apply

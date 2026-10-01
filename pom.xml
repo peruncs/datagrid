@@ -603,6 +603,7 @@
 								<include>**/AeronStoreIntegrationIT.java</include>
 								<include>**/AeronDriverFailureIT.java</include>
 								<include>**/AeronApplicationSectionDrainIT.java</include>
+								<include>**/AeronFullPathBenchmarkIT.java</include>
 								<include>**/StorageBinaryPoolOwnershipIT.java</include>
 							</includes>
 							<systemPropertyVariables>

@@ -86,7 +86,7 @@ class StorageBinaryDataMergerTest {
         return null;
     }
 
-        /// A connection whose root scan always passes: the post-batch index
+    /// A connection whose root scan always passes: the post-batch index
     /// validation runs for every batch (even when a test handler skips the
     /// materializer), so these cases need viewRoots to resolve instead of
     /// returning `null`.
@@ -108,7 +108,7 @@ class StorageBinaryDataMergerTest {
                         : defaultValue(method.getReturnType()));
     }
 
-        /// A disposed merger refuses both data and dictionary updates.
+    /// A disposed merger refuses both data and dictionary updates.
     @Test
     void disposedMergerRejectsDataAndDictionary() {
         final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), (new StorageGraphCoordinator())::write, 0L, 1L, 60_000L));
@@ -119,8 +119,8 @@ class StorageBinaryDataMergerTest {
         assertThrows(ReplicationUnavailableException.class, () -> merger.receiveTypeDictionary("{}"));
     }
 
-        /// One materialization timeout latches a terminal failure: the merger
-        /// then refuses data, dictionary updates, and further waits.
+    /// One materialization timeout latches a terminal failure: the merger
+    /// then refuses data, dictionary updates, and further waits.
     @Test
     void applyTimeoutLatchesTerminalFailure() throws Exception {
         final CountDownLatch handlerEntered = new CountDownLatch(1);
@@ -159,7 +159,7 @@ class StorageBinaryDataMergerTest {
         }
     }
 
-        /// A genuine materialization failure says failed, never timed out.
+    /// A genuine materialization failure says failed, never timed out.
     @Test
     void genuineFailureSaysFailedNotTimedOut() throws Exception {
         final IllegalStateException boom = new IllegalStateException("boom");
@@ -184,8 +184,8 @@ class StorageBinaryDataMergerTest {
         }
     }
 
-        /// A materialization that finishes within the retry budget must not fail
-        /// the merger: one slow batch is not a terminal condition.
+    /// A materialization that finishes within the retry budget must not fail
+    /// the merger: one slow batch is not a terminal condition.
     @Test
     void applyTimeoutRetriesBeforeFailing() throws Exception {
         final CountDownLatch handlerEntered = new CountDownLatch(1);
@@ -231,9 +231,9 @@ class StorageBinaryDataMergerTest {
         }
     }
 
-        /// A dispose racing an accept must fail cleanly: the merger either
-        /// accepts the batch or refuses it, but never double-releases the
-        /// native buffers.
+    /// A dispose racing an accept must fail cleanly: the merger either
+    /// accepts the batch or refuses it, but never double-releases the
+    /// native buffers.
     @Test
     void disposeRacingAcceptFailsCleanly() throws Exception {
         for (int iteration = 0; iteration < 8; iteration++) {
@@ -265,8 +265,8 @@ class StorageBinaryDataMergerTest {
         }
     }
 
-        /// Owned delivery on a disposed merger releases the transferred buffers
-        /// exactly once and reports the refusal.
+    /// Owned delivery on a disposed merger releases the transferred buffers
+    /// exactly once and reports the refusal.
     @Test
     void receiveDataOwnedOnDisposedMergerFailsCleanly() {
         final StorageBinaryDataMerger merger = StorageBinaryDataMerger.create(StorageBinaryDataMergerTestSupport.configuration(foundation(), connection(), (new StorageGraphCoordinator())::write, 0L, 1L, 60_000L));
@@ -282,7 +282,7 @@ class StorageBinaryDataMergerTest {
                 "a clean refusal must not carry a cleanup failure: " + Arrays.toString(failure.getSuppressed()));
     }
 
-        /// A dispose racing a live worker must fail retryably — never
+    /// A dispose racing a live worker must fail retryably — never
     /// releasing buffers under a still-live owner — and the retried dispose
     /// must complete once the worker drains.
     @Test
@@ -336,8 +336,8 @@ class StorageBinaryDataMergerTest {
         }
     }
 
-        /// The dictionary merge and the Store import must never overlap: both
-        /// mutate the same persistence state under the materialization lock.
+    /// The dictionary merge and the Store import must never overlap: both
+    /// mutate the same persistence state under the materialization lock.
     @Test
     void dictionaryMergeAndDataImportAreMutuallyExclusive(@TempDir final Path root) throws Exception {
         final EmbeddedStorageManager storage = startStorage(root);
@@ -417,7 +417,7 @@ class StorageBinaryDataMergerTest {
         }
     }
 
-        /// The dictionary merge must run through the update handler, not just
+    /// The dictionary merge must run through the update handler, not just
     /// the materialization lock: the lock alone cannot exclude application
     /// reads that joined the coordinator's read side.
     @Test
@@ -454,7 +454,7 @@ class StorageBinaryDataMergerTest {
         }
     }
 
-        /// A dictionary merge in progress excludes application reads: the
+    /// A dictionary merge in progress excludes application reads: the
     /// registration runs on the coordinator's write side.
     @Test
     void dictionaryMergeExcludesApplicationReads(
@@ -525,7 +525,7 @@ class StorageBinaryDataMergerTest {
         public Object extra;
     }
 
-        /// A stream of multi-buffer commits coalesces by queued payload bytes
+    /// A stream of multi-buffer commits coalesces by queued payload bytes
     /// instead of by buffer count: three hundred small channel buffers must
     /// not force one synchronous materialization per commit.
     @Test
@@ -551,7 +551,7 @@ class StorageBinaryDataMergerTest {
         }
     }
 
-        /// A bare foundation lacks the dictionary loader and storer that its
+    /// A bare foundation lacks the dictionary loader and storer that its
     /// type-handler manager needs; the dictionary path also needs real ones.
     private static BinaryPersistenceFoundation<?> foundationWithDictionaryLoader() {
         final BinaryPersistenceFoundation<?> foundation = BinaryPersistence.Foundation();

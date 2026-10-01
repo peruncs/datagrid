@@ -1,5 +1,6 @@
 package peruncs.cluster.node.aeron;
 
+import peruncs.cluster.storage.io.AtomicFileWriter;
 import io.aeron.Aeron;
 import io.aeron.ChannelUri;
 import io.aeron.CommonContext;
@@ -13,6 +14,7 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.driver.exceptions.ActiveDriverException;
 import org.agrona.ErrorHandler;
 import org.agrona.concurrent.UnsafeBuffer;
+import peruncs.cluster.node.CloseSequencer;
 import peruncs.cluster.storage.ReplicationRetry;
 
 import java.io.EOFException;
@@ -35,7 +37,8 @@ import static java.lang.System.Logger.Level.WARNING;
 /// Owns one node's MediaDriver, Aeron client, and Archive client lifecycle.
 final class AeronRuntime implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(AeronRuntime.class.getName());
-    private static final long STALE_DRIVER_RETRY_DELAY_MILLIS = 100L;
+    private static final long STALE_DRIVER_RETRY_BASE_NANOS = 10_000_000L;
+    private static final long STALE_DRIVER_RETRY_CAP_NANOS = 100_000_000L;
     /// Matches the Aeron 1.53.1 rejection of a mark file whose semantic version never
     /// matched this build, as produced by [ArchiveMarkFile] validation.
     private static final Pattern REJECTED_MARK_VERSION = Pattern.compile(
@@ -76,9 +79,8 @@ final class AeronRuntime implements AutoCloseable {
         if (additional == null) return current;
         final Throwable normalized = additional instanceof RuntimeException || additional instanceof Error
                 ? additional : new IllegalStateException("failed to close %s".formatted(resource), additional);
-        if (current == null) return normalized;
-        if (current != normalized) current.addSuppressed(normalized);
-        return current;
+        /* An Error always wins over an ordinary failure, as in every other close aggregation. */
+        return CloseSequencer.append(current, normalized);
     }
 
     /// Launches the embedded Aeron driver and, for a writer, its embedded Archive,
@@ -160,11 +162,9 @@ final class AeronRuntime implements AutoCloseable {
                         "Aeron archive launch is waiting for a stale writer to release its mark file (attempt=%d, timeoutMillis=%d)"
                                 .formatted(attempts, timeoutMillis), failure);
             }
-            try {
-                Thread.sleep(STALE_DRIVER_RETRY_DELAY_MILLIS);
-            } catch (final InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("interrupted while waiting for stale Aeron driver cleanup", interrupted);
+            if (ReplicationRetry.parkInterrupted(ReplicationRetry.fullJitterDelayNanos(
+                    Math.max(1, attempts), STALE_DRIVER_RETRY_BASE_NANOS, STALE_DRIVER_RETRY_CAP_NANOS))) {
+                throw new IllegalStateException("interrupted while waiting for stale Aeron driver cleanup");
             }
         }
         throw new IllegalStateException("Aeron driver or archive did not become available within %d milliseconds"
@@ -288,7 +288,7 @@ final class AeronRuntime implements AutoCloseable {
         ensurePrivateDirectory(path, false);
     }
 
-        /// Creates a private Aeron directory and optionally fails closed when the
+    /// Creates a private Aeron directory and optionally fails closed when the
     /// filesystem cannot enforce owner-only permissions.
     ///
     /// @param path                         directory to create
@@ -323,31 +323,14 @@ final class AeronRuntime implements AutoCloseable {
         }
     }
 
-        /// Rejects a path that reaches its directory through a symbolic-link
+    /// Rejects a path that reaches its directory through a symbolic-link
     /// component. Checking only the final path is insufficient: a link in a
     /// parent component can redirect driver or Archive files outside
     /// the operator-owned directory after validation. Missing components are
     /// ignored and are created only after this check.
     private static void rejectSymbolicLinkComponents(final Path path) throws IOException {
-        final Path absolute = path.toAbsolutePath().normalize();
-        Path current = absolute.getRoot();
-        for (final Path component : absolute) {
-            current = current == null ? component : current.resolve(component);
-            /* macOS exposes /tmp as the system-managed /private/tmp alias. It is
-             * safe to follow that well-known alias; user-created links below it are
-             * still rejected by the same walk. */
-            if (Files.isSymbolicLink(current) && !isSystemTemporaryAlias(current)) {
-                throw new IOException("symbolic-link path component is not allowed: %s".formatted(current));
-            }
-        }
-    }
-
-    private static boolean isSystemTemporaryAlias(final Path path) {
-        /* macOS exposes both /tmp and /var through /private. They are OS-owned
-         * aliases, not application-controlled links; rejecting them would make
-         * every Files.createTempDirectory path unusable on the supported test and
-         * developer platform. Links below either alias are still rejected. */
-        return "/tmp".equals(path.toString()) || "/var".equals(path.toString());
+        /* One path-safety policy for every node-owned path, including the macOS system aliases. */
+        AtomicFileWriter.ensureNoSymbolicLinks(path);
     }
 
     private static boolean explicitlyDisablesSpySimulation(final String channel) {

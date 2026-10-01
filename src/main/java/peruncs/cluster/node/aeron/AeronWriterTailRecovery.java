@@ -3,7 +3,10 @@ package peruncs.cluster.node.aeron;
 import io.aeron.FragmentAssembler;
 import io.aeron.Subscription;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.exceptions.AeronException;
 import org.agrona.DirectBuffer;
+import peruncs.cluster.errors.CorruptReplicationDataException;
+import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
@@ -18,7 +21,6 @@ import java.util.zip.CRC32C;
 ///
 /// The scan retains only two transaction summaries, never transaction payloads.
 final class AeronWriterTailRecovery {
-    private static final int MAX_REPLAY_HEADER_BYTES = 4 * AeronReplicationEnvelope.HEADER_LENGTH;
     private static final String REPLAY_CHANNEL = "aeron:ipc";
 
     private AeronWriterTailRecovery() {
@@ -27,13 +29,13 @@ final class AeronWriterTailRecovery {
     /// Scans the bounded recording tail and returns the terminal markers needed to resume.
     static Result inspect(final Request request) {
         Objects.requireNonNull(request, "request");
-        final long markSequence = request.mark().sequence;
+        final long markSequence = request.mark().sequence();
         final long startPosition = markSequence >= 0L
-                ? request.mark().prepareStartPosition : request.recordingStartPosition();
+                ? request.mark().prepareStartPosition() : request.recordingStartPosition();
         validateRecoveryBounds(markSequence, startPosition, request.recordingStartPosition(),
-                request.stopPosition(), request.maxTransactionBytes(), request.chunkSize());
+                request.stopPosition(), request.framing());
         final Scan scan = new Scan(request.mark(), request.clusterId(), request.epoch(), request.wireNonce(),
-                request.maximumFencingToken(), request.maxTransactionBytes());
+                request.maximumFencingToken(), request.framing().maxTransactionBytes());
         final long length = request.stopPosition() - startPosition;
         if (length > 0L) {
             scan.read(request.archive(), request.recordingId(), request.replayStreamId(),
@@ -44,24 +46,79 @@ final class AeronWriterTailRecovery {
 
     static long validateRecoveryBounds(final long markSequence, final long startPosition,
                                        final long recordingStartPosition, final long stopPosition,
-                                       final int maxTransactionBytes, final int chunkSize) {
+                                       final Framing framing) {
         if (markSequence < -1L || startPosition < recordingStartPosition || stopPosition < startPosition) {
             throw reseed("writer mark is ahead of the Archive recording");
         }
-        if (maxTransactionBytes <= 0 || chunkSize <= 0 || chunkSize > maxTransactionBytes) {
-            throw new IllegalArgumentException("invalid writer recovery bounds");
-        }
         try {
-            final long chunkCount = (maxTransactionBytes + (long) chunkSize - 1L) / chunkSize;
-            final long window = Math.addExact(
-                    Math.multiplyExact(2L, Math.addExact(maxTransactionBytes,
-                            Math.multiplyExact(chunkCount, AeronReplicationEnvelope.HEADER_LENGTH))),
-                    MAX_REPLAY_HEADER_BYTES);
-            final long windowEnd = Math.addExact(startPosition, window);
+            final long windowEnd = Math.addExact(startPosition, framing.recoveryWindowBytes());
             if (stopPosition > windowEnd) throw reseed("Archive tail exceeds writer recovery window");
             return windowEnd;
         } catch (final ArithmeticException overflow) {
             throw reseed("writer recovery window overflows Archive positions", overflow);
+        }
+    }
+
+    /// Message sizes that determine how far a legitimate unfinished tail can extend in the Archive.
+    ///
+    /// Archive positions advance by framed lengths: every Aeron frame adds a data header and is
+    /// aligned, a message larger than one MTU is split into several frames, and a message that does
+    /// not fit the rest of a term leaves a padding frame behind.
+    ///
+    /// @param maxTransactionBytes largest dictionary-plus-data payload of one transaction
+    /// @param chunkSize           largest payload of one replication message
+    /// @param mtuLength           publication MTU
+    /// @param termLength          Aeron term length
+    record Framing(int maxTransactionBytes, int chunkSize, int mtuLength, int termLength) {
+        private static final int FRAME_HEADER = 32;
+        private static final int FRAME_ALIGNMENT_SLACK = 31;
+        private static final int MARKER_FRAMES = 4;
+        private static final int FRAMED_MARKER_BYTES = 128;
+
+        Framing {
+            if (maxTransactionBytes <= 0 || chunkSize <= 0 || chunkSize > maxTransactionBytes ||
+                mtuLength <= FRAME_HEADER || termLength <= 0) {
+                throw new IllegalArgumentException("invalid writer recovery bounds");
+            }
+        }
+
+        /// Computes an upper bound of the Archive bytes spanned by two unfinished transactions.
+        ///
+        /// @return bound in Archive position units
+        /// @throws ArithmeticException when the bound overflows a long
+        long recoveryWindowBytes() {
+            final long twoTransactions = Math.multiplyExact(2L, this.framedTransactionBytes());
+            final long termRollovers = ceilDiv(twoTransactions, termLength) + 1L;
+            return Math.addExact(Math.addExact(twoTransactions,
+                            Math.multiplyExact(MARKER_FRAMES, FRAMED_MARKER_BYTES)),
+                    Math.multiplyExact(termRollovers, this.largestFramedMessageBytes()));
+        }
+
+        /// Computes an upper bound of the Archive bytes one maximum-size transaction occupies.
+        ///
+        /// @return bound in Archive position units, including one possible term padding frame
+        /// @throws ArithmeticException when the bound overflows a long
+        long framedTransactionBytes() {
+            final long maxPayload = mtuLength - FRAME_HEADER;
+            final long perFrame = FRAME_HEADER + FRAME_ALIGNMENT_SLACK;
+            /* Dictionary and data series each end with a partial chunk. */
+            final long chunkMessages = ceilDiv(maxTransactionBytes, chunkSize) + 1L;
+            final long payloadBytes = Math.addExact(maxTransactionBytes,
+                    Math.multiplyExact(chunkMessages + 1L, AeronReplicationEnvelope.HEADER_LENGTH));
+            final long frames = ceilDiv(payloadBytes, maxPayload) + chunkMessages + 2L;
+            return Math.addExact(Math.addExact(payloadBytes, Math.multiplyExact(frames, perFrame)),
+                    this.largestFramedMessageBytes());
+        }
+
+        private long largestFramedMessageBytes() {
+            final long maxPayload = mtuLength - FRAME_HEADER;
+            final long perFrame = FRAME_HEADER + FRAME_ALIGNMENT_SLACK;
+            final long largestMessage = chunkSize + (long) AeronReplicationEnvelope.HEADER_LENGTH;
+            return Math.addExact(largestMessage, Math.multiplyExact(ceilDiv(largestMessage, maxPayload), perFrame));
+        }
+
+        private static long ceilDiv(final long value, final long divisor) {
+            return Math.floorDiv(value + divisor - 1L, divisor);
         }
     }
 
@@ -85,21 +142,20 @@ final class AeronWriterTailRecovery {
             long stopPosition,
             int replayStreamId,
             long replayTimeoutNanos,
-            int maxTransactionBytes,
-            int chunkSize
+            Framing framing
     ) {
         Request {
             Objects.requireNonNull(archive, "archive");
             Objects.requireNonNull(mark, "mark");
             Objects.requireNonNull(clusterId, "clusterId");
+            Objects.requireNonNull(framing, "framing");
             if (recordingId < 0L || recordingStartPosition < 0L || stopPosition < 0L ||
                 maximumFencingToken <= 0L || replayStreamId < 0 || replayTimeoutNanos <= 0L ||
-                maxTransactionBytes <= 0 || chunkSize <= 0 || chunkSize > maxTransactionBytes ||
-                mark.sequence == Long.MAX_VALUE || mark.sequence >= 0L &&
-                (mark.recordingId != recordingId || mark.fencingToken <= 0L || mark.prepareStartPosition < 0L)) {
+                mark.sequence() == Long.MAX_VALUE || mark.sequence() >= 0L &&
+                (mark.recordingId() != recordingId || mark.fencingToken() <= 0L || mark.prepareStartPosition() < 0L)) {
                 throw new IllegalArgumentException("invalid writer recovery request");
             }
-            if (mark.recordingId >= 0L && mark.recordingId != recordingId) {
+            if (mark.recordingId() >= 0L && mark.recordingId() != recordingId) {
                 throw reseed("Store mark names a different Archive recording");
             }
         }
@@ -136,14 +192,14 @@ final class AeronWriterTailRecovery {
             this.clusterId = Objects.requireNonNull(clusterId, "clusterId");
             Objects.requireNonNull(mark, "mark");
             if (epoch < 0L || wireNonce == 0L || maximumFencingToken <= 0L || maxTransactionBytes <= 0 ||
-                mark.sequence < -1L || mark.sequence == Long.MAX_VALUE) {
+                mark.sequence() < -1L || mark.sequence() == Long.MAX_VALUE) {
                 throw new IllegalArgumentException("invalid writer recovery scan");
             }
             this.epoch = epoch;
             this.wireNonce = wireNonce;
             this.maximumFencingToken = maximumFencingToken;
             this.maxTransactionBytes = maxTransactionBytes;
-            this.markSequence = mark.sequence;
+            this.markSequence = mark.sequence();
             this.nextSequence = Math.addExact(this.markSequence, 1L);
             this.marked = this.markSequence >= 0L ? new Transaction(this.markSequence) : null;
             this.next = new Transaction(this.nextSequence);
@@ -165,6 +221,8 @@ final class AeronWriterTailRecovery {
                                 AeronReplicationEnvelope.decodeView(buffer, offset, frameLength, this.envelope);
                         this.accept(buffer, decoded, position);
                         this.lastPosition = Math.max(this.lastPosition, position);
+                    } catch (final CorruptReplicationDataException corrupt) {
+                        this.failure = reseed("the Archive tail holds a corrupt frame", corrupt);
                     } catch (final RuntimeException invalid) {
                         this.failure = invalid;
                     }
@@ -174,18 +232,21 @@ final class AeronWriterTailRecovery {
                        System.nanoTime() - deadline < 0L) {
                     if (Thread.currentThread().isInterrupted()) {
                         Thread.currentThread().interrupt();
-                        throw new IllegalStateException("interrupted while replaying writer Archive tail");
+                        throw new ReplicationUnavailableException("interrupted while replaying writer Archive tail");
                     }
                     if (replay.poll(fragments, 256) == 0) LockSupport.parkNanos(100_000L);
                 }
                 if (this.failure != null) throw this.failure;
                 if (this.lastPosition < stopPosition) {
-                    throw reseed("Archive tail replay timed out before its stop position");
+                    throw new ReplicationUnavailableException(
+                            "Archive tail replay timed out before its stop position");
                 }
-            } catch (final ReseedRequiredException failure) {
+            } catch (final ReseedRequiredException | ReplicationUnavailableException failure) {
                 throw failure;
-            } catch (final RuntimeException failure) {
-                throw reseed("cannot replay writer Archive tail", failure);
+            } catch (final AeronException failure) {
+                /* The Archive or its control channel did not answer: the recording and
+                 * the Store mark are untouched, so a retry can still succeed. */
+                throw new ReplicationUnavailableException("cannot replay writer Archive tail", failure);
             }
         }
 
@@ -253,12 +314,9 @@ final class AeronWriterTailRecovery {
                 }
                 if (this.next.terminal == null) nextAbort = this.next.abortMarker();
                 final long resolvedPosition = this.next.terminal == null ? -1L : this.next.terminalPosition;
-                if (markedCommit != null) {
-                    /* The missing marked commit must be appended before a later abort. */
-                    boundaryPosition = -1L;
-                } else if (resolvedPosition >= 0L) {
-                    boundaryPosition = resolvedPosition;
-                }
+                /* A missing marked commit cannot coexist with a later sequence: that case was
+                 * rejected above, so the next sequence alone decides the boundary. */
+                if (resolvedPosition >= 0L) boundaryPosition = resolvedPosition;
                 boundarySequence = this.next.sequence;
                 return new Result(Math.addExact(this.next.sequence, 1L), boundarySequence,
                         boundaryPosition, markedCommit, nextAbort);

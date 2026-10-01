@@ -8,10 +8,11 @@ import peruncs.cluster.node.backup.BackupMetadata;
 import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 import peruncs.cluster.storage.binary.ReplicationApplier;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
+import peruncs.cluster.storage.binary.TypeDictionaryOutbox;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.time.Duration;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
@@ -83,11 +84,6 @@ public interface ClusterReplicationTransport extends AutoCloseable {
         }
 
         @Override
-        public ReplicationPublisher distributor() {
-            return ReplicationPublisher.noOp();
-        }
-
-        @Override
         public ReplicationApplier clientFromMark(
                 final StorageBinaryDataReceiver receiver,
                 final ReplicationMark startingMark
@@ -124,7 +120,8 @@ public interface ClusterReplicationTransport extends AutoCloseable {
 
         @Override
         public UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
-                final ReplicationPublisher distributor,
+                final TypeDictionaryOutbox outbox,
+                final BooleanSupplier distributionEnabled,
                 final Supplier<StorageConnection> writerStorage
         ) {
             /* No replication: the local target is the whole story. */
@@ -155,14 +152,6 @@ public interface ClusterReplicationTransport extends AutoCloseable {
         public void close() {
         }
     }
-
-    /// Creates the writer-side replication publisher for this node.
-    /// Implementations may reject direct data publication when local Store
-    /// acceptance must be coordinated; use
-    /// [#persistenceTargetFactory(ReplicationPublisher, Supplier)] for that transaction boundary.
-    ///
-    /// @return replication publisher
-    ReplicationPublisher distributor();
 
     /// Starts a reader at the boundary stored in its replication mark.
     ///
@@ -210,19 +199,6 @@ public interface ClusterReplicationTransport extends AutoCloseable {
             ReplicationApplier client
     );
 
-    /// Creates a target wrapper without writer-side index validation.
-    ///
-    /// Convenience overload for tests and transports whose graph has no index
-    /// policy to enforce; production wiring supplies the writer storage.
-    ///
-    /// @param distributor replication publisher
-    /// @return target factory without index validation
-    default UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
-            final ReplicationPublisher distributor
-    ) {
-        return this.persistenceTargetFactory(distributor, () -> null);
-    }
-
     /// Creates a target wrapper for coordinated publication.
     ///
     /// The wrapper owns the Store transaction boundary: local acceptance and
@@ -230,13 +206,16 @@ public interface ClusterReplicationTransport extends AutoCloseable {
     /// roles additionally validate the graph against the index policy before
     /// every distributed write, using the supplied writer storage connection.
     ///
-    /// @param distributor  replication publisher
+    /// @param outbox       receives the exported type dictionaries
+    /// @param distributionEnabled whether writes are currently replicated; `false` while the
+    ///                     node bootstraps its Store
     /// @param writerStorage supplies the writer's storage connection at write
     ///                      time, or `null` before it exists; implementations
     ///                      use it for pre-publication validation
     /// @return target factory
     UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
-            ReplicationPublisher distributor,
+            TypeDictionaryOutbox outbox,
+            BooleanSupplier distributionEnabled,
             Supplier<StorageConnection> writerStorage
     );
 

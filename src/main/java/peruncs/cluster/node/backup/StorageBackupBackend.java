@@ -23,20 +23,20 @@ import static org.eclipse.serializer.math.XMath.notNegative;
 /// backup volume must keep their clocks NTP-disciplined because timestamps are
 /// wall-clock based.
 public interface StorageBackupBackend {
-        /// Name of the storage directory inside an archive.
+    /// Name of the storage directory inside an archive.
     String STORAGE_ENTRY = "storage";
-        /// Name of the completed-backup marker inside an archive.
+    /// Name of the completed-backup marker inside an archive.
     String READY_ENTRY = "ready";
-        /// File name reserved for user-uploaded storage.
+    /// File name reserved for user-uploaded storage.
     String USER_UPLOADED_STORAGE_ARCHIVE = "user-uploaded-storage.zip";
 
-        /// Lists complete usable backups.
+    /// Lists complete usable backups.
     ///
     /// @return backups ordered oldest first by [BackupMetadata#OLDEST_FIRST]
     /// @throws NodeException if listing fails
     List<BackupMetadata> listBackups() throws NodeException;
 
-        /// Lists archives that exist on the volume but cannot be trusted.
+    /// Lists archives that exist on the volume but cannot be trusted.
     ///
     /// These are archives with unreadable or mismatched identity metadata
     /// that [listBackups] deliberately skips. The default backend has no such
@@ -50,7 +50,7 @@ public interface StorageBackupBackend {
         return List.of();
     }
 
-        /// Reads the retention boundary stored with one selected backup.
+    /// Reads the retention boundary stored with one selected backup.
     ///
     /// The boundary is read for a backup that was already selected for
     /// compatibility, so restores never mix progress from an unrelated
@@ -61,7 +61,7 @@ public interface StorageBackupBackend {
     /// @throws NodeException if reading fails
     ReplicationPosition retentionBoundary(BackupMetadata backup) throws NodeException;
 
-        /// Selects the newest backup compatible with the given node identity.
+    /// Selects the newest backup compatible with the given node identity.
     ///
     /// Backups from another cluster, store generation, epoch, or recording
     /// are skipped, so a node on a shared volume never installs an unrelated
@@ -79,7 +79,7 @@ public interface StorageBackupBackend {
                 .orElse(null);
     }
 
-        /// Reports whether at least one backup exists.
+    /// Reports whether at least one backup exists.
     ///
     /// @return `true` when a backup exists
     /// @throws NodeException if listing fails
@@ -87,7 +87,7 @@ public interface StorageBackupBackend {
         return !this.listBackups().isEmpty();
     }
 
-        /// Returns a backup counted from newest to oldest.
+    /// Returns a backup counted from newest to oldest.
     ///
     /// Zero selects the newest backup; larger values skip that many newer
     /// complete backups. Ordering follows [BackupMetadata#NEWEST_FIRST], the
@@ -108,33 +108,33 @@ public interface StorageBackupBackend {
         return skip < backups.size() ? backups.get(skip) : null;
     }
 
-        /// Deletes one backup.
+    /// Deletes one backup.
     ///
     /// @param backup backup to delete
     /// @throws NodeException if deletion fails
     void deleteBackup(BackupMetadata backup) throws NodeException;
 
-        /// Creates one backup.
+    /// Creates one backup.
     ///
     /// @param connection storage connection
     /// @param backup     backup metadata
     /// @throws NodeException if creation fails
     void createBackup(StorageConnection connection, BackupMetadata backup) throws NodeException;
 
-        /// Restores one backup.
+    /// Restores one backup.
     ///
     /// @param storageDestinationParentPath destination parent
     /// @param backup                       backup to restore
     /// @throws NodeException if restore fails
     void restoreBackup(Path storageDestinationParentPath, BackupMetadata backup) throws NodeException;
 
-        /// Reports whether user-uploaded storage exists.
+    /// Reports whether user-uploaded storage exists.
     ///
     /// @return `true` when user storage exists
     /// @throws NodeException if the check fails
     boolean hasUserUploadedStorage() throws NodeException;
 
-        /// Validates the user-uploaded storage archive in full.
+    /// Validates the user-uploaded storage archive in full.
     ///
     /// Implementations must verify structure and enforce every extraction
     /// budget on the real (decompressed) content, because the upload skips
@@ -146,7 +146,7 @@ public interface StorageBackupBackend {
     default void validateUserUploadedStorage() throws NodeException {
     }
 
-        /// Restores user-uploaded storage.
+    /// Restores user-uploaded storage.
     ///
     /// Implementations that validate uploads must re-validate on the exact
     /// archive they extract, closing the shared-volume window between the
@@ -156,7 +156,7 @@ public interface StorageBackupBackend {
     /// @throws NodeException if restore fails
     void restoreUserUploadedStorage(Path storageDestinationParentPath) throws NodeException;
 
-        /// Deletes user-uploaded storage.
+    /// Deletes user-uploaded storage.
     ///
     /// @throws NodeException if deletion fails
     void deleteUserUploadedStorage() throws NodeException;

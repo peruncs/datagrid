@@ -29,11 +29,12 @@ import java.util.function.Supplier;
 /// recorded terminal marker. The Store mark is the restart authority.
 ///
 /// Lock order is strict: coordinator {@code writeLock} → publisher state
-/// monitor. The coordinator lock is a short
-/// state-transition lock, never a wait lock: the slow marker offer and the
-/// Archive acknowledgement wait run with no coordinator lock held, and the
-/// in-progress guard is what keeps a second writer out. No callback may
-/// acquire the coordinator lock while holding the publisher state monitor.
+/// monitor. Write admission holds the lock across the whole prepare phase:
+/// index validation, the chunk offers, the wait for the Archive to record them
+/// (up to the recorded-position timeout) and the local Store write. Only the
+/// COMMIT offer runs without the lock, and it does not wait for recording. Every
+/// other acquisition is bounded by the same timeout. No callback may acquire
+/// the coordinator lock while holding the publisher state monitor.
 ///
 /// Every coordinator method either holds no lock or acquires {@code writeLock}
 /// in a {@code try/finally} that releases it before returning or throwing, so
@@ -42,20 +43,18 @@ import java.util.function.Supplier;
 /// This is an Aeron-only write coordinator. Store integration must use
 /// [AeronStorageBinaryReplicationTarget]; exposing this object as the
 /// publisher would allow publication without local Store
-/// acceptance and would bypass the durable fence.
+/// acceptance and would bypass the Store-mark reservation.
 public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     private final AeronReplicationPublisher publisher;
     private final LongConsumer terminalRecorded;
     private final LongPredicate writeAdmission;
     /* The single lock for all coordinator state below. It is reentrant: write
      * admission holds it across the fast phase of a Store transaction
-     * (marking, local acceptance, preparation) while the state transitions
-     * nest inside. The slow phase of a commit never holds it: the in-progress
-     * guard is set under a short hold and the wait itself runs unlocked, so
-     * health, maintenance, and dispose paths never block behind Archive
-     * progress. A standalone abort likewise releases before its bounded offer;
-     * only the target's local-rejection path keeps its admission hold across
-     * that bounded abort offer. */
+     * (marking, preparation, Archive recording wait, local acceptance) while
+     * the state transitions nest inside. The COMMIT offer runs unlocked. Other
+     * paths acquire it with a deadline (see lockBounded), so health,
+     * maintenance, and dispose fail fast behind a stuck prepare instead of
+     * waiting forever. */
     private final ReentrantLock writeLock = new ReentrantLock();
     /* Set before Archive maintenance waits for the current writer. New Store
      * writes fail immediately instead of queueing behind an operation whose
@@ -69,8 +68,8 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
      * bytes to PreparedWrite; a rejected local write returns them for retry. */
     private byte[] retryDictionary;
     /* The coordinator is single-threaded. Reusing this channel-order scratch
-     * array removes the ArrayList and temporary array from every write. A local
-     * acceptance fence keeps the count beside the array until preparation ends. */
+     * array removes the ArrayList and temporary array from every write. The
+     * count stays beside the array until preparation ends. */
     private ByteBuffer[] bufferScratch = new ByteBuffer[8];
     private int bufferScratchCount;
     /* Set while a Store write owns admission, including while it waits for the
@@ -90,23 +89,23 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
     /// One immutable snapshot owns admission until its terminal outcome is known.
     private record PreparedWrite(long sequence, byte[] dictionary, ByteBuffer[] buffers, int bufferCount,
-                                 AeronReplicationPublisher.TransactionMetadata metadata, long fencingToken,
-                                 AeronReplicationPublisher.PreparedTransaction transaction,
+                                 int dataLength, long fencingToken,
+                                 PreparedTransaction transaction,
                                  State state, Thread ownerThread) {
         private enum State { RESERVED, PREPARED, COMMITTING, REPLICATION_SUSPENDED, REJECTING }
 
-        private PreparedWrite withTransaction(final AeronReplicationPublisher.PreparedTransaction prepared) {
-            return new PreparedWrite(sequence, dictionary, buffers, bufferCount, metadata, fencingToken,
+        private PreparedWrite withTransaction(final PreparedTransaction prepared) {
+            return new PreparedWrite(sequence, dictionary, buffers, bufferCount, dataLength, fencingToken,
                     prepared, State.PREPARED, ownerThread);
         }
 
         private PreparedWrite withState(final State next, final Thread owner) {
-            return new PreparedWrite(sequence, dictionary, buffers, bufferCount, metadata, fencingToken,
+            return new PreparedWrite(sequence, dictionary, buffers, bufferCount, dataLength, fencingToken,
                     transaction, next, owner);
         }
 
         private PreparedWrite suspended() {
-            return new PreparedWrite(sequence, null, null, 0, metadata, fencingToken,
+            return new PreparedWrite(sequence, null, null, 0, dataLength, fencingToken,
                     transaction, State.REPLICATION_SUSPENDED, null);
         }
     }
@@ -138,7 +137,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         return this.publisher.nextSequence();
     }
 
-        /// Fails closed when the publisher no longer carries this writer's identity.
+    /// Fails closed when the publisher no longer carries this writer's identity.
     ///
     /// Call with the write lock held.
     private void ensureWriterIdentity() {
@@ -150,11 +149,11 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-        /// Saves a type dictionary for the next transaction.
+    /// Saves a type dictionary for the next transaction.
     ///
     /// @param typeDictionaryData dictionary text, or `null` to clear it
     public void distributeTypeDictionary(final String typeDictionaryData) {
-        this.writeLock.lock();
+        this.lockBounded();
         try {
             this.ensureNotCommitting();
             this.ensureWriterIdentity();
@@ -175,8 +174,8 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// Runs the fast write phase and reserves its prepared transaction before
     /// releasing admission. This closes the gap in which another Store writer
     /// could replace the staged dictionary before commit established its guard.
-    AeronReplicationPublisher.PreparedTransaction prepareWriteAtomically(
-            final Supplier<AeronReplicationPublisher.PreparedTransaction> operation) {
+    PreparedTransaction prepareWriteAtomically(
+            final Supplier<PreparedTransaction> operation) {
         Objects.requireNonNull(operation, "operation");
         this.lockWriteAdmission();
         try {
@@ -204,8 +203,8 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         try {
             this.ensureNotCommitting();
             this.ensureWriterIdentity();
-            if (mark.clusterId == null || !mark.clusterId.equals(this.publisher.clusterId()) ||
-                mark.epoch != this.writerEpoch) {
+            if (mark.clusterId() == null || !mark.clusterId().equals(this.publisher.clusterId()) ||
+                mark.epoch() != this.writerEpoch) {
                 throw new IllegalArgumentException("replication mark identity does not match the writer");
             }
             if (this.publisher.hasSequenceReservation()) {
@@ -218,10 +217,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             }
             final long sequence = this.publisher.reserveSequence();
             this.markReservation = new MarkReservation(sequence, Thread.currentThread());
-            mark.recordingId = recordingId;
-            mark.fencingToken = this.publisher.fencingToken();
-            mark.sequence = sequence;
-            mark.prepareStartPosition = startPosition;
+            mark.reserve(recordingId, this.publisher.fencingToken(), sequence, startPosition);
         } finally {
             this.writeLock.unlock();
         }
@@ -231,34 +227,34 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// commit never reached the target.
     public void cancelStoreCommit(final ReplicationMark mark) {
         Objects.requireNonNull(mark, "mark");
-        this.writeLock.lock();
+        this.lockBounded();
         try {
             if (this.markReservation == null ||
                 this.markReservation.ownerThread() != Thread.currentThread() ||
-                this.markReservation.sequence() != mark.sequence) return;
+                this.markReservation.sequence() != mark.sequence()) return;
             this.cancelMarkReservationLocked();
         } finally {
             this.writeLock.unlock();
         }
     }
 
-        /// Publishes and commits one Store binary using the archive-first fence.
+    /// Publishes and commits one Store binary.
     ///
     /// This entry point is for the neutral publisher, which has no local
-    /// persistence target to fence. Store writes should use
+    /// persistence target. Store writes should use
     /// [AeronStorageBinaryReplicationTarget] so local acceptance and
     /// publication remain one operation.
     ///
     /// @param data binary to publish
     void distributeData(final Binary data) {
-        final AeronReplicationPublisher.PreparedTransaction prepared =
+        final PreparedTransaction prepared =
                 this.prepareWriteAtomically(() -> this.prepare(data));
         try (prepared) {
             this.commitOrMarkUncertain(prepared);
         }
     }
 
-        /// Commits a token. If the result is unclear, records that fact before
+    /// Commits a token. If the result is unclear, records that fact before
     /// rethrowing so restart cannot silently reuse the sequence.
     ///
     /// Must be called with the write lock released — asserted up front, so a
@@ -272,7 +268,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// `isHeldByCurrentThread` balancing is needed.
     ///
     /// @param prepared transaction whose commit marker is offered now
-    void commitOrMarkUncertain(final AeronReplicationPublisher.PreparedTransaction prepared) {
+    void commitOrMarkUncertain(final PreparedTransaction prepared) {
         if (this.writeLock.isHeldByCurrentThread()) {
             throw new IllegalStateException(
                     "commitOrMarkUncertain must be called with the write lock released; the slow offer path may not run under it");
@@ -295,7 +291,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
     /// Completes a locally accepted Store commit without waiting for Archive recording.
     /// A bounded COMMIT offer failure keeps the graph valid and suspends admission.
-    void commitAcceptedStore(final AeronReplicationPublisher.PreparedTransaction prepared) {
+    void commitAcceptedStore(final PreparedTransaction prepared) {
         if (this.writeLock.isHeldByCurrentThread()) {
             throw new IllegalStateException("Store COMMIT offer may not run under the coordinator lock");
         }
@@ -327,8 +323,8 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
 
     /// Retries one suspended Store COMMIT offer from the node maintenance task.
     public void retryPendingCommit() {
-        final AeronReplicationPublisher.PreparedTransaction prepared;
-        this.writeLock.lock();
+        final PreparedTransaction prepared;
+        this.lockBounded();
         try {
             if (this.activeWrite == null ||
                 this.activeWrite.state() != PreparedWrite.State.REPLICATION_SUSPENDED) return;
@@ -362,7 +358,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     }
 
     private void suspendCommit(final ReplicationPendingException pending) {
-        this.writeLock.lock();
+        this.lockBounded();
         try {
             this.failure = pending;
             if (this.activeWrite != null) this.activeWrite = this.activeWrite.suspended();
@@ -382,8 +378,8 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// the state change. Setting the guard before any slow wait is what makes
     /// a concurrent writer fail fast with {@code "Aeron commit is in progress"}
     /// instead of preparing against the same publisher.
-    private void beginCommit(final AeronReplicationPublisher.PreparedTransaction prepared) {
-        this.writeLock.lock();
+    private void beginCommit(final PreparedTransaction prepared) {
+        this.lockBounded();
         try {
             if (this.activeWrite == null || this.activeWrite.transaction() != prepared) {
                 throw new IllegalStateException("prepared transaction does not own Aeron write admission");
@@ -414,7 +410,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// publisher closed on any ambiguity; restart resolves the Store mark
     /// against the Archive tail.
     private void finishCommit(final RuntimeException failure, final Error fatal) {
-        this.writeLock.lock();
+        this.lockBounded();
         try {
             if (fatal != null || failure != null) this.publisher.failClosed();
             this.failure = failure;
@@ -429,11 +425,11 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     }
 
     /// Publishes a transaction's prepare frames.
-    AeronReplicationPublisher.PreparedTransaction prepare(final Binary data) {
+    PreparedTransaction prepare(final Binary data) {
         if (this.writeLock.isHeldByCurrentThread()) {
             return this.prepareLocked(data);
         }
-        this.writeLock.lock();
+        this.lockBounded();
         try {
             return this.prepareLocked(data);
         } finally {
@@ -441,14 +437,14 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-    private AeronReplicationPublisher.PreparedTransaction prepareLocked(final Binary data) {
+    private PreparedTransaction prepareLocked(final Binary data) {
         this.ensureNotCommitting();
         this.ensureWriterIdentity();
         Objects.requireNonNull(data, "data");
         if (this.publisher.hasPendingTransaction()) {
             throw new IllegalStateException("an Aeron prepared transaction is already pending");
         }
-        final AeronReplicationPublisher.PreparedTransaction prepared;
+        final PreparedTransaction prepared;
         /* Reject re-entry before recollecting into the reusable array. */
         final MarkReservation reservedMark = this.markReservation;
         if (this.publisher.hasSequenceReservation() &&
@@ -458,19 +454,19 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         final int bufferCount = this.collectBuffers(data);
         final ByteBuffer[] buffers = this.bufferScratch;
         final byte[] dictionary = this.retryDictionary;
-        AeronReplicationPublisher.TransactionMetadata metadata;
+        final int dataLength;
         long sequence;
         /* Reserve the sequence before publication so recovery can reconcile the
          * Archive tail against the Store mark. */
         try {
-            metadata = this.publisher.transactionMetadata(buffers, bufferCount);
+            dataLength = this.publisher.dataLength(buffers, bufferCount);
         } catch (final RuntimeException | Error failure) {
             this.clearBufferScratch();
             this.failClosedUnlessRejected(failure);
             throw failure;
         }
         try {
-            this.ensureWriteAdmitted(metadata.dataLength(), dictionary);
+            this.ensureWriteAdmitted(dataLength, dictionary);
         } catch (final RuntimeException | Error admissionFailure) {
             this.clearBufferScratch();
             throw admissionFailure;
@@ -478,7 +474,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         try {
             sequence = reservedMark == null ? this.publisher.reserveSequence() : reservedMark.sequence();
             this.activeWrite = new PreparedWrite(sequence, dictionary, buffers, bufferCount,
-                    metadata, this.publisher.fencingToken(), null, PreparedWrite.State.RESERVED,
+                    dataLength, this.publisher.fencingToken(), null, PreparedWrite.State.RESERVED,
                     Thread.currentThread());
             if (reservedMark != null) this.markReservation = null;
             this.retryDictionary = null;
@@ -491,7 +487,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         try {
             prepared = this.publisher.prepareTransaction(
                     this.activeWrite.dictionary(), this.activeWrite.buffers(),
-                    this.activeWrite.bufferCount(), this.activeWrite.sequence(), this.activeWrite.metadata());
+                    this.activeWrite.bufferCount(), this.activeWrite.sequence());
         } catch (final RuntimeException | Error failure) {
             final PreparedWrite rejected = this.activeWrite;
             if (failure instanceof WriteRejectedException rejection && rejected != null) {
@@ -516,8 +512,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         try {
             this.activeWrite = this.activeWrite.withTransaction(prepared);
             if (prepared.sequence() != this.activeWrite.sequence() ||
-                prepared.dataLength() != this.activeWrite.metadata().dataLength() ||
-                prepared.dataCrc32c() != this.activeWrite.metadata().crc32c() ||
+                prepared.dataLength() != this.activeWrite.dataLength() ||
                 this.publisher.fencingToken() != this.activeWrite.fencingToken()) {
                 throw new IllegalStateException("prepared transaction changed its reserved identity");
             }
@@ -563,12 +558,12 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         this.ensureWriteAdmitted(0, null);
     }
 
-        /// Returns whether the publisher can still accept a transaction.
+    /// Returns whether the publisher can still accept a transaction.
     boolean isWritable() {
         return this.failure == null && !this.publisher.isFailed() && !this.publisher.isClosed();
     }
 
-        /// Executes Archive maintenance while this coordinator excludes every Store
+    /// Executes Archive maintenance while this coordinator excludes every Store
     /// write. The supplied operation is responsible for stopping and extending the
     /// recording; keeping this monitor held prevents an unrecorded publication gap.
     ///
@@ -604,6 +599,23 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             }
         } finally {
             this.maintenance.set(false);
+        }
+    }
+
+    /// Takes the coordinator lock with the recorded-position deadline instead of waiting forever.
+    ///
+    /// A prepare holds this lock while it waits for the Archive, so an unbounded wait here would
+    /// park dispose, cancellation and retry behind a slow or dead Archive.
+    private void lockBounded() {
+        final long deadline = ReplicationRetry.deadlineNanos(this.publisher.recordedPositionTimeoutNanos());
+        try {
+            if (!this.writeLock.tryLock(ReplicationRetry.remainingNanos(deadline), TimeUnit.NANOSECONDS)) {
+                throw new ReplicationUnavailableException("timed out waiting for Aeron write admission");
+            }
+        } catch (final InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new ReplicationUnavailableException(
+                    "interrupted while waiting for Aeron write admission", interrupted);
         }
     }
 
@@ -664,13 +676,13 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     /// Offers the commit marker and waits for the durability boundary.
     ///
     /// Called only by [commitOrMarkUncertain] with no coordinator lock held.
-    private void performCommit(final AeronReplicationPublisher.PreparedTransaction prepared) {
-        FaultInjection.invoke("BEFORE_COMMIT_GATE", prepared.sequence());
+    private void performCommit(final PreparedTransaction prepared) {
+        FaultInjection.invoke(FaultInjection.Point.BEFORE_COMMIT_GATE, prepared.sequence());
         final long commitPosition = this.publisher.offerCommitMarker(prepared);
         final long position = this.publisher.awaitCommitPosition(prepared, commitPosition);
-        this.writeLock.lock();
+        this.lockBounded();
         try {
-            FaultInjection.invoke("AFTER_COMMIT_RECORDED_BEFORE_BOUNDARY_UPDATE", prepared.sequence());
+            FaultInjection.invoke(FaultInjection.Point.AFTER_COMMIT_RECORDED_BEFORE_BOUNDARY_UPDATE, prepared.sequence());
             this.terminalRecorded.accept(position);
         } catch (final RuntimeException | Error failure) {
             this.publisher.failClosed();
@@ -680,8 +692,8 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-    void abort(final AeronReplicationPublisher.PreparedTransaction prepared) {
-        this.writeLock.lock();
+    void abort(final PreparedTransaction prepared) {
+        this.lockBounded();
         try {
             if (this.activeWrite != null && this.activeWrite.state() == PreparedWrite.State.COMMITTING) {
                 throw new IllegalStateException("Aeron commit is in progress");
@@ -710,7 +722,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
             this.publisher.failClosed();
             throw failure;
         } finally {
-            this.writeLock.lock();
+            this.lockBounded();
             try {
                 if (this.activeWrite != null) {
                     if (rejected && this.activeWrite.dictionary() != null) {
@@ -725,7 +737,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-        /// Collects channel buffers into the reusable writer-owned array.
+    /// Collects channel buffers into the reusable writer-owned array.
     private int collectBuffers(final Binary data) {
         Objects.requireNonNull(data, "data");
         this.bufferScratchCount = 0;
@@ -743,7 +755,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         return this.bufferScratchCount;
     }
 
-        /// Drops references to the last transaction's source buffers.
+    /// Drops references to the last transaction's source buffers.
     private void clearBufferScratch() {
         Arrays.fill(this.bufferScratch, 0, this.bufferScratchCount, null);
         this.bufferScratchCount = 0;
@@ -757,7 +769,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
     ///
     /// Called from the Store write path while it still holds the single
     /// admission hold and balances that hold in its own finally block.
-    void markStoreOutcomeUncertain(final AeronReplicationPublisher.PreparedTransaction prepared) {
+    void markStoreOutcomeUncertain(final PreparedTransaction prepared) {
         if (!this.writeLock.isHeldByCurrentThread()) {
             throw new IllegalStateException(
                     "markStoreOutcomeUncertain requires the caller's Aeron write-admission hold");
@@ -816,7 +828,7 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         this.writeDone.signalAll();
     }
 
-        /// Waits, bounded, for an in-flight commit to finish.
+    /// Waits, bounded, for an in-flight commit to finish.
     ///
     /// Shutdown and Archive maintenance must not fail merely because a commit
     /// released the write lock and is still awaiting its Archive position; the
@@ -845,15 +857,15 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
     }
 
-        /// Closes the publisher owned by this coordinator.
+    /// Closes the publisher owned by this coordinator.
     @Override
     public void close() {
         this.dispose();
     }
 
-        /// Releases the publisher owned by this coordinator.
+    /// Releases the publisher owned by this coordinator.
     public void dispose() {
-        this.writeLock.lock();
+        this.lockBounded();
         try {
             this.disposeLocked();
         } finally {

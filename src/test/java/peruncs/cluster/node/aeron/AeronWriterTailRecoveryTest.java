@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
+import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelopeTestSupport;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope.EnvelopeView;
 
 import java.util.UUID;
@@ -18,21 +19,39 @@ class AeronWriterTailRecoveryTest {
     private static final long EPOCH = 3L;
     private static final long FENCING_TOKEN = 5L;
     private static final long WIRE_NONCE = AeronReplicationEnvelope.defaultWireNonce(CLUSTER);
+    private static final AeronWriterTailRecovery.Framing FRAMING =
+            new AeronWriterTailRecovery.Framing(1_024, 512, 1_408, 65_536);
     private static final byte[] PAYLOAD = {4, 8, 15, 16, 23, 42};
 
     @Test
     void recoveryTailMustStayInsideTheRecordingAndTheComputedWindow() {
         assertThrows(ReseedRequiredException.class, () ->
-                AeronWriterTailRecovery.validateRecoveryBounds(7L, 99L, 100L, 100L, 1_024, 512));
+                AeronWriterTailRecovery.validateRecoveryBounds(7L, 99L, 100L, 100L, FRAMING));
 
         final long windowEnd = AeronWriterTailRecovery.validateRecoveryBounds(
-                7L, 100L, 100L, 100L, 1_024, 512);
+                7L, 100L, 100L, 100L, FRAMING);
         assertThrows(ReseedRequiredException.class, () ->
                 AeronWriterTailRecovery.validateRecoveryBounds(
-                        7L, 100L, 100L, windowEnd + 1L, 1_024, 512));
+                        7L, 100L, 100L, windowEnd + 1L, FRAMING));
         assertThrows(ReseedRequiredException.class, () ->
                 AeronWriterTailRecovery.validateRecoveryBounds(
-                        7L, Long.MAX_VALUE - 1L, 0L, Long.MAX_VALUE - 1L, 1_024, 512));
+                        7L, Long.MAX_VALUE - 1L, 0L, Long.MAX_VALUE - 1L, FRAMING));
+    }
+
+    /// The window must cover per-frame headers and alignment of two maximum-size transactions at any MTU.
+    @Test
+    void recoveryWindowCoversAeronFramingOfTwoMaximumTransactions() {
+        final int maxTransaction = 64 * 1024 * 1024;
+        for (final int mtu : new int[]{1_408, 9_000}) {
+            for (final int term : new int[]{64 * 1024, 16 * 1024 * 1024}) {
+                final long window = new AeronWriterTailRecovery.Framing(maxTransaction, 128 * 1024, mtu, term)
+                        .recoveryWindowBytes();
+                final long framingOverhead = 2L * maxTransaction * 32 / (mtu - 32);
+                assertTrue(window >= 2L * maxTransaction + framingOverhead,
+                        "window %d must cover payload plus %d framing bytes (mtu %d, term %d)"
+                                .formatted(window, framingOverhead, mtu, term));
+            }
+        }
     }
 
     @Test
@@ -148,8 +167,7 @@ class AeronWriterTailRecoveryTest {
 
     private static AeronWriterTailRecovery.Scan scan(final long markSequence) {
         final ReplicationMark mark = new ReplicationMark(CLUSTER, UUID.randomUUID(), EPOCH, 12L);
-        mark.sequence = markSequence;
-        mark.prepareStartPosition = 100L;
+        mark.reserve(mark.recordingId(), mark.fencingToken(), markSequence, 100L);
         return new AeronWriterTailRecovery.Scan(mark, CLUSTER, EPOCH, WIRE_NONCE, FENCING_TOKEN, 1_024);
     }
 
@@ -175,7 +193,7 @@ class AeronWriterTailRecoveryTest {
                                final int commitCrc32c, final byte[] payload, final long position) {
         final UnsafeBuffer source = new UnsafeBuffer(payload);
         final UnsafeBuffer frame = new UnsafeBuffer(new byte[AeronReplicationEnvelope.HEADER_LENGTH + payload.length]);
-        final int length = AeronReplicationEnvelope.encode(frame, 0, clusterId, epoch, fencingToken,
+        final int length = AeronReplicationEnvelopeTestSupport.encodeFrame(frame, 0, clusterId, epoch, fencingToken,
                 AeronReplicationEnvelope.defaultWireNonce(clusterId), sequence, kind, payloadLength,
                 chunkIndex, chunkCount, chunkOffset, commitCrc32c, source, 0, payload.length,
                 new AeronReplicationEnvelope.ChecksumContext());

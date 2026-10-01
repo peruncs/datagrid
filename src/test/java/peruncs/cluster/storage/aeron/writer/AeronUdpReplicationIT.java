@@ -12,6 +12,7 @@ import org.eclipse.serializer.persistence.types.PersistenceTarget;
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.aeron.reader.ReplicationApplierAeron;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
 
@@ -43,7 +44,7 @@ class AeronUdpReplicationIT {
         }
     }
 
-        /// Verifies fragments large transaction and delivers after commit.
+    /// Verifies fragments large transaction and delivers after commit.
     @Test
     void fragmentsLargeTransactionAndDeliversAfterCommit() throws Exception {
         final int port = freePort();
@@ -75,7 +76,8 @@ class AeronUdpReplicationIT {
                 data[i] = (byte) (i * 31);
             }
             final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-                    AeronReplicationPublisher.onPublication(publication, configuration, clusterId, 1, 0)
+                    AeronReplicationPublisher.onPublication(publication, configuration, clusterId, 1, 0,
+                            (position, timeoutNanos) -> position, AeronReplicationEnvelope.defaultWireNonce(clusterId))
             );
             final ByteBuffer first = XMemory.toDirectByteBuffer(Arrays.copyOfRange(data, 0, 37_000));
             final ByteBuffer second = XMemory.toDirectByteBuffer(Arrays.copyOfRange(data, 37_000, data.length));
@@ -95,7 +97,7 @@ class AeronUdpReplicationIT {
                 }
             };
             receiver.localAccepted = () -> localAccepted[0];
-            AeronStorageBinaryReplicationTarget.create(localTarget, coordinator)
+            WriterTargets.create(localTarget, coordinator)
                     .write(ChunksWrapper.New(first, second));
             assertEquals(firstPosition, first.position());
             assertEquals(secondPosition, second.position());
@@ -115,7 +117,7 @@ class AeronUdpReplicationIT {
         }
     }
 
-        /// Verifies local enqueue failure publishes abort and reader does not apply.
+    /// Verifies local enqueue failure publishes abort and reader does not apply.
     @Test
     void localEnqueueFailurePublishesAbortAndReaderDoesNotApply() throws Exception {
         final int port = freePort();
@@ -143,7 +145,8 @@ class AeronUdpReplicationIT {
             );
             client.start();
             final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
-                    AeronReplicationPublisher.onPublication(publication, configuration, clusterId, 1, 0)
+                    AeronReplicationPublisher.onPublication(publication, configuration, clusterId, 1, 0,
+                            (position, timeoutNanos) -> position, AeronReplicationEnvelope.defaultWireNonce(clusterId))
             );
             final PersistenceTarget<Binary> failingTarget = new PersistenceTarget<>() {
                 public void write(final Binary value) {
@@ -154,7 +157,7 @@ class AeronUdpReplicationIT {
                     return true;
                 }
             };
-            final PersistenceTarget<Binary> target = AeronStorageBinaryReplicationTarget.create(failingTarget, coordinator);
+            final PersistenceTarget<Binary> target = WriterTargets.create(failingTarget, coordinator);
             assertThrows(IllegalStateException.class,
                     () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{4, 5, 6}))));
             /* No acknowledgement, no abort marker, no replay: the reader must
@@ -172,7 +175,7 @@ class AeronUdpReplicationIT {
         }
     }
 
-        /// Verifies dynamic MDC uses max flow control and reconnects.
+    /// Verifies dynamic MDC uses max flow control and reconnects.
     @Test
     void dynamicMdcUsesMaxFlowControlAndReconnects() throws Exception {
         final int controlPort = freePort();
@@ -193,7 +196,8 @@ class AeronUdpReplicationIT {
                     subscription, configuration, clusterId, 5, -1, receiver);
             client.start();
             final AeronReplicationPublisher publisher = AeronReplicationPublisher.onPublication(
-                    publication, configuration, clusterId, 5, 0);
+                    publication, configuration, clusterId, 5, 0, (position, timeoutNanos) -> position,
+                    AeronReplicationEnvelope.defaultWireNonce(clusterId));
             publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{9, 8, 7})});
             await(() -> client.lastResolvedSequence() == 0);
             assertArrayEquals(new byte[]{9, 8, 7}, receiver.data);

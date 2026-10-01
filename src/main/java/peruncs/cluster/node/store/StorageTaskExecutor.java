@@ -15,8 +15,11 @@ import static java.lang.System.Logger.Level.ERROR;
 /// Only one check task may run at a time. A later request while that task is
 /// active is ignored, and the next request can start after the previous thread
 /// has finished.
+///
+/// An interface so the node managers can be tested against a stand-in without a Store
+/// (`StorageNodeManagerRolesTest`, `StorageNodeManagerCloseTest`).
 public interface StorageTaskExecutor extends AutoCloseable {
-        /// Creates a storage task executor.
+    /// Creates a storage task executor.
     ///
     /// @param connection Store connection
     /// @return task executor
@@ -34,20 +37,20 @@ public interface StorageTaskExecutor extends AutoCloseable {
                 Objects.requireNonNull(closeTimeout, "closeTimeout"));
     }
 
-        /// Starts a storage check task.
+    /// Starts a storage check task.
     void runChecks();
 
-        /// Reports whether a storage check is running.
+    /// Reports whether a storage check is running.
     ///
     /// @return `true` when running
     boolean isRunningChecks();
 
-        /// Reports the failure of the most recently completed storage check, if any.
+    /// Reports the failure of the most recently completed storage check, if any.
     ///
     /// @return the most recent check failure, or `null` after a successful check
     Throwable failure();
 
-        /// Stops outstanding maintenance work and releases executor state.
+    /// Stops outstanding maintenance work and releases executor state.
     ///
     /// The shutdown starts with the first call. When the bounded wait fails,
     /// the failure is rethrown and a later call retries the wait; the
@@ -56,7 +59,7 @@ public interface StorageTaskExecutor extends AutoCloseable {
     default void close() {
     }
 
-        /// Implements the single-flight storage-check state machine.
+    /// Implements the single-flight storage-check state machine.
     final class Default implements StorageTaskExecutor {
         private static final System.Logger LOGGER = System.getLogger(StorageTaskExecutor.class.getName());
         private static final Future<?> SHUTDOWN = CompletableFuture.completedFuture(null);
@@ -66,7 +69,7 @@ public interface StorageTaskExecutor extends AutoCloseable {
         private final AtomicReference<Throwable> failure = new AtomicReference<>();
         private final AtomicReference<Future<?>> checksTask = new AtomicReference<>();
 
-                /// Creates the shared executor state.
+        /// Creates the shared executor state.
         ///
         /// @param connection Store connection
         private Default(final StorageConnection connection, final Duration closeTimeout) {
@@ -75,9 +78,8 @@ public interface StorageTaskExecutor extends AutoCloseable {
             }
             this.connection = connection;
             this.closeTimeout = closeTimeout;
-            this.executor = Executors.newSingleThreadExecutor(Thread.ofVirtual()
-                    .name("EclipseStore-StorageChecks", 0L)
-                    .factory());
+            this.executor = Executors.newSingleThreadExecutor(runnable ->
+                    Thread.ofPlatform().daemon().name("peruncs-storage-checks").unstarted(runnable));
         }
 
         @Override
@@ -120,6 +122,8 @@ public interface StorageTaskExecutor extends AutoCloseable {
         @Override
         public void close() {
             final Future<?> task = this.checksTask.getAndSet(SHUTDOWN);
+            /* The check thread only waits on the Store's channel threads; the interrupt cancels that
+             * wait, not the Store's own work, so closing stays prompt. */
             if (task != null && task != SHUTDOWN) task.cancel(true);
             this.executor.shutdownNow();
             RuntimeException failure = null;

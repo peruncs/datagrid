@@ -16,12 +16,13 @@ import peruncs.cluster.node.replication.ReplicationLogRetention;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 import peruncs.cluster.storage.binary.ReplicationApplier;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
+import peruncs.cluster.storage.binary.TypeDictionaryOutbox;
 import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
@@ -178,24 +179,12 @@ public final class AeronTransport implements ClusterReplicationTransport {
         return this.replicationMark;
     }
 
-    /// Returns the replication publisher for the transport's single replication stream.
-    ///
-    /// The returned handle carries dictionaries and lifecycle control
-    /// only: data publication is deliberately unavailable through it and
-    /// flows exclusively through the persistence-target factory, where
-    /// local Store acceptance and replication fencing are one serialized
-    /// operation. One transport owns one stream.
-    /// @return replication publisher
-    @Override
-    public ReplicationPublisher distributor() {
-        return this.writerTransport.distributor();
-    }
-
     @Override
     public UnaryOperator<PersistenceTarget<Binary>> persistenceTargetFactory(
-            final ReplicationPublisher distributor,
+            final TypeDictionaryOutbox outbox,
+            final BooleanSupplier distributionEnabled,
             final Supplier<StorageConnection> writerStorage) {
-        return this.writerTransport.persistenceTargetFactory(distributor, writerStorage);
+        return this.writerTransport.persistenceTargetFactory(outbox, distributionEnabled, writerStorage);
     }
 
     @Override
@@ -227,20 +216,21 @@ public final class AeronTransport implements ClusterReplicationTransport {
         synchronized (this.healthLock) {
             if (this.health == null || !this.health.matches(storage, client)) {
                 if (this.health != null) this.health.close();
-                this.health = new AeronHealth(
-                        storage,
-                        client,
-                        this.shared::closed,
-                        () -> this.runtimeOwner.driverFailure() != null,
-                        () -> this.shared.capacity().available(this.settings.replication().maxTransactionBytes()),
-                        this.writerTransport::writerReady,
-                        () -> this.settings.topology().role().isWriter(),
-                        this.writerTransport::writerState,
-                        this.shared.capacity()::usableSpaceBytes,
-                        () -> this.writerTransport.writerBoundary().position(),
-                        () -> this.writerTransport.writerBoundary().sequence(),
-                        this.readerTransport::appliedSequence,
-                        () -> this.shared.watermarks().channelFailure() != null);
+                this.health = new AeronHealth(storage, client,
+                        new AeronHealth.Signals(
+                                this.shared::closed,
+                                () -> this.runtimeOwner.driverFailure() != null,
+                                () -> this.shared.capacity().available(this.settings.replication().maxTransactionBytes()),
+                                () -> this.shared.watermarks().channelFailure() != null),
+                        new AeronHealth.WriterProbes(
+                                this.writerTransport::writerReady,
+                                () -> this.settings.topology().role().isWriter(),
+                                this.writerTransport::writerState),
+                        new AeronHealth.Positions(
+                                this.shared.capacity()::usableSpaceBytes,
+                                () -> this.writerTransport.writerBoundary().position(),
+                                () -> this.writerTransport.writerBoundary().sequence(),
+                                this.readerTransport::appliedSequence));
             }
             return this.health;
         }
@@ -314,7 +304,6 @@ public final class AeronTransport implements ClusterReplicationTransport {
             throw new IllegalStateException("failed to close Aeron transport", failure);
         }
         synchronized (this.shared) {
-            this.writerTransport.clearDistributor();
             this.shared.watermarks().discardDeferred();
             this.shared.closed(true);
             this.shared.closing(false);
@@ -331,7 +320,7 @@ public final class AeronTransport implements ClusterReplicationTransport {
                         this.readerTransport::occupied,
                         this.readerTransport::disposeReader),
                 /* The coordinator owns every pending transaction and must resolve or
-                 * preserve its fence before the Archive wrapper stops the recording.
+                 * preserve its open transaction before the Archive wrapper stops the recording.
                  * Closing the raw writer first can publish an ABORT beneath a Store
                  * write that still owns the coordinator. */
                 CloseSequencer.stage("coordinator",

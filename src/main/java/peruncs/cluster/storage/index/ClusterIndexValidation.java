@@ -74,6 +74,12 @@ final class ClusterIndexValidation {
         private final HashMap<Class<?>, List<PersistenceTypeDefinition>> assignable = new HashMap<>();
         private final HashMap<Class<?>, Boolean> relevant = new HashMap<>();
         private final HashSet<Class<?>> resolving = new HashSet<>();
+        /* Types whose negative answer depended on a type still being resolved
+         * (a cycle back-edge). Such an answer is provisional: it is cached only
+         * once the outermost resolution finishes negative, because a member of
+         * the cycle that is evaluated later may still reach an index. */
+        private final ArrayList<Class<?>> provisionalNegatives = new ArrayList<>();
+        private boolean backEdgeHit;
         private final Consumer<PersistenceTypeDefinition> definitionCounter = this::countRuntimeDefinition;
 
         boolean bind(final PersistenceTypeDictionary current) {
@@ -105,7 +111,7 @@ final class ClusterIndexValidation {
             this.definitions.clear();
             this.assignable.clear();
             this.relevant.clear();
-            this.resolving.clear();
+            this.resetResolution();
             if (current != null) {
                 current.iterateRuntimeDefinitions(definition -> {
                     if (definition != null && definition.type() != null) {
@@ -125,8 +131,14 @@ final class ClusterIndexValidation {
                 this.definitions.put(type, definition);
                 this.assignable.clear();
                 this.relevant.clear();
-                this.resolving.clear();
+                this.resetResolution();
             }
+        }
+
+        private void resetResolution() {
+            this.resolving.clear();
+            this.provisionalNegatives.clear();
+            this.backEdgeHit = false;
         }
 
         private void countRuntimeDefinition(final PersistenceTypeDefinition definition) {
@@ -143,7 +155,12 @@ final class ClusterIndexValidation {
                 Reference.class.isAssignableFrom(type)) return true;
             final Boolean cached = this.relevant.get(type);
             if (cached != null) return cached;
-            if (!this.resolving.add(type)) return false;
+            if (!this.resolving.add(type)) {
+                this.backEdgeHit = true;
+                return false;
+            }
+            final boolean outerBackEdge = this.backEdgeHit;
+            this.backEdgeHit = false;
             boolean result = false;
             try {
                 final List<PersistenceTypeDefinition> candidates = this.assignable.computeIfAbsent(type, declared ->
@@ -175,7 +192,22 @@ final class ClusterIndexValidation {
             } finally {
                 this.resolving.remove(type);
             }
-            this.relevant.put(type, result);
+            final boolean dependsOnOpenType = this.backEdgeHit;
+            if (result || !dependsOnOpenType) {
+                this.relevant.put(type, result);
+            } else if (!this.resolving.isEmpty()) {
+                this.provisionalNegatives.add(type);
+            }
+            if (this.resolving.isEmpty()) {
+                /* The outermost resolution is exact: when it is negative, every
+                 * type it explored is negative too. */
+                if (!result) this.provisionalNegatives.forEach(explored -> this.relevant.put(explored, false));
+                if (!result && dependsOnOpenType) this.relevant.put(type, false);
+                this.provisionalNegatives.clear();
+                this.backEdgeHit = false;
+            } else {
+                this.backEdgeHit = outerBackEdge || dependsOnOpenType;
+            }
             return result;
         }
 

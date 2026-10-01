@@ -10,6 +10,23 @@ public final class AeronReplicationEnvelopeTestSupport {
     private AeronReplicationEnvelopeTestSupport() {
     }
 
+    /// Encodes one frame into a caller-owned buffer with the production header encoder.
+    ///
+    /// @return number of bytes written
+    public static int encodeFrame(
+            final org.agrona.MutableDirectBuffer target, final int targetOffset, final UUID clusterId,
+            final long epoch, final long fencingToken, final long wireNonce, final long sequence,
+            final AeronReplicationEnvelope.Kind kind, final int payloadLength, final int chunkIndex,
+            final int chunkCount, final int chunkOffset, final int commitCrc32c,
+            final org.agrona.DirectBuffer payload, final int payloadOffset, final int chunkLength,
+            final AeronReplicationEnvelope.ChecksumContext ignoredChecksumContext) {
+        return new AeronReplicationEnvelope.HeaderEncoder()
+                .identity(clusterId, epoch, fencingToken, wireNonce).sequence(sequence)
+                .frame(kind, payloadLength, chunkIndex, chunkCount, chunkOffset)
+                .commitCrc32c(commitCrc32c).chunkLength(chunkLength)
+                .encode(target, targetOffset, payload, payloadOffset);
+    }
+
     /// Returns the fixture-only derived wire nonce for a cluster.
     ///
     /// @param clusterId fixture cluster identity
@@ -84,7 +101,7 @@ public final class AeronReplicationEnvelopeTestSupport {
             throw new IllegalArgumentException("envelope payload exceeds replication message limit");
         }
         final byte[] encoded = new byte[Math.addExact(AeronReplicationEnvelope.HEADER_LENGTH, payload.length)];
-        AeronReplicationEnvelope.encode(
+        encodeFrame(
                 new UnsafeBuffer(encoded), 0, clusterId, epoch, fencingToken, wireNonce, sequence, kind,
                 payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c,
                 new UnsafeBuffer(payload), 0, payload.length,

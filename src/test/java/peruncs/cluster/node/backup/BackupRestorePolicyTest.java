@@ -69,11 +69,26 @@ class BackupRestorePolicyTest {
         backend.backups.add(backup);
         backend.cursorForBackup = backupCursor;
 
-        assertFalse(policy.restoreLatestBackupIfRequired(storageDir, backend),
+        assertFalse(policy.restoreLatestBackupIfRequired(storageDir, () -> backend),
                 "a writer with existing local storage must not replace it from a backup");
         assertTrue(Files.exists(storageDir.resolve("data.dat")),
                 "the writer's local files must survive an available backup");
         assertEquals(0, backend.restoreCalls, "a writer must never call the restore path");
+    }
+
+    /// An existing local Store never touches the backup volume, so an unavailable volume cannot block startup.
+    @Test
+    void existingLocalStorageNeverCreatesTheBackupBackend(@TempDir final Path temp) throws Exception {
+        final Path storageDir = temp.resolve("storage");
+        Files.createDirectories(storageDir);
+        Files.writeString(storageDir.resolve("data.dat"), "local-content");
+        final BackupMetadata.Identity identity = new BackupMetadata.Identity(CLUSTER, GENERATION, 4L, 9L);
+        final BackupRestorePolicy policy = policy(
+                transport(true, identity), positionProvider(new NodeException("no live position")), false);
+
+        assertFalse(policy.restoreLatestBackupIfRequired(storageDir, () -> {
+            throw new AssertionError("the backup volume must not be opened");
+        }));
     }
 
     /// A missing writer Store cannot be rebuilt from its old replication boundary or a reader seed.
@@ -90,7 +105,7 @@ class BackupRestorePolicyTest {
                 null, UUID.randomUUID(), BackupMetadata.UNKNOWN));
 
         final ReseedRequiredException failure = assertThrows(ReseedRequiredException.class,
-                () -> policy.restoreLatestBackupIfRequired(temp.resolve("missing-storage"), backend));
+                () -> policy.restoreLatestBackupIfRequired(temp.resolve("missing-storage"), () -> backend));
 
         assertTrue(failure.getMessage().contains("writer Store is absent or empty"));
         assertEquals(0, backend.restoreCalls, "writer recovery must not install a reader backup");
@@ -112,7 +127,7 @@ class BackupRestorePolicyTest {
         backend.cursorForBackup = backupCursor;
 
         final ReseedRequiredException failure = assertThrows(ReseedRequiredException.class,
-                () -> policy.restoreLatestBackupIfRequired(temp.resolve("missing-storage"), backend));
+                () -> policy.restoreLatestBackupIfRequired(temp.resolve("missing-storage"), () -> backend));
 
         assertTrue(failure.getMessage().contains("shared reader backup"));
         assertEquals(0, backend.restoreCalls, "a reader seed must not become the writer image");

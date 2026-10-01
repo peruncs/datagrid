@@ -62,7 +62,7 @@ public record AeronRetryPolicy(
         }
     }
 
-        /// Creates an idle strategy paced by this policy's idle bounds.
+    /// Creates an idle strategy paced by this policy's idle bounds.
     ///
     /// Callers that poll a subscription or offer loop should build their
     /// strategy from here so the configured pacing is actually applied instead

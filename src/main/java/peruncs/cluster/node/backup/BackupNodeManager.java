@@ -23,8 +23,8 @@ import static org.eclipse.serializer.util.X.notNull;
 /// health endpoint.
 ///
 /// @since 1.0
-public final class BackupNodeManager implements StorageNodeControl, BackupNodeControl, AutoCloseable {
-        /// Creates a backup manager for the supplied collaborators.
+public final class BackupNodeManager implements StorageNodeControl, AutoCloseable {
+    /// Creates a backup manager for the supplied collaborators.
     ///
     /// @param storageBackupTaskExecutor backup task executor
     /// @param dataClient                replication data client
@@ -71,14 +71,6 @@ public final class BackupNodeManager implements StorageNodeControl, BackupNodeCo
         this.replicationEnabled = replicationEnabled;
     }
 
-    /// Borrows this manager as the storage control view; the manager keeps
-    /// implementing [StorageNodeControl] directly, so composition costs
-    /// nothing and the backup role gains no extra operations.
-    @Override
-    public StorageNodeControl storage() {
-        return this;
-    }
-
     @Override
     public boolean isWriter() {
         return false;
@@ -94,7 +86,10 @@ public final class BackupNodeManager implements StorageNodeControl, BackupNodeCo
                 Math.max(-1L, applied));
     }
 
-    @Override
+    /// Creates a storage backup asynchronously.
+    ///
+    /// @param slot scheduled or manual retention slot
+    /// @return future completed with the published backup details
     public CompletableFuture<BackupInfo> createStorageBackup(final BackupSlot slot) {
         return this.tasks.runBackup(slot);
     }

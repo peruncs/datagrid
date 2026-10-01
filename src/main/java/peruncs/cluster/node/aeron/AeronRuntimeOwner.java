@@ -56,7 +56,7 @@ final class AeronRuntimeOwner {
             if (this.settings().topology().role().isWriter()) shared.capacity().invalidate();
             this.runtime = AeronRuntime.start(this.settings(), this::recordDriverFailure,
                     this::recordSubscriberFailure,
-                    () -> FaultInjection.invoke("BEFORE_PUBLICATION_CONNECTED", -1L));
+                    () -> FaultInjection.invoke(FaultInjection.Point.BEFORE_PUBLICATION_CONNECTED, -1L));
             try {
                 this.facade.retentionOwner().ensureWatermarkChannel();
             } catch (final RuntimeException | Error failure) {

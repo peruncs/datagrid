@@ -92,7 +92,7 @@ public final class ClusterStoreIndexes {
     private ClusterStoreIndexes() {
     }
 
-        /// Creates the only Lucene context supported by clustered storage.
+    /// Creates the only Lucene context supported by clustered storage.
     ///
     /// @param <E>               entity type
     /// @param documentPopulator document mapping
@@ -106,7 +106,7 @@ public final class ClusterStoreIndexes {
         );
     }
 
-        /// Registers an embedded Lucene index on a map.
+    /// Registers an embedded Lucene index on a map.
     ///
     /// @param <E>               entity type
     /// @param map               target map
@@ -155,7 +155,7 @@ public final class ClusterStoreIndexes {
         }
     }
 
-        /// Rejects a Lucene context that stores files outside the Store graph.
+    /// Rejects a Lucene context that stores files outside the Store graph.
     ///
     /// @param context context to check
     /// @throws IllegalArgumentException if the context creates an external directory
@@ -163,7 +163,7 @@ public final class ClusterStoreIndexes {
         ClusterIndexValidation.validateLuceneContext(context);
     }
 
-        /// Adds an in-graph vector index to a map.
+    /// Adds an in-graph vector index to a map.
     ///
     /// @param <E>           entity type
     /// @param indices       vector index group
@@ -184,7 +184,7 @@ public final class ClusterStoreIndexes {
         return REGISTRATION.write(() -> addVectorLocked(checkedIndices, checkedName, configuration, checkedVectorizer));
     }
 
-        /// Registers an in-graph vector index on a map, creating its index group once.
+    /// Registers an in-graph vector index on a map, creating its index group once.
     ///
     /// @param <E>           entity type
     /// @param map           target map
@@ -233,7 +233,7 @@ public final class ClusterStoreIndexes {
         }
     }
 
-        /// Rejects any JVector configuration that replication cannot carry.
+    /// Rejects any JVector configuration that replication cannot carry.
     ///
     /// External directories never reach a reader, and background graph
     /// workers (eventual indexing, background optimization) cannot be
@@ -246,7 +246,7 @@ public final class ClusterStoreIndexes {
         ClusterIndexValidation.validateVectorConfiguration(configuration);
     }
 
-        /// Validates all vector indexes already registered on a map.
+    /// Validates all vector indexes already registered on a map.
     ///
     /// This is useful after Store deserialization, when the index group was
     /// created by a persistence handler rather than by application code.
@@ -300,7 +300,7 @@ public final class ClusterStoreIndexes {
                 root, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS, null, null, scratch));
     }
 
-        /// Validates every Store root held by a storage connection.
+    /// Validates every Store root held by a storage connection.
     ///
     /// This is the reader materialization hook and the canonical writer
     /// startup/commit check: it runs so a writer that smuggled an external
@@ -381,7 +381,7 @@ public final class ClusterStoreIndexes {
         };
     }
 
-        /// Reader-side maintenance: retires cached search views before an import
+    /// Reader-side maintenance: retires cached search views before an import
     /// batch is materialized.
     ///
     /// Package-private because only [StorageBinaryDataMerger] runs it, inside
@@ -395,7 +395,7 @@ public final class ClusterStoreIndexes {
         refreshImportedIndexes(storage, typeHandlers, ClusterIndexValidation.DEFAULT_MAX_VALIDATED_OBJECTS);
     }
 
-        /// Reader-side maintenance: retires cached search views before an import
+    /// Reader-side maintenance: retires cached search views before an import
     /// batch is materialized, with an explicit scan bound.
     ///
     /// Package-private because only [StorageBinaryDataMerger] runs it, inside

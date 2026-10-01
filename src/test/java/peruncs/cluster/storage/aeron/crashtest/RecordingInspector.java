@@ -47,7 +47,7 @@ public final class RecordingInspector {
                 archive.getStopPosition(recordingId));
     }
 
-        /// Inspects a recording prefix, including an active recording when the caller
+    /// Inspects a recording prefix, including an active recording when the caller
     /// supplies a non-negative observed stop position. This is useful immediately
     /// after a writer crash, when the Archive has not yet marked the recording
     /// stopped but its committed prefix must still be checked.
@@ -76,7 +76,7 @@ public final class RecordingInspector {
                 stopPosition, 20);
     }
 
-        /// Inspects a recording prefix with a caller-selected fragment limit. A limit
+    /// Inspects a recording prefix with a caller-selected fragment limit. A limit
     /// of one is useful for proving that a fragmented data frame and its terminal
     /// marker are validated across separate poll calls.
     ///

@@ -28,6 +28,9 @@ import static java.lang.System.Logger.Level.WARNING;
 /// `/var`, and `/etc`, which require root privileges to create and are
 /// otherwise ubiquitous.
 public final class AtomicFileWriter {
+    /// Fixed sibling name that parks the old Store image while a replacement is installed.
+    static final String PREVIOUS_STORAGE_NAME = ".storage-previous";
+
     private static final Logger LOGGER = System.getLogger(AtomicFileWriter.class.getName());
     private static final boolean WINDOWS = System.getProperty("os.name", "")
             .toLowerCase(Locale.ROOT).startsWith("windows");
@@ -64,19 +67,19 @@ public final class AtomicFileWriter {
             throw new IOException("Failed to create replication metadata temp file " + absolute, failure);
         }
         try {
-            FaultInjection.invoke("BEFORE_TEMP_WRITE", absolute);
+            FaultInjection.invoke(FaultInjection.Point.BEFORE_TEMP_WRITE, absolute);
             try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)) {
-                FaultInjection.invoke("DURING_FILE_WRITE", absolute);
+                FaultInjection.invoke(FaultInjection.Point.DURING_FILE_WRITE, absolute);
                 encoder.write(channel);
                 channel.force(true);
             }
-            FaultInjection.invoke("AFTER_TEMP_WRITE_BEFORE_RENAME", absolute);
+            FaultInjection.invoke(FaultInjection.Point.AFTER_TEMP_WRITE_BEFORE_RENAME, absolute);
             try {
                 Files.move(temporary, absolute, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (final AtomicMoveNotSupportedException failure) {
                 throw new IOException("Atomic replacement is unavailable for replication metadata %s".formatted(absolute), failure);
             }
-            FaultInjection.invoke("AFTER_RENAME_BEFORE_DIRECTORY_SYNC", absolute);
+            FaultInjection.invoke(FaultInjection.Point.AFTER_RENAME_BEFORE_DIRECTORY_SYNC, absolute);
             forceDirectory(parent);
         } finally {
             try {
@@ -213,6 +216,24 @@ public final class AtomicFileWriter {
         ensureNoSymbolicLinks(path);
     }
 
+    /// Reports whether a Store directory holds no Store yet: it is absent or contains nothing but
+    /// the writer's lock file.
+    ///
+    /// @param directory Store directory to inspect
+    /// @return `true` when no Store files exist
+    /// @throws NodeException when the path contains a symbolic link or cannot be read
+    public static boolean isMissingOrEmptyStore(final Path directory) {
+        try {
+            ensureNoSymbolicLinks(directory);
+            if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) return true;
+            try (var entries = Files.list(directory)) {
+                return entries.noneMatch(entry -> !entry.getFileName().toString().equals("writer.lock"));
+            }
+        } catch (final IOException failure) {
+            throw new NodeException("Cannot inspect storage directory %s".formatted(directory), failure);
+        }
+    }
+
     /// Rejects paths containing user-controlled symbolic links.
     ///
     /// @param path path to check, or `null` for no check
@@ -311,7 +332,7 @@ public final class AtomicFileWriter {
         final Path parent = destination.toAbsolutePath().normalize().getParent();
         final Path absoluteDestination = destination.toAbsolutePath().normalize();
         final Path absoluteSource = source.toAbsolutePath().normalize();
-        final Path previous = parent.resolve(".storage-previous-" + UUID.randomUUID());
+        final Path previous = parent.resolve(PREVIOUS_STORAGE_NAME);
         boolean previousMoved = false;
         boolean replacementDurable = false;
         try {
@@ -326,11 +347,13 @@ public final class AtomicFileWriter {
             }
             final Object sourceFileKey = stableFileKey(absoluteSource);
             ensureNoSymbolicLinks(absoluteDestination);
+            recoverInterruptedReplacement(absoluteDestination);
             Files.move(absoluteDestination, previous, StandardCopyOption.ATOMIC_MOVE);
             previousMoved = true;
             forceDirectory(parent);
+            FaultInjection.invoke(FaultInjection.Point.AFTER_PREVIOUS_STORAGE_MOVED, absoluteDestination);
             Files.move(absoluteSource, absoluteDestination, StandardCopyOption.ATOMIC_MOVE);
-            FaultInjection.invoke("AFTER_STORAGE_RENAME_BEFORE_DIRECTORY_SYNC", absoluteDestination);
+            FaultInjection.invoke(FaultInjection.Point.AFTER_STORAGE_RENAME_BEFORE_DIRECTORY_SYNC, absoluteDestination);
             ensureNoSymbolicLinks(absoluteDestination);
             if (!sourceFileKey.equals(stableFileKey(absoluteDestination))) {
                 throw new IOException("Installed Store does not match its staged source");
@@ -356,6 +379,34 @@ public final class AtomicFileWriter {
             }
             if (failure instanceof RuntimeException runtime) throw runtime;
             throw new NodeException("Failed to replace restored storage", failure);
+        }
+    }
+
+    /// Finishes a Store replacement that a crash interrupted.
+    ///
+    /// A replacement parks the old image under a fixed sibling name before it installs the new
+    /// one. If the process died between those two renames the live path is missing and the old
+    /// image is still there, so it is moved back; if it died after the install, both exist and
+    /// the parked old image is only leftover. Call this before deciding whether a Store exists.
+    ///
+    /// @param destination live Store directory
+    public static void recoverInterruptedReplacement(final Path destination) {
+        final Path absoluteDestination = destination.toAbsolutePath().normalize();
+        final Path parent = absoluteDestination.getParent();
+        final Path previous = parent.resolve(PREVIOUS_STORAGE_NAME);
+        try {
+            if (!Files.exists(previous, LinkOption.NOFOLLOW_LINKS)) return;
+            ensureNoSymbolicLinks(parent);
+            if (Files.exists(absoluteDestination, LinkOption.NOFOLLOW_LINKS)) {
+                deleteDirectory(previous);
+            } else {
+                System.getLogger(AtomicFileWriter.class.getName()).log(System.Logger.Level.WARNING,
+                        "A Store replacement was interrupted; restoring the previous Store image");
+                Files.move(previous, absoluteDestination, StandardCopyOption.ATOMIC_MOVE);
+            }
+            forceDirectory(parent);
+        } catch (final IOException failure) {
+            throw new NodeException("Failed to recover an interrupted Store replacement", failure);
         }
     }
 
@@ -420,8 +471,8 @@ public final class AtomicFileWriter {
         ensureNoSymbolicLinks(path);
         final BasicFileAttributes original;
         try {
-            /* Validates the path is a regular file with a stable identity; the
-             * attributes themselves are not needed, only the parent re-check below. */
+            /* Validates the path is a regular file with a stable identity; the file key
+             * is compared after the delete to prove the original entry is gone. */
             original = regularAttributes(path);
         } catch (final NoSuchFileException missing) {
             return false;
@@ -429,7 +480,7 @@ public final class AtomicFileWriter {
         final Path parent = path.getParent();
         final Object parentKey = parent == null ? null : stableFileKey(parent);
         final boolean deleted = Files.deleteIfExists(path);
-        if (deleted) FaultInjection.invoke("AFTER_REGULAR_DELETE", path);
+        if (deleted) FaultInjection.invoke(FaultInjection.Point.AFTER_REGULAR_DELETE, path);
         if (parentKey != null && !parentKey.equals(stableFileKey(parent))) {
             throw new IOException("Parent directory changed while deleting %s".formatted(path));
         }
@@ -555,10 +606,10 @@ public final class AtomicFileWriter {
         }
     }
 
-        /// Writes one complete metadata file to an open channel.
+    /// Writes one complete metadata file to an open channel.
     @FunctionalInterface
     public interface Encoder {
-                /// Writes the encoded bytes.
+        /// Writes the encoded bytes.
         ///
         /// @param channel open destination channel
         /// @throws IOException if writing fails

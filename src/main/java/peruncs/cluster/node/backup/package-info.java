@@ -1,4 +1,4 @@
-/// This package keeps Store backups and their retention.
+/// Keeps Store backups and their retention.
 ///
 /// It owns backup metadata, the filesystem archive backend, the archive codec,
 /// the backup manager, and its task executor. Backups are single-flight at the

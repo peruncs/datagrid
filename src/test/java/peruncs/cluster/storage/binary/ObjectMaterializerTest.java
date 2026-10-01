@@ -32,7 +32,7 @@ class ObjectMaterializerTest {
         @SuppressWarnings("MismatchedCollectionQueryUpdate") // write-only reachability so native buffers outlive the batch
         final List<ByteBuffer> pinned = new ArrayList<>();
 
-                /// Writes one 24-byte entity header (length, type id, object id) off-heap.
+        /// Writes one 24-byte entity header (length, type id, object id) off-heap.
         ///
         /// The header uses the native byte order, matching how the binary
         /// readers decode raw entity addresses.
@@ -111,7 +111,7 @@ class ObjectMaterializerTest {
         return null;
     }
 
-        /// Entities whose type is a local root are accepted but never materialized.
+    /// Entities whose type is a local root are accepted but never materialized.
     @Test
     void rootsAreSkipped() {
         final Fixture fixture = new Fixture();
@@ -125,7 +125,7 @@ class ObjectMaterializerTest {
         assertEquals(List.of(Set.of()), fixture.collections);
     }
 
-        /// Repeated object ids in one batch are materialized exactly once.
+    /// Repeated object ids in one batch are materialized exactly once.
     @Test
     void repeatedObjectsAreDeduplicated() {
         final Fixture fixture = new Fixture();
@@ -143,7 +143,7 @@ class ObjectMaterializerTest {
         assertEquals(List.of(Set.of(42L, 43L)), fixture.collections);
     }
 
-        /// The working set is truncated after each batch, so a second batch
+    /// The working set is truncated after each batch, so a second batch
     /// starts empty even without new entities.
     @Test
     void workingSetIsTruncatedAfterEachBatch() {
@@ -159,7 +159,7 @@ class ObjectMaterializerTest {
         assertEquals(List.of(Set.of(42L), Set.of()), fixture.collections);
     }
 
-        /// Already-cleared objects need no re-materialization.
+    /// Already-cleared objects need no re-materialization.
     @Test
     void clearedObjectsAreSkipped() {
         final Fixture fixture = new Fixture();
@@ -174,7 +174,7 @@ class ObjectMaterializerTest {
         assertEquals(List.of(Set.of()), fixture.collections);
     }
 
-        /// A truncated entity header fails the whole batch instead of silently
+    /// A truncated entity header fails the whole batch instead of silently
     /// dropping the entities that follow it.
     @Test
     void truncatedHeaderFailsTheBatch() {
@@ -188,7 +188,7 @@ class ObjectMaterializerTest {
                 "a truncated header must be named as truncation: " + failure.getMessage());
     }
 
-        /// Entities with an unknown type id fail instead of materializing blindly.
+    /// Entities with an unknown type id fail instead of materializing blindly.
     @Test
     void unknownTypeFails() {
         final Fixture fixture = new Fixture();

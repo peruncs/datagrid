@@ -4,9 +4,9 @@
 /// [ReplicationPosition], [ReplicationRetry], and [Crc32C] — and the
 /// [StorageGraphCoordinator]: Deliberately here rather than in
 /// `node.store` because the merger in `binary` consumes it directly and
-/// Store-side packages must not depend on the node layer. The archive-first
-/// durability ordering is the only mode; its persisted code lives on
-/// [ReplicationMark].
+/// Store-side packages must not depend on the node layer. Prepare frames are
+/// recorded by the Archive before the local Store write; the persisted
+/// replication state lives on [ReplicationMark].
 /// The `binary` package carries the Store binary
 /// distribution and materialization machinery, and the `index` package the
 /// embedded index policy, so transport providers never duplicate the API

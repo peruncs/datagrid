@@ -40,6 +40,8 @@ public final class ClusterIndexMaintenance {
     ///
     /// @param typeHandlers manager owning the Store's runtime type handlers
     public ClusterIndexMaintenance(final PersistenceTypeHandlerManager<Binary> typeHandlers) {
+        /* Fail node startup, not the first replicated batch, on an unsupported Store layout. */
+        StoreIndexReflection.verifyLayout();
         this.scratch = new ClusterIndexValidation.ValidationScratch(typeHandlers);
     }
 
@@ -59,18 +61,21 @@ public final class ClusterIndexMaintenance {
             /* Lucene views are cached NRT readers built lazily per index, not per
              * entity: even a batch that touched no known-reachable entity must
              * retire them, or the next query reopens over the *pre-import* files
-             * (torn reads). Agents/src: refreshMaps is intentionally unconditional. */
+             * (torn reads). The Lucene index files are ordinary replicated entities of
+             * internal types that cannot be told apart from plain data by their type, so
+             * no per-batch type test can prove a batch left them alone: retiring is
+             * unconditional, and it costs only the lazy reopen of an index that exists. */
             refreshMaps(this.cachedMaps, this.scratch, maxValidatedObjects);
         });
     }
 
     /// Validates changed roots and invalidates only changed vector graphs.
     ///
-    /// If any graph changed, the caller must run [#warmupVectorSearchGraphs()]
-    /// before leaving the graph write section. Upstream's lazy first-use
-    /// initialization is not safe against a concurrent first search.
+    /// If any graph changed, the caller should run [#warmupVectorSearchGraphs()] after
+    /// the write section: the invalidated graphs rebuild lazily and exactly once on their
+    /// first search anyway, so warming them up only moves that cost off the first query.
     ///
-    /// @return whether a vector graph needs warmup before the write section ends
+    /// @return whether a vector graph should be warmed up
     public boolean afterApply(final StorageConnection storage, final int maxValidatedObjects) {
         ClusterStoreIndexes.withRegistrationRead(() -> {
             final ClusterIndexValidation.ValidationScratch scratch = this.scratch;
@@ -100,7 +105,7 @@ public final class ClusterIndexMaintenance {
         return !this.scratch.dirtyVectorIndexes.isEmpty();
     }
 
-    /// Rebuilds invalidated vector graphs while application queries are excluded.
+    /// Rebuilds invalidated vector graphs ahead of the first application query.
     public void warmupVectorSearchGraphs() {
         final ClusterIndexValidation.ValidationScratch scratch = this.scratch;
         if (scratch.dirtyVectorIndexes.isEmpty()) {

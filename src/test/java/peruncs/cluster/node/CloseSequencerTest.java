@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// Verifies the shared close sequencer: ordering, retry readiness,
 /// aggregation, and the Error-priority rule every close loop must share.
 class CloseSequencerTest {
-        /// Verifies ready stages run in declaration order and unready stages are skipped.
+    /// Verifies ready stages run in declaration order and unready stages are skipped.
     @Test
     void stagesRunInOrderAndSkipWhenNotReady() {
         final List<String> ran = new ArrayList<>();
@@ -32,7 +32,7 @@ class CloseSequencerTest {
         assertEquals(List.of("first", "third"), ran, "an already released stage must be skipped");
     }
 
-        /// Verifies a failed stage leaves later retries to run only the stages still owing work.
+    /// Verifies a failed stage leaves later retries to run only the stages still owing work.
     @Test
     void failedStageStaysRetryableAndLaterStagesStillRun() {
         final AtomicInteger attempts = new AtomicInteger();
@@ -52,7 +52,7 @@ class CloseSequencerTest {
         assertEquals(2, attempts.get());
     }
 
-        /// Verifies failures from independent stages are aggregated as suppressed exceptions.
+    /// Verifies failures from independent stages are aggregated as suppressed exceptions.
     @Test
     void independentStageFailuresAreAggregated() {
         final CloseSequencer sequencer = new CloseSequencer(List.of(
@@ -71,7 +71,7 @@ class CloseSequencerTest {
         assertEquals("two failed", failure.getSuppressed()[0].getCause().getMessage());
     }
 
-        /// Verifies a checked failure is reported rather than swallowed.
+    /// Verifies a checked failure is reported rather than swallowed.
     @Test
     void checkedStageFailureIsReported() {
         final CloseSequencer sequencer = new CloseSequencer(List.of(
@@ -83,7 +83,7 @@ class CloseSequencerTest {
         assertInstanceOf(IOException.class, failure.getCause());
     }
 
-        /// An Error thrown by a later stage must win over a RuntimeException
+    /// An Error thrown by a later stage must win over a RuntimeException
     /// thrown by an earlier one — the earlier failure rides along as
     /// suppressed instead of burying the fatal condition.
     @Test
@@ -106,8 +106,8 @@ class CloseSequencerTest {
         assertEquals("stage one failed", failure.getSuppressed()[1].getCause().getMessage());
     }
 
-        /// The [CloseSequencer#append] helper keeps the same Error-priority
-        /// rule for close loops that are not expressed as stages.
+    /// The [CloseSequencer#append] helper keeps the same Error-priority
+    /// rule for close loops that are not expressed as stages.
     @Test
     void appendSurfacesAnErrorOverAnAccumulatedRuntimeFailure() {
         final IllegalStateException first = new IllegalStateException("runtime first");
@@ -124,7 +124,7 @@ class CloseSequencerTest {
         assertSame(second, runtimeAggregate.getSuppressed()[0]);
     }
 
-        /// The builder-style `add` path keeps the foundation teardown contract:
+    /// The builder-style `add` path keeps the foundation teardown contract:
     /// disabled stages are skipped and every enabled stage is attempted.
     @Test
     void builderStyleStagesSkipDisabledEntries() {

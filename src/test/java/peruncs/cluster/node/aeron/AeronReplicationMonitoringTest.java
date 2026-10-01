@@ -14,14 +14,14 @@ import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.api.ReplicationState;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.WriteRejectedException;
-import peruncs.cluster.errors.internal.ReplicationPositionUnavailableException;
+import peruncs.cluster.errors.ReplicationPositionUnavailableException;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.cluster.node.replication.ReplicationHealth;
 import peruncs.cluster.node.replication.ReplicationPositionProvider;
 import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.aeron.mark.ReplicationMark;
 import peruncs.cluster.storage.binary.ReplicationApplier;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
+import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.nio.file.Path;
 import java.util.Map;
@@ -74,9 +74,9 @@ class AeronReplicationMonitoringTest {
                     if (ReplicationMark.ROOT_ID.equals(identifier)) registered[0] = root;
                 });
                 final ReplicationMark mark = assertInstanceOf(ReplicationMark.class, registered[0]);
-                assertEquals(transport.settings().topology().clusterId(), mark.clusterId);
+                assertEquals(transport.settings().topology().clusterId(), mark.clusterId());
                 assertEquals(transport.settings().topology().identity().storeGeneration(),
-                        mark.storeGeneration);
+                        mark.storeGeneration());
             }
 
             final EmbeddedStorageFoundation<?> conflicting = EmbeddedStorage.Foundation(
@@ -89,7 +89,28 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-        /// Verifies writer provider exposes aeron and reports live without reader client.
+    /// A writer never subscribes to its own recording: its reader transport hands back an inert applier.
+    @Test
+    void writerRoleGetsAnInertReaderClient() {
+        try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
+            final ReplicationMark mark = new ReplicationMark(UUID.randomUUID(), UUID.randomUUID(), 1L, -1L);
+            final ReplicationApplier applier = transport.clientFromMark(new StorageBinaryDataReceiver() {
+                @Override
+                public void receiveData(final Binary data) {
+                    throw new AssertionError("a writer must not receive data");
+                }
+
+                @Override
+                public void receiveTypeDictionary(final String typeDictionaryData) {
+                    throw new AssertionError("a writer must not receive a dictionary");
+                }
+            }, mark);
+            assertFalse(applier.isRunning());
+            assertNull(applier.failure());
+        }
+    }
+
+    /// Verifies writer provider exposes aeron and reports live without reader client.
     @Test
     void writerProviderExposesAeronAndReportsLiveWithoutReaderClient() {
         try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
@@ -108,7 +129,7 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-        /// Verifies position provider uses self describing recording position.
+    /// Verifies position provider uses self describing recording position.
     @Test
     void positionProviderUsesSelfDescribingRecordingPosition() {
         try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
@@ -132,8 +153,8 @@ class AeronReplicationMonitoringTest {
                             .createConfiguration());
             transport.registerPersistentRoots(foundation);
             transport.positionProvider().init();
-            final ReplicationPublisher distributor = transport.distributor();
-            final PersistenceTarget<Binary> target = transport.persistenceTargetFactory( distributor)
+            final Distribution distributor = new Distribution();
+            final PersistenceTarget<Binary> target = transport.persistenceTargetFactory(distributor.outbox, distributor.enabled(), () -> null)
                     .apply(new PersistenceTarget<>() {
                         public void write(final Binary ignored) {
                         }
@@ -148,28 +169,6 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-        /// Verifies Store binaries cannot bypass the fenced persistence target.
-    @Test
-    void distributorRejectsDataWithoutAStoreTarget() {
-        try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
-            final ReplicationPublisher distributor = transport.distributor();
-            assertThrows(IllegalStateException.class,
-                    () -> distributor.distributeData(ChunksWrapper.New(
-                            XMemory.toDirectByteBuffer(new byte[]{3, 2, 1}))));
-        }
-    }
-
-    /// Verifies a reader-side gate rejects writer sequence synchronization and keeps its index unset.
-    @Test
-    void readerCannotChangeWriterMessageIndex() {
-        final AeronDistributionGate distributor = new AeronDistributionGate(() -> false,
-                ignored -> {
-                    throw new AssertionError("reader must not synchronize a writer sequence");
-                }, () -> null);
-        assertThrows(IllegalStateException.class, () -> distributor.messageIndex(0L));
-        assertEquals(-1L, distributor.messageIndex());
-    }
-
     /// Retention stays unsupported until the configured reader quorum is present.
     @Test
     void retentionRejectsDeletionUntilWatermarksAreConfigured() {
@@ -179,7 +178,7 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-        /// Verifies reader provider surfaces replay and failure states.
+    /// Verifies reader provider surfaces replay and failure states.
     @Test
     void readerProviderSurfacesReplayAndFailureStates() {
         try (final ClusterReplicationTransport transport = new AeronTransport(properties("reader"))) {
@@ -202,20 +201,20 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-        /// Verifies rejection of invalid aeron epoch and stream settings.
+    /// Verifies rejection of invalid aeron epoch and stream settings.
     @Test
     void rejectsInvalidAeronEpochAndStreamSettings() {
         assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_EPOCH", "-1")));
         assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_STREAM_ID", "-1")));
     }
 
-        /// Rejects an invalid Archive free-space admission threshold.
+    /// Rejects an invalid Archive free-space admission threshold.
     @Test
     void rejectsNegativeArchiveCapacityThreshold() {
         assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_MIN_ARCHIVE_FREE_BYTES", "-1")));
     }
 
-        /// The writer admission gate and health state fail closed when usable space is below the threshold.
+    /// The writer admission gate and health state fail closed when usable space is below the threshold.
     @Test
     void reportsArchiveCapacityDegradationBeforeAcceptingWrites() {
         try (final ClusterReplicationTransport transport = new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_MIN_ARCHIVE_FREE_BYTES",
@@ -229,7 +228,7 @@ class AeronReplicationMonitoringTest {
         }
     }
 
-        /// Rejects channel framing overrides that disagree with the shared configuration.
+    /// Rejects channel framing overrides that disagree with the shared configuration.
     @Test
     void rejectsConflictingChannelFraming() {
         assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_LIVE_CHANNEL",
@@ -238,7 +237,7 @@ class AeronReplicationMonitoringTest {
                         "aeron:udp?endpoint=localhost:0|mtu=1024k")));
     }
 
-        /// Writer topology validation is semantic, not a substring match.
+    /// Writer topology validation is semantic, not a substring match.
     @Test
     void rejectsNonDynamicWriterTopology() {
         assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_LIVE_CHANNEL",
@@ -258,7 +257,7 @@ class AeronReplicationMonitoringTest {
         assertThrows(IllegalArgumentException.class, () -> new AeronTransport(production));
     }
 
-        /// Production mode rejects the two common configuration forms that weaken network/durability guarantees.
+    /// Production mode rejects the two common configuration forms that weaken network/durability guarantees.
     @Test
     void rejectsProductionSyncLevelZeroAndIpv6Wildcard() {
         assertThrows(IllegalArgumentException.class, () -> new AeronTransport(propertiesWith("writer", "PERUNCS_AERON_FILE_SYNC_LEVEL", "0", true)));

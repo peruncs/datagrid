@@ -41,6 +41,10 @@ public record NodeConfig(
         REPLICATION_ROLE("PERUNCS_REPLICATION_ROLE", null, NodeConfig::parseRole),
         STORAGE_PATH("PERUNCS_STORAGE_PATH", "storage", Path::of),
         BACKUP_PATH("PERUNCS_BACKUP_PATH", "backups", Path::of),
+        BACKUP_WORKSPACE_PATH("PERUNCS_BACKUP_WORKSPACE_PATH", null, Path::of),
+        BACKUP_MAX_ENTRIES("PERUNCS_BACKUP_MAX_ENTRIES", "1048576", NodeConfig::parsePositiveInt),
+        BACKUP_PUBLICATION_LOCK_TIMEOUT_MILLIS(
+                "PERUNCS_BACKUP_PUBLICATION_LOCK_TIMEOUT_MILLIS", "30000", NodeConfig::parsePositiveMillis),
         KEPT_BACKUPS_COUNT("PERUNCS_KEPT_BACKUPS_COUNT", "3", NodeConfig::parsePositiveInt),
         STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES(
                 "PERUNCS_STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES", null, NodeConfig::parsePositiveMinutes),
@@ -70,10 +74,13 @@ public record NodeConfig(
                 "PERUNCS_BACKUP_PUBLICATION_RETRY_ATTEMPTS", "3", NodeConfig::parsePositiveInt),
         MAINTENANCE_FAILURE_THRESHOLD(
                 "PERUNCS_MAINTENANCE_FAILURE_THRESHOLD", "3", NodeConfig::parsePositiveInt),
+        WRITER_RECOVERY_ATTEMPTS("PERUNCS_WRITER_RECOVERY_ATTEMPTS", "3", NodeConfig::parsePositiveInt),
         MAINTENANCE_CLOSE_TIMEOUT_MILLIS(
                 "PERUNCS_MAINTENANCE_CLOSE_TIMEOUT_MILLIS", "5000", NodeConfig::parsePositiveMillis),
         STORAGE_CHECK_CLOSE_TIMEOUT_MILLIS(
                 "PERUNCS_STORAGE_CHECK_CLOSE_TIMEOUT_MILLIS", "5000", NodeConfig::parsePositiveMillis),
+        INDEX_REFRESH_TIMEOUT_MILLIS(
+                "PERUNCS_INDEX_REFRESH_TIMEOUT_MILLIS", "600000", NodeConfig::parsePositiveMillis),
         INDEX_VALIDATION_MAX_OBJECTS("PERUNCS_INDEX_VALIDATION_MAX_OBJECTS",
                 Integer.toString(Limits.DEFAULT_MAX_VALIDATED_INDEX_OBJECTS), NodeConfig::parsePositiveInt),
         AERON_ARCHIVE_DIRECTORY("PERUNCS_AERON_ARCHIVE_DIRECTORY", null, Path::of),
@@ -88,6 +95,16 @@ public record NodeConfig(
                 "PERUNCS_AERON_RECORDING_START_TIMEOUT_NANOS", "30000000000", NodeConfig::parsePositiveNanos),
         AERON_RECORDED_POSITION_TIMEOUT_NANOS(
                 "PERUNCS_AERON_RECORDED_POSITION_TIMEOUT_NANOS", "30000000000", NodeConfig::parsePositiveNanos),
+        AERON_ABORT_RECORDED_POSITION_TIMEOUT_NANOS(
+                "PERUNCS_AERON_ABORT_RECORDED_POSITION_TIMEOUT_NANOS", "5000000000", NodeConfig::parsePositiveNanos),
+        AERON_RETRY_IDLE_MAX_PARK_NANOS(
+                "PERUNCS_AERON_RETRY_IDLE_MAX_PARK_NANOS", "1000000", NodeConfig::parsePositiveNanos),
+        AERON_RETRY_JITTER_CAP_NANOS(
+                "PERUNCS_AERON_RETRY_JITTER_CAP_NANOS", "1000000", NodeConfig::parsePositiveNanos),
+        AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS(
+                "PERUNCS_AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS", "10000000", NodeConfig::parsePositiveNanos),
+        AERON_RETENTION_OPERATION_TIMEOUT_MILLIS(
+                "PERUNCS_AERON_RETENTION_OPERATION_TIMEOUT_MILLIS", "60000", NodeConfig::parsePositiveMillis),
         AERON_RECORDING_STOP_TIMEOUT_NANOS(
                 "PERUNCS_AERON_RECORDING_STOP_TIMEOUT_NANOS", "30000000000", NodeConfig::parsePositiveNanos),
         AERON_READER_STOP_TIMEOUT_NANOS(
@@ -178,12 +195,25 @@ public record NodeConfig(
     }
 
     /// Backup volume and retention behavior.
-    public record BackupConfig(Path volume, int kept, Duration interval, Duration closeTimeout) {
+    ///
+    /// @param volume                 backup volume; the only path that may be shared between nodes
+    /// @param workspace              node-local directory where backups are exported and compressed
+    /// @param kept                   scheduled backups to keep
+    /// @param interval               time between scheduled backups
+    /// @param closeTimeout           longest wait for a running backup when the node closes
+    /// @param maxArchiveEntries      most files one backup may hold; a Store with more cannot be restored
+    /// @param publicationLockTimeout longest wait for another publisher on the shared volume
+    public record BackupConfig(Path volume, Path workspace, int kept, Duration interval, Duration closeTimeout,
+                               int maxArchiveEntries, Duration publicationLockTimeout) {
         public BackupConfig {
             Objects.requireNonNull(volume, "volume");
-            if (kept <= 0) throw new IllegalArgumentException("kept must be positive");
+            Objects.requireNonNull(workspace, "workspace");
+            if (kept <= 0 || maxArchiveEntries <= 0) {
+                throw new IllegalArgumentException("kept and maxArchiveEntries must be positive");
+            }
             positive(interval, "interval");
             positive(closeTimeout, "closeTimeout");
+            positive(publicationLockTimeout, "publicationLockTimeout");
         }
     }
 
@@ -196,22 +226,25 @@ public record NodeConfig(
             int backupPublicationRetryAttempts,
             int maintenanceFailureThreshold,
             Duration maintenanceCloseTimeout,
-            Duration storageCheckCloseTimeout
+            Duration storageCheckCloseTimeout,
+            Duration retentionOperationTimeout,
+            int writerRecoveryAttempts
     ) {
         public static final Operations DEFAULT = new Operations(
                 Duration.ofMinutes(1), Duration.ofMillis(100), 3, Duration.ofMillis(100), 3, 3,
-                Duration.ofMillis(5_000), Duration.ofMillis(5_000));
+                Duration.ofMillis(5_000), Duration.ofMillis(5_000), Duration.ofMinutes(1), 3);
 
         public Operations {
             positive(backupStopTimeout, "backupStopTimeout");
             positive(backupStopPollInterval, "backupStopPollInterval");
             if (backupRetentionRetryAttempts <= 0 || backupPublicationRetryAttempts <= 0 ||
-                maintenanceFailureThreshold <= 0) {
+                maintenanceFailureThreshold <= 0 || writerRecoveryAttempts <= 0) {
                 throw new IllegalArgumentException("operation retry counts and failure threshold must be positive");
             }
             positive(backupRetentionRetryDelay, "backupRetentionRetryDelay");
             positive(maintenanceCloseTimeout, "maintenanceCloseTimeout");
             positive(storageCheckCloseTimeout, "storageCheckCloseTimeout");
+            positive(retentionOperationTimeout, "retentionOperationTimeout");
         }
     }
 
@@ -223,12 +256,14 @@ public record NodeConfig(
             Duration offer,
             Duration recordingStart,
             Duration recordedPosition,
+            Duration abortRecordedPosition,
             Duration recordingStop,
             Duration readerStop,
             Duration reconnect,
             Duration archiveControl,
             Duration watermarkClose,
-            Duration driver
+            Duration driver,
+            Duration indexRefresh
     ) {
         public Timeouts {
             positive(graphDrain, "graphDrain");
@@ -237,12 +272,14 @@ public record NodeConfig(
             positive(offer, "offer");
             positive(recordingStart, "recordingStart");
             positive(recordedPosition, "recordedPosition");
+            positive(abortRecordedPosition, "abortRecordedPosition");
             positive(recordingStop, "recordingStop");
             positive(readerStop, "readerStop");
             positive(reconnect, "reconnect");
             positive(archiveControl, "archiveControl");
             positive(watermarkClose, "watermarkClose");
             positive(driver, "driver");
+            positive(indexRefresh, "indexRefresh");
         }
     }
 
@@ -258,7 +295,7 @@ public record NodeConfig(
             int maxTransactionBytes
     ) {
         public static final int DEFAULT_MAX_VALIDATED_INDEX_OBJECTS = 65_536;
-        // ponytail: 32 MiB is the default ceiling; raise it only if profiling shows larger buffers recur.
+        /* 32 MiB is the default ceiling; raise it only if profiling shows larger buffers recur. */
         public static final long DEFAULT_BUFFER_POOL_RETAINED_BYTES = 32L << 20;
         public static final long DEFAULT_APPLY_QUEUE_BYTES = 64L << 20;
         public static final long DEFAULT_APPLY_QUEUE_MAX_BYTES = 1L << 30;
@@ -288,9 +325,11 @@ public record NodeConfig(
             Channels channels,
             Directories directories,
             ArchivePolicy archivePolicy,
-            ThreadingMode threadingMode
+            ThreadingMode threadingMode,
+            RetryPacing retryPacing
     ) {
         public AeronConfig {
+            Objects.requireNonNull(retryPacing, "retryPacing");
             Objects.requireNonNull(channels, "channels");
             Objects.requireNonNull(directories, "directories");
             Objects.requireNonNull(archivePolicy, "archivePolicy");
@@ -299,6 +338,23 @@ public record NodeConfig(
             if (epoch < 0L || streamId < 0 || recordingId < -1L || watermarkStreamId < 0) {
                 throw new IllegalArgumentException("Aeron epoch, stream, or recording id is out of range");
             }
+        }
+    }
+
+    /// How fast the writer's bounded retry loops spin: trades CPU against reaction time on slow Archives.
+    ///
+    /// @param idleMaxPark       longest park of one idle step while waiting for Aeron
+    /// @param jitterCap         longest delay between two offer retries
+    /// @param archiveProbeDelay spacing of Archive progress probes while waiting for a recorded position
+    public record RetryPacing(Duration idleMaxPark, Duration jitterCap, Duration archiveProbeDelay) {
+        /// Documented defaults: 1 ms, 1 ms and 10 ms.
+        public static final RetryPacing DEFAULT = new RetryPacing(
+                Duration.ofMillis(1), Duration.ofMillis(1), Duration.ofMillis(10));
+
+        public RetryPacing {
+            positive(idleMaxPark, "idleMaxPark");
+            positive(jitterCap, "jitterCap");
+            positive(archiveProbeDelay, "archiveProbeDelay");
         }
     }
 
@@ -415,7 +471,7 @@ public record NodeConfig(
             throw new IllegalArgumentException("PERUNCS_AERON_STREAM_ID must leave room for replay and watermark streams");
         }
         final int watermarkStreamId = defaulted(value(parsed, Setting.AERON_WATERMARK_STREAM_ID), streamId + 2);
-        final String alias = "datagrid-%s".formatted(clusterId);
+        final String alias = "peruncs-%s".formatted(clusterId);
         final Channels channels = new Channels(
                 defaulted(value(parsed, Setting.AERON_LIVE_CHANNEL),
                         "aeron:udp?control=localhost:40123|control-mode=dynamic|fc=max|term-length=%d|mtu=%d|alias=%s"
@@ -433,9 +489,12 @@ public record NodeConfig(
                 storageLimitGigabytes == null ? null : Math.multiplyExact((long) storageLimitGigabytes, 1_000_000_000L),
                 durationMinutes(limitCheckMinutes), durationMinutes(gcMinutes));
         final BackupConfig backup = new BackupConfig(backupVolume,
+                defaulted(value(parsed, Setting.BACKUP_WORKSPACE_PATH), root.resolve("backup-workspace")),
                 value(parsed, Setting.KEPT_BACKUPS_COUNT),
                 Duration.ofMinutes(backupIntervalMinutes),
-                Duration.ofMillis(value(parsed, Setting.BACKUP_CLOSE_TIMEOUT_MILLIS)));
+                Duration.ofMillis(value(parsed, Setting.BACKUP_CLOSE_TIMEOUT_MILLIS)),
+                value(parsed, Setting.BACKUP_MAX_ENTRIES),
+                Duration.ofMillis(value(parsed, Setting.BACKUP_PUBLICATION_LOCK_TIMEOUT_MILLIS)));
         final Timeouts timeouts = new Timeouts(
                 Duration.ofMillis(value(parsed, Setting.GRAPH_DRAIN_TIMEOUT_MILLIS)),
                 Duration.ofMillis(mergerCacheMillis),
@@ -443,12 +502,14 @@ public record NodeConfig(
                 Duration.ofNanos(value(parsed, Setting.AERON_OFFER_TIMEOUT_NANOS)),
                 Duration.ofNanos(value(parsed, Setting.AERON_RECORDING_START_TIMEOUT_NANOS)),
                 Duration.ofNanos(value(parsed, Setting.AERON_RECORDED_POSITION_TIMEOUT_NANOS)),
+                Duration.ofNanos(value(parsed, Setting.AERON_ABORT_RECORDED_POSITION_TIMEOUT_NANOS)),
                 Duration.ofNanos(value(parsed, Setting.AERON_RECORDING_STOP_TIMEOUT_NANOS)),
                 Duration.ofNanos(value(parsed, Setting.AERON_READER_STOP_TIMEOUT_NANOS)),
                 Duration.ofNanos(value(parsed, Setting.AERON_RECONNECT_TIMEOUT_NANOS)),
                 Duration.ofNanos(value(parsed, Setting.AERON_ARCHIVE_CONTROL_TIMEOUT_NANOS)),
                 Duration.ofNanos(value(parsed, Setting.AERON_WATERMARK_CLOSE_TIMEOUT_NANOS)),
-                Duration.ofMillis(value(parsed, Setting.AERON_DRIVER_TIMEOUT_MILLIS)));
+                Duration.ofMillis(value(parsed, Setting.AERON_DRIVER_TIMEOUT_MILLIS)),
+                Duration.ofMillis(value(parsed, Setting.INDEX_REFRESH_TIMEOUT_MILLIS)));
         final Limits limits = new Limits(
                 value(parsed, Setting.INDEX_VALIDATION_MAX_OBJECTS),
                 value(parsed, Setting.DATA_MERGER_BUFFER_POOL_RETAINED_BYTES),
@@ -473,7 +534,13 @@ public record NodeConfig(
                 value(parsed, Setting.BACKUP_PUBLICATION_RETRY_ATTEMPTS),
                 value(parsed, Setting.MAINTENANCE_FAILURE_THRESHOLD),
                 Duration.ofMillis(value(parsed, Setting.MAINTENANCE_CLOSE_TIMEOUT_MILLIS)),
-                Duration.ofMillis(value(parsed, Setting.STORAGE_CHECK_CLOSE_TIMEOUT_MILLIS)));
+                Duration.ofMillis(value(parsed, Setting.STORAGE_CHECK_CLOSE_TIMEOUT_MILLIS)),
+                Duration.ofMillis(value(parsed, Setting.AERON_RETENTION_OPERATION_TIMEOUT_MILLIS)),
+                value(parsed, Setting.WRITER_RECOVERY_ATTEMPTS));
+        final RetryPacing retryPacing = new RetryPacing(
+                Duration.ofNanos(value(parsed, Setting.AERON_RETRY_IDLE_MAX_PARK_NANOS)),
+                Duration.ofNanos(value(parsed, Setting.AERON_RETRY_JITTER_CAP_NANOS)),
+                Duration.ofNanos(value(parsed, Setting.AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS)));
         final AeronConfig aeron = new AeronConfig(
                 clusterId,
                 value(parsed, Setting.AERON_NODE_ID),
@@ -486,7 +553,8 @@ public record NodeConfig(
                 channels,
                 new Directories(aeronDirectory, archiveDirectory),
                 archivePolicy,
-                threading);
+                threading,
+                retryPacing);
         return new NodeConfig(role, storage, backup, timeouts, limits, aeron, production, transport, operations);
     }
 
@@ -507,21 +575,39 @@ public record NodeConfig(
     }
 
     /// Fluent builder for programmatic configuration.
+    ///
+    /// Starts from the standalone, local-development defaults; every setter replaces one section,
+    /// and the configuration is validated once, by [#build()].
     public static final class Builder {
-        private NodeConfig value;
+        private NodeRole role;
+        private StorageConfig storage;
+        private BackupConfig backup;
+        private Timeouts timeouts;
+        private Limits limits;
+        private AeronConfig aeron;
+        private boolean productionMode;
+        private ReplicationTransport replicationTransport;
+        private Operations operations;
 
-        private Builder(final NodeConfig value) {
-            this.value = value;
+        private Builder(final NodeConfig defaults) {
+            this.role = defaults.role;
+            this.storage = defaults.storage;
+            this.backup = defaults.backup;
+            this.timeouts = defaults.timeouts;
+            this.limits = defaults.limits;
+            this.aeron = defaults.aeron;
+            this.productionMode = defaults.productionMode;
+            this.replicationTransport = defaults.replicationTransport;
+            this.operations = defaults.operations;
         }
 
         /// Selects a topology role and its matching transport.
         /// @param role node role
         /// @return this builder
         public Builder role(final NodeRole role) {
-            final ReplicationTransport transport = role == NodeRole.STANDALONE
+            this.role = role;
+            this.replicationTransport = role == NodeRole.STANDALONE
                     ? ReplicationTransport.NONE : ReplicationTransport.AERON;
-            this.value = new NodeConfig(role, this.value.storage, this.value.backup, this.value.timeouts,
-                    this.value.limits, this.value.aeron, this.value.productionMode, transport, this.value.operations);
             return this;
         }
 
@@ -529,9 +615,7 @@ public record NodeConfig(
         /// @param enabled whether production checks apply
         /// @return this builder
         public Builder productionMode(final boolean enabled) {
-            this.value = new NodeConfig(this.value.role, this.value.storage, this.value.backup,
-                    this.value.timeouts, this.value.limits, this.value.aeron, enabled,
-                    this.value.replicationTransport, this.value.operations);
+            this.productionMode = enabled;
             return this;
         }
 
@@ -539,9 +623,7 @@ public record NodeConfig(
         /// @param storage storage configuration
         /// @return this builder
         public Builder storage(final StorageConfig storage) {
-            this.value = new NodeConfig(this.value.role, storage, this.value.backup, this.value.timeouts,
-                    this.value.limits, this.value.aeron, this.value.productionMode,
-                    this.value.replicationTransport, this.value.operations);
+            this.storage = storage;
             return this;
         }
 
@@ -549,9 +631,7 @@ public record NodeConfig(
         /// @param backup backup configuration
         /// @return this builder
         public Builder backup(final BackupConfig backup) {
-            this.value = new NodeConfig(this.value.role, this.value.storage, backup, this.value.timeouts,
-                    this.value.limits, this.value.aeron, this.value.productionMode,
-                    this.value.replicationTransport, this.value.operations);
+            this.backup = backup;
             return this;
         }
 
@@ -559,9 +639,7 @@ public record NodeConfig(
         /// @param timeouts timeout configuration
         /// @return this builder
         public Builder timeouts(final Timeouts timeouts) {
-            this.value = new NodeConfig(this.value.role, this.value.storage, this.value.backup, timeouts,
-                    this.value.limits, this.value.aeron, this.value.productionMode,
-                    this.value.replicationTransport, this.value.operations);
+            this.timeouts = timeouts;
             return this;
         }
 
@@ -569,9 +647,7 @@ public record NodeConfig(
         /// @param limits node limits
         /// @return this builder
         public Builder limits(final Limits limits) {
-            this.value = new NodeConfig(this.value.role, this.value.storage, this.value.backup, this.value.timeouts,
-                    limits, this.value.aeron, this.value.productionMode,
-                    this.value.replicationTransport, this.value.operations);
+            this.limits = limits;
             return this;
         }
 
@@ -579,9 +655,7 @@ public record NodeConfig(
         /// @param aeron Aeron configuration
         /// @return this builder
         public Builder aeron(final AeronConfig aeron) {
-            this.value = new NodeConfig(this.value.role, this.value.storage, this.value.backup, this.value.timeouts,
-                    this.value.limits, aeron, this.value.productionMode,
-                    this.value.replicationTransport, this.value.operations);
+            this.aeron = aeron;
             return this;
         }
 
@@ -589,16 +663,15 @@ public record NodeConfig(
         /// @param operations bounded operation policy
         /// @return this builder
         public Builder operations(final Operations operations) {
-            this.value = new NodeConfig(this.value.role, this.value.storage, this.value.backup, this.value.timeouts,
-                    this.value.limits, this.value.aeron, this.value.productionMode,
-                    this.value.replicationTransport, operations);
+            this.operations = operations;
             return this;
         }
 
-        /// Returns the immutable configuration assembled so far.
+        /// Validates and returns the configuration assembled so far.
         /// @return node configuration
         public NodeConfig build() {
-            return this.value;
+            return new NodeConfig(this.role, this.storage, this.backup, this.timeouts, this.limits, this.aeron,
+                    this.productionMode, this.replicationTransport, this.operations);
         }
     }
 

@@ -3,45 +3,23 @@ package peruncs.cluster.storage.binary;
 import java.lang.foreign.Arena;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.IdentityHashMap;
-import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-/// Owns direct native-order buffers through closeable shared arenas.
+/// Allocates direct native-order buffers whose lifetime the owner controls explicitly.
 ///
-/// This package is not exported by the module; the public methods serve only
-/// internal storage packages. A future allocator change stays at this boundary.
+/// Every buffer comes with a closeable [Allocation]. The owner keeps the handle and closes it
+/// when the buffer is no longer used; no registry maps buffers back to their allocations, so
+/// owners never contend with each other.
 public final class NativeMemory {
-    private static final Map<ByteBuffer, Allocation> ALLOCATIONS = new IdentityHashMap<>();
-
     private NativeMemory() {
     }
 
-    /// Allocates one direct native-order buffer.
-    public static ByteBuffer allocateDirect(final int capacity) {
-        if (capacity == 0) return ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder());
-        final Allocation allocation = allocateScoped(capacity);
-        synchronized (ALLOCATIONS) {
-            ALLOCATIONS.put(allocation.buffer(), allocation);
-        }
-        return allocation.buffer();
-    }
-
-    /// Releases a buffer allocated by [#allocateDirect(int)].
-    public static void releaseDirect(final ByteBuffer buffer) {
-        if (buffer == null || buffer.capacity() == 0) return;
-        final Allocation allocation;
-        synchronized (ALLOCATIONS) {
-            allocation = ALLOCATIONS.remove(buffer);
-        }
-        if (allocation == null) throw new IllegalArgumentException("buffer was not allocated by NativeMemory");
-        allocation.close();
-    }
-
-    /// Allocates a buffer with an explicit lifetime for owners that already track buffers.
+    /// Allocates one native-order buffer backed by its own shared arena.
     ///
-    /// @param capacity positive buffer capacity
-    /// @return the buffer and its shared arena
-    static Allocation allocateScoped(final int capacity) {
+    /// @param capacity positive buffer capacity in bytes
+    /// @return the buffer and the handle that frees it
+    /// @throws IllegalArgumentException when the capacity is not positive
+    public static Allocation allocate(final int capacity) {
         if (capacity <= 0) throw new IllegalArgumentException("capacity must be positive");
         final Arena arena = Arena.ofShared();
         try {
@@ -54,22 +32,29 @@ public final class NativeMemory {
     }
 
     /// One direct buffer and the arena that controls its lifetime.
-    static final class Allocation implements AutoCloseable {
+    ///
+    /// Closing is idempotent. The buffer must not be touched after the handle is closed.
+    public static final class Allocation implements AutoCloseable {
         private final Arena arena;
         private final ByteBuffer buffer;
+        private final AtomicBoolean closed = new AtomicBoolean();
 
         private Allocation(final Arena arena, final ByteBuffer buffer) {
             this.arena = arena;
             this.buffer = buffer;
         }
 
-        ByteBuffer buffer() {
+        /// Returns the native buffer.
+        ///
+        /// @return the buffer, valid until [#close()]
+        public ByteBuffer buffer() {
             return this.buffer;
         }
 
+        /// Frees the native memory; later calls do nothing.
         @Override
         public void close() {
-            this.arena.close();
+            if (this.closed.compareAndSet(false, true)) this.arena.close();
         }
     }
 }

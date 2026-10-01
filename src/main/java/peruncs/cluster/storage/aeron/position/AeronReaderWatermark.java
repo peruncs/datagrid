@@ -38,11 +38,11 @@ public record AeronReaderWatermark(
     public static final int MAGIC = 0x4447574D;
     private static final short VERSION = 1;
     private static final int CRC_OFFSET = 88;
-        /// Serialized watermark length in bytes.
+    /// Serialized watermark length in bytes.
     public static final int ENCODED_LENGTH = CRC_OFFSET + Integer.BYTES;
     private static final UUID UUID_ZERO = new UUID(0L, 0L);
 
-        /// Validates a watermark token, which is immutable after construction.
+    /// Validates a watermark token, which is immutable after construction.
     public AeronReaderWatermark {
         Objects.requireNonNull(readerId, "readerId");
         Objects.requireNonNull(clusterId, "clusterId");
@@ -52,7 +52,7 @@ public record AeronReaderWatermark(
         }
     }
 
-        /// Creates a watermark for one reader boundary.
+    /// Creates a watermark for one reader boundary.
     ///
     /// @param readerId        reader that produced the watermark
     /// @param clusterId       replication cluster identity
@@ -75,42 +75,25 @@ public record AeronReaderWatermark(
                 sequence, position);
     }
 
-        /// Writes a watermark into a caller-provided fixed-size array. This is
+    /// Writes this watermark into a caller-provided fixed-size array. This is
     /// used by the latest-value control channel to reuse its two hand-off buffers.
     ///
-    /// @param target          destination with exactly [#ENCODED_LENGTH] bytes
-    /// @param readerId        reader that produced the watermark
-    /// @param clusterId       replication cluster identity
-    /// @param storeGeneration Store image identity
-    /// @param writerEpoch     writer epoch associated with the recording
-    /// @param recordingId     Aeron Archive recording identity
-    /// @param sequence        transaction sequence acknowledged by the reader
-    /// @param position        Archive position acknowledged by the reader
-    public static void encodeInto(
-            final byte[] target,
-            final UUID readerId,
-            final UUID clusterId,
-            final UUID storeGeneration,
-            final long writerEpoch,
-            final long recordingId,
-            final long sequence,
-            final long position
-    ) {
-        validateFields(readerId, clusterId, storeGeneration, writerEpoch, recordingId, sequence, position);
+    /// @param target destination with exactly [#ENCODED_LENGTH] bytes
+    public void encodeInto(final byte[] target) {
         if (target == null || target.length != ENCODED_LENGTH)
             throw new IllegalArgumentException("watermark target must contain exactly %s bytes".formatted(ENCODED_LENGTH));
         int cursor = putHeader(target, 0, MAGIC, VERSION);
-        cursor = putUuid(target, cursor, readerId);
-        cursor = putUuid(target, cursor, clusterId);
-        cursor = putUuid(target, cursor, storeGeneration);
-        cursor = putLong(target, cursor, writerEpoch);
-        cursor = putLong(target, cursor, recordingId);
-        cursor = putLong(target, cursor, sequence);
-        putLong(target, cursor, position);
+        cursor = putUuid(target, cursor, this.readerId);
+        cursor = putUuid(target, cursor, this.clusterId);
+        cursor = putUuid(target, cursor, this.storeGeneration);
+        cursor = putLong(target, cursor, this.writerEpoch);
+        cursor = putLong(target, cursor, this.recordingId);
+        cursor = putLong(target, cursor, this.sequence);
+        putLong(target, cursor, this.position);
         putInt(target, CRC_OFFSET, Crc32C.compute(target, 0, CRC_OFFSET));
     }
 
-        /// Decodes a token.
+    /// Decodes a token.
     ///
     /// @param encoded serialized watermark bytes
     /// @return decoded watermark
@@ -124,14 +107,16 @@ public record AeronReaderWatermark(
         final short type = reader.readShort();
         final short flags = reader.readShort();
         final SerializedNodeIdentity identity = reader.readNodeIdentity();
-        return decodeFrame(
-                magic, type, flags,
-                identity.clusterId(), identity.nodeId(), identity.storeGeneration(),
-                reader.readLong(), reader.readLong(), reader.readLong(), reader.readLong(),
-                reader.readInt(), Crc32C.compute(encoded, 0, CRC_OFFSET));
+        final long epoch = reader.readLong();
+        final long recordingId = reader.readLong();
+        final long sequence = reader.readLong();
+        final long position = reader.readLong();
+        requireValidFrame(magic, type, flags, reader.readInt(), Crc32C.compute(encoded, 0, CRC_OFFSET));
+        return new AeronReaderWatermark(identity.clusterId(), identity.nodeId(), identity.storeGeneration(),
+                epoch, recordingId, sequence, position);
     }
 
-        /// Decodes directly from an Aeron/Agrona frame without copying the identity bytes.
+    /// Decodes directly from an Aeron/Agrona frame without copying the identity bytes.
     ///
     /// @param crcReuse caller-owned checksum state used for the CRC32C check;
     ///                  the watermark worker owns one for its lifetime
@@ -148,10 +133,13 @@ public record AeronReaderWatermark(
             throw new IllegalArgumentException("invalid Aeron watermark encoding length");
         }
         final int actualCrc = crcReuse.compute(encoded, offset, CRC_OFFSET);
-        return decodeFrame(
+        requireValidFrame(
                 encoded.getInt(offset, ByteOrder.BIG_ENDIAN),
                 encoded.getShort(offset + VERSION_OFFSET, ByteOrder.BIG_ENDIAN),
                 encoded.getShort(offset + FLAGS_OFFSET, ByteOrder.BIG_ENDIAN),
+                encoded.getInt(offset + CRC_OFFSET, ByteOrder.BIG_ENDIAN),
+                actualCrc);
+        return new AeronReaderWatermark(
                 new UUID(encoded.getLong(offset + 8, ByteOrder.BIG_ENDIAN),
                         encoded.getLong(offset + 16, ByteOrder.BIG_ENDIAN)),
                 new UUID(encoded.getLong(offset + 24, ByteOrder.BIG_ENDIAN),
@@ -161,25 +149,18 @@ public record AeronReaderWatermark(
                 encoded.getLong(offset + 56, ByteOrder.BIG_ENDIAN),
                 encoded.getLong(offset + 64, ByteOrder.BIG_ENDIAN),
                 encoded.getLong(offset + 72, ByteOrder.BIG_ENDIAN),
-                encoded.getLong(offset + 80, ByteOrder.BIG_ENDIAN),
-                encoded.getInt(offset + CRC_OFFSET, ByteOrder.BIG_ENDIAN),
-                actualCrc);
+                encoded.getLong(offset + 80, ByteOrder.BIG_ENDIAN));
     }
 
-    private static AeronReaderWatermark decodeFrame(
-            final int magic, final short version, final short flags,
-            final UUID readerId, final UUID clusterId, final UUID storeGeneration,
-            final long epoch, final long recordingId, final long sequence, final long position,
-            final int expectedCrc, final int actualCrc) {
+    private static void requireValidFrame(final int magic, final short version, final short flags,
+                                          final int expectedCrc, final int actualCrc) {
         if (magic != MAGIC) throw new IllegalArgumentException("unknown Aeron watermark magic");
         if (version != VERSION) throw new IllegalArgumentException("unsupported Aeron watermark version");
         if (flags != 0) throw new IllegalArgumentException("unsupported Aeron watermark flags");
         if (expectedCrc != actualCrc) throw new IllegalArgumentException("Aeron watermark CRC32C mismatch");
-        return new AeronReaderWatermark(
-                readerId, clusterId, storeGeneration, epoch, recordingId, sequence, position);
     }
 
-        /// Creates an aggregate at the least advanced boundary. The
+    /// Creates an aggregate at the least advanced boundary. The
     /// aggregate uses the zero UUID as its reader id and is accepted only by a
     /// caller that has already collected every configured reader token.
     ///
@@ -205,14 +186,6 @@ public record AeronReaderWatermark(
                 least.recordingId(), least.sequence(), least.position());
     }
 
-    private static void validateFields(final UUID readerId, final UUID clusterId, final UUID storeGeneration,
-                                       final long writerEpoch, final long recordingId, final long sequence, final long position) {
-        Objects.requireNonNull(readerId, "readerId");
-        Objects.requireNonNull(clusterId, "clusterId");
-        Objects.requireNonNull(storeGeneration, "storeGeneration");
-        if (writerEpoch < 0 || recordingId < 0 || sequence < -1 || sequence == Long.MAX_VALUE || position < -1)
-            throw new IllegalArgumentException("invalid Aeron watermark progress");
-    }
 
     private static boolean differsFromWriterIdentity(
             final AeronReaderWatermark left, final AeronReaderWatermark right) {
@@ -242,28 +215,27 @@ public record AeronReaderWatermark(
         return newer.sequence() > previous.sequence() && newer.position() > previous.position();
     }
 
-        /// Encodes this token for a cursor or a control message.
+    /// Encodes this token for a cursor or a control message.
     ///
     /// @return serialized watermark bytes
     public byte[] encode() {
         final byte[] encoded = new byte[ENCODED_LENGTH];
-        encodeInto(encoded, this.readerId, this.clusterId, this.storeGeneration,
-                this.writerEpoch, this.recordingId, this.sequence, this.position);
+        this.encodeInto(encoded);
         return encoded;
     }
 
-        /// Tracks the greatest accepted watermark and rejects replay, rollback, or a
+    /// Tracks the greatest accepted watermark and rejects replay, rollback, or a
     /// conflicting position for an already acknowledged sequence.
     public static final class Validator implements AutoCloseable {
         private final LockedExecutor state = LockedExecutor.New();
         private final Map<UUID, AeronReaderWatermark> latest = new HashMap<>();
         private boolean closed;
 
-                /// Creates a validator for one writer.
+        /// Creates a validator for one writer.
         public Validator() {
         }
 
-                /// Accepts a monotonically advancing reader watermark.
+        /// Accepts a monotonically advancing reader watermark.
         ///
         /// @param watermark watermark to accept
         public void accept(final AeronReaderWatermark watermark) {
@@ -281,7 +253,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Returns the latest accepted watermark for one reader, or `null`.
+        /// Returns the latest accepted watermark for one reader, or `null`.
         ///
         /// @param readerId reader identity
         /// @return latest accepted watermark, or `null`
@@ -293,7 +265,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Restores one reader entry after a failed durable state write.
+        /// Restores one reader entry after a failed durable state write.
         ///
         /// @param readerId  reader identity
         /// @param watermark prior watermark, or `null` to remove the entry
@@ -312,7 +284,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Returns a stable snapshot for aggregation or diagnostics.
+        /// Returns a stable snapshot for aggregation or diagnostics.
         ///
         /// @return immutable reader-to-watermark snapshot
         public Map<UUID, AeronReaderWatermark> snapshot() {
@@ -323,7 +295,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Returns whether every supplied reader has a validated watermark.
+        /// Returns whether every supplied reader has a validated watermark.
         boolean containsAll(final Set<UUID> readers) {
             return this.state.read(() ->
             {
@@ -332,7 +304,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Removes a reader's validated watermark when its retirement is persisted.
+        /// Removes a reader's validated watermark when its retirement is persisted.
         void remove(final UUID readerId) {
             this.state.write(() ->
             {
@@ -341,7 +313,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Returns whether this validator has a watermark for the supplied reader.
+        /// Returns whether this validator has a watermark for the supplied reader.
         boolean contains(final UUID readerId) {
             return this.state.read(() ->
             {
@@ -350,7 +322,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Rejects operations after close.
+        /// Rejects operations after close.
         void ensureOpen() {
             this.state.read(() ->
             {
@@ -358,7 +330,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Releases the validator; further operations fail.
+        /// Releases the validator; further operations fail.
         @Override
         public void close() {
             this.state.write(() ->
@@ -368,7 +340,7 @@ public record AeronReaderWatermark(
         }
     }
 
-        /// Verifies and aggregates a configured set of reader acknowledgements.
+    /// Verifies and aggregates a configured set of reader acknowledgements.
     public static final class Quorum implements AutoCloseable {
         private final LockedExecutor state = LockedExecutor.New();
         private final Set<UUID> expectedReaders;
@@ -376,7 +348,7 @@ public record AeronReaderWatermark(
         private final Set<UUID> retiredReaders = new HashSet<>();
         private final Validator validator = new Validator();
 
-                /// Creates a quorum for the configured readers.
+        /// Creates a quorum for the configured readers.
         ///
         /// @param expectedReaders reader identities that must acknowledge
         public Quorum(final Collection<UUID> expectedReaders) {
@@ -389,7 +361,7 @@ public record AeronReaderWatermark(
             this.activeReaders = new HashSet<>(readers);
         }
 
-                /// Accepts one acknowledgement from a configured reader.
+        /// Accepts one acknowledgement from a configured reader.
         ///
         /// @param watermark acknowledgement to accept
         public void accept(final AeronReaderWatermark watermark) {
@@ -403,7 +375,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Returns the latest accepted watermark for one reader, or `null`.
+        /// Returns the latest accepted watermark for one reader, or `null`.
         ///
         /// @param readerId reader identity
         /// @return latest accepted watermark, or `null`
@@ -415,7 +387,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Restores one reader entry after a failed durable state write.
+        /// Restores one reader entry after a failed durable state write.
         ///
         /// @param readerId  reader identity
         /// @param watermark prior watermark, or `null` to remove the entry
@@ -431,7 +403,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Returns the least advanced acknowledgement once every reader has reported.
+        /// Returns the least advanced acknowledgement once every reader has reported.
         ///
         /// @return least advanced acknowledgement
         public AeronReaderWatermark aggregate() {
@@ -460,7 +432,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Returns whether every configured reader has supplied a watermark.
+        /// Returns whether every configured reader has supplied a watermark.
         ///
         /// @return `true` when every configured reader has reported
         public boolean isComplete() {
@@ -472,7 +444,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Returns the active readers that have not supplied a durable watermark.
+        /// Returns the active readers that have not supplied a durable watermark.
         /// This is intended for health and operator diagnostics; it is not a
         /// retention authorization by itself.
         ///
@@ -501,7 +473,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Permanently retires a configured reader from subsequent quorum decisions.
+        /// Permanently retires a configured reader from subsequent quorum decisions.
         ///
         /// @param readerId configured reader identity
         /// @return `true` when the reader was newly retired
@@ -518,7 +490,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Restores a reader when durable retirement persistence fails.
+        /// Restores a reader when durable retirement persistence fails.
         ///
         /// @param readerId configured reader identity
         public void reinstate(final UUID readerId) {
@@ -529,7 +501,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Returns the durable retirement tombstones.
+        /// Returns the durable retirement tombstones.
         ///
         /// @return immutable set of retired reader identities
         public Set<UUID> retiredReaders() {
@@ -540,7 +512,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Returns the per-reader state for durable persistence.
+        /// Returns the per-reader state for durable persistence.
         ///
         /// @return immutable reader-to-watermark snapshot
         public Map<UUID, AeronReaderWatermark> snapshot() {
@@ -551,7 +523,7 @@ public record AeronReaderWatermark(
             });
         }
 
-                /// Releases the quorum validator.
+        /// Releases the quorum validator.
         @Override
         public void close() {
             this.validator.close();

@@ -9,8 +9,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Verifies the neutral client's best-effort lifecycle reporting.
 class ReplicationApplierTest {
-        /// The neutral default reports a resolved boundary with an unknown
-        /// transport position instead of failing or fabricating one.
+    /// The neutral default reports a resolved boundary with an unknown
+    /// transport position instead of failing or fabricating one.
     @Test
     void noOpClientReportsBestEffortStopResult() {
         final ReplicationApplier client = ReplicationApplier.noOp();
@@ -26,7 +26,7 @@ class ReplicationApplierTest {
         assertNull(client.failure());
     }
 
-        /// The default currentSequence delegates to the published position.
+    /// The default currentSequence delegates to the published position.
     @Test
     void defaultCurrentSequenceDelegatesToPosition() {
         final UUID id = UUID.randomUUID();
@@ -70,8 +70,8 @@ class ReplicationApplierTest {
         assertTrue(result.hasPosition());
     }
 
-        /// A client that cannot produce a position still yields a best-effort stop
-        /// result instead of a null dereference.
+    /// A client that cannot produce a position still yields a best-effort stop
+    /// result instead of a null dereference.
     @Test
     void nullPositionNormalizesToNoneInStopResult() {
         final ReplicationApplier client = new ReplicationApplier() {

@@ -18,7 +18,7 @@ record BackupArchiveLimits(long maxExtractedBytes, int maxArchiveEntries) {
     /// Budgeted bytes per archive entry when deriving the entry budget.
     static final long BYTES_PER_ENTRY = 64L * 1024L;
     /// Hard upper bound for derived entry budgets, independent of byte budget.
-    static final int MAX_ENTRY_BUDGET = 1 << 16;
+    static final int MAX_ENTRY_BUDGET = 1 << 20;
 
     /// Creates default limits: a generous byte ceiling and an entry budget
     /// proportional to it, capped independently.

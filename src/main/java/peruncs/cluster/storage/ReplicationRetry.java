@@ -1,6 +1,7 @@
 package peruncs.cluster.storage;
 
 import java.util.Random;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongSupplier;
 
 /// Monotonic-clock helpers shared by bounded transport retry loops.
@@ -41,6 +42,18 @@ public final class ReplicationRetry {
         } catch (final ArithmeticException overflow) {
             return Long.MAX_VALUE;
         }
+    }
+
+    /// Parks the thread and reports an interrupt that arrived meanwhile.
+    ///
+    /// Unlike a sleep, the wait never throws; the interrupt flag stays set, so the caller decides
+    /// how to translate the cancellation into its own failure type.
+    ///
+    /// @param nanos delay in nanoseconds
+    /// @return `true` when the thread is interrupted after the wait
+    public static boolean parkInterrupted(final long nanos) {
+        LockSupport.parkNanos(nanos);
+        return Thread.currentThread().isInterrupted();
     }
 
     /// Returns the non-negative time left before a deadline.

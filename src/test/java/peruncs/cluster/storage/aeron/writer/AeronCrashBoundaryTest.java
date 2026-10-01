@@ -55,7 +55,7 @@ class AeronCrashBoundaryTest {
         publisher.close();
     }
     private AeronReplicationPublisher publisher(final List<AeronReplicationEnvelope.Kind> kinds) {
-        return AeronReplicationPublisher.forTests(
+        return PublisherFixtures.forTests(
                 (buffer, offset, length) -> {
                     kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
                     return length;

@@ -67,7 +67,7 @@ final class NativeBufferPool implements AutoCloseable {
             }
         }
         final NativeMemory.Allocation allocation =
-                NativeMemory.allocateScoped(bucket < 0 ? requiredCapacity : 1 << bucket);
+                NativeMemory.allocate(bucket < 0 ? requiredCapacity : 1 << bucket);
         final ByteBuffer allocated = allocation.buffer();
         final boolean closedAfterAllocation;
         this.lock.lock();

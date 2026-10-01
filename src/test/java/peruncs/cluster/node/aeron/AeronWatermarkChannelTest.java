@@ -208,8 +208,8 @@ class AeronWatermarkChannelTest {
              * instead of failing to flush the unreceivable value. */
             try (AeronWatermarkChannel reader = AeronWatermarkChannel.reader(
                     aeron, "aeron:ipc", 84, TimeUnit.SECONDS.toNanos(30))) {
-                reader.publishEncoded(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
-                        1, 2, 3, 4);
+                reader.publishEncoded(AeronReaderWatermark.of(UUID.randomUUID(), UUID.randomUUID(),
+                        UUID.randomUUID(), 1, 2, 3, 4));
                 /* Let the worker observe NOT_CONNECTED. Close must then take the
                  * discard path immediately instead of waiting for 30 seconds. */
                 Thread.sleep(250L);
@@ -220,6 +220,46 @@ class AeronWatermarkChannelTest {
                 assertTrue(reader.isClosed());
                 assertNull(reader.failure());
             }
+        }
+    }
+
+    /// Publishing from several threads while the channel closes never hangs and fails only with a closed-channel error.
+    @Test
+    void concurrentPublishAndCloseNeitherHangsNorCorrupts(@TempDir final Path directory) throws Exception {
+        final MediaDriver.Context context = new MediaDriver.Context()
+                .aeronDirectoryName(directory.resolve("concurrent-close-driver").toString())
+                .dirDeleteOnStart(true)
+                .dirDeleteOnShutdown(true);
+        try (MediaDriver _ = MediaDriver.launch(context);
+             Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(context.aeronDirectoryName()))) {
+            final AeronWatermarkChannel reader = AeronWatermarkChannel.reader(
+                    aeron, "aeron:ipc", 85, TimeUnit.SECONDS.toNanos(5));
+            final java.util.concurrent.atomic.AtomicReference<Throwable> unexpected =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            final java.util.List<Thread> publishers = new java.util.ArrayList<>();
+            for (int thread = 0; thread < 4; thread++) {
+                publishers.add(Thread.ofPlatform().start(() -> {
+                    for (int i = 0; i < 1_000; i++) {
+                        try {
+                            reader.publishEncoded(AeronReaderWatermark.of(UUID.randomUUID(), UUID.randomUUID(),
+                                    UUID.randomUUID(), 1, 2, i, i));
+                        } catch (final IllegalStateException closed) {
+                            return;
+                        } catch (final Throwable failure) {
+                            unexpected.compareAndSet(null, failure);
+                            return;
+                        }
+                    }
+                }));
+            }
+            Thread.sleep(20L);
+            reader.close();
+            for (final Thread publisher : publishers) {
+                publisher.join(10_000L);
+                assertTrue(!publisher.isAlive(), "a publisher is stuck behind close");
+            }
+            assertNull(unexpected.get());
+            assertTrue(reader.isClosed());
         }
     }
 
@@ -237,7 +277,7 @@ class AeronWatermarkChannelTest {
             final UUID generation = UUID.randomUUID();
             try (AeronWatermarkChannel reader = AeronWatermarkChannel.reader(
                     aeron, "aeron:ipc", 85, TimeUnit.SECONDS.toNanos(30))) {
-                reader.publishEncoded(readerId, clusterId, generation, 7L, 8L, 9L, 10L);
+                reader.publishEncoded(AeronReaderWatermark.of(readerId, clusterId, generation, 7L, 8L, 9L, 10L));
                 /* Let the worker offer while nobody subscribes, so the value
                  * can only arrive via retry — never via a first offer that
                  * raced the subscriber — with no further transaction and no
@@ -288,8 +328,8 @@ class AeronWatermarkChannelTest {
                 reader.publish(callerOwned);
                 callerOwned[91] = 99;
                 assertTrue(firstReceived.await(5, TimeUnit.SECONDS));
-                reader.publishEncoded(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
-                        1, 2, 3, 4);
+                reader.publishEncoded(AeronReaderWatermark.of(UUID.randomUUID(), UUID.randomUUID(),
+                        UUID.randomUUID(), 1, 2, 3, 4));
                 assertTrue(secondReceived.await(5, TimeUnit.SECONDS),
                         "fixed buffers must remain reusable after caller-owned publish");
             }

@@ -183,7 +183,7 @@ class AeronSettingsTest {
 
 
 
-        /// Retention without a reader set stays unconfigured rather than failing:
+    /// Retention without a reader set stays unconfigured rather than failing:
     /// the transport reports retention unsupported and preserves history.
     @Test
     void writerWithoutRetentionReadersLeavesRetentionUnconfigured() {
@@ -207,7 +207,7 @@ class AeronSettingsTest {
         assertEquals(TimeUnit.SECONDS.toNanos(30), settings.replication().reconnectTimeoutNanos());
     }
 
-        /// Verifies each per-concern timeout can be overridden independently.
+    /// Verifies each per-concern timeout can be overridden independently.
     @Test
     void perConcernTimeoutBudgetsCanBeOverridden() {
         final AeronSettings settings = AeronSettings.fromConfig(properties(Map.of(
@@ -221,7 +221,7 @@ class AeronSettingsTest {
         assertEquals(345678L, settings.replication().reconnectTimeoutNanos());
     }
 
-        /// Verifies non-positive per-concern budgets fail configuration validation.
+    /// Verifies non-positive per-concern budgets fail configuration validation.
     @Test
     void rejectsNonPositivePerConcernTimeouts() {
         for (final String key : List.of(
@@ -233,7 +233,7 @@ class AeronSettingsTest {
         }
     }
 
-        /// Verifies a UDP channel without an endpoint or control is rejected by the
+    /// Verifies a UDP channel without an endpoint or control is rejected by the
     /// ChannelUri-based parser rather than a hand-rolled option split.
     @Test
     void rejectsUdpChannelWithoutEndpointOrControl() {
@@ -254,7 +254,7 @@ class AeronSettingsTest {
     }
 
 
-        /// Production-shaped settings with routable endpoints and home-directory paths.
+    /// Production-shaped settings with routable endpoints and home-directory paths.
     private static NodeConfig prodProperties(final Map<String, String> overrides) {
         final HashMap<String, String> merged = new HashMap<>(overrides);
         final Path root = Path.of(System.getProperty("user.home"),

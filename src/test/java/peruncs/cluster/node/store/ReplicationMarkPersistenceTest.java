@@ -28,9 +28,10 @@ class ReplicationMarkPersistenceTest {
     void managerPersistenceManagerAndStorerWritesAllCarryTheMark(@TempDir final Path storePath) {
         final ReplicationMark mark = new ReplicationMark(CLUSTER_ID, GENERATION, 1L, 17L);
         final EmbeddedStorageManager storage = foundation(storePath, mark).start(new Root());
-        final ClusterStorageManager<Root> manager = ClusterStorageManagers.guarding(
+        final ClusterStorageManager<Root> manager = TestManagers.guarding(
                 storage, () -> false, close(storage), new StorageGraphCoordinator(),
-                mark, current -> current.sequence++);
+                mark, current -> current.reserve(current.recordingId(), current.fencingToken(),
+                        current.sequence() + 1L, current.prepareStartPosition()));
         try {
             manager.store(new Entity());
             manager.storeAll(List.of(new Entity(), new Entity()));
@@ -40,7 +41,7 @@ class ReplicationMarkPersistenceTest {
             storer.store(new Entity());
             storer.commit();
             manager.createStorer().commit();
-            assertEquals(5L, mark.sequence);
+            assertEquals(5L, mark.sequence());
             final boolean[] visible = {false};
             manager.viewRoots().iterateEntries((identifier, ignored) ->
                     visible[0] |= ReplicationMark.ROOT_ID.equals(identifier));
@@ -51,7 +52,7 @@ class ReplicationMarkPersistenceTest {
 
         final ReplicationMark loaded = new ReplicationMark(CLUSTER_ID, GENERATION, 1L, 17L);
         try (EmbeddedStorageManager reopened = foundation(storePath, loaded).start()) {
-            assertEquals(5L, loaded.sequence);
+            assertEquals(5L, loaded.sequence());
         }
     }
 
@@ -59,7 +60,7 @@ class ReplicationMarkPersistenceTest {
     void readOnlyFacadeHidesTheReservedReplicationRoot(@TempDir final Path storePath) {
         final ReplicationMark mark = new ReplicationMark(CLUSTER_ID, GENERATION, 1L, 17L);
         final EmbeddedStorageManager storage = foundation(storePath, mark).start(new Root());
-        final ClusterStorageManager<Root> manager = ClusterStorageManagers.readOnly(
+        final ClusterStorageManager<Root> manager = TestManagers.readOnly(
                 storage, close(storage), new StorageGraphCoordinator(), mark);
         try {
             final boolean[] visible = {false};

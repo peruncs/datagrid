@@ -39,7 +39,7 @@ public final class AeronPublisherBenchmark {
                 result.allocatedBytesPerTransaction() < 0 ? "unavailable" : Long.toString(result.allocatedBytesPerTransaction()));
     }
 
-        /// Measures publisher copy, CRC, envelope, and terminal-marker work.
+    /// Measures publisher copy, CRC, envelope, and terminal-marker work.
     static Result measure(
             final int payloadLength, final int chunkSize, final int sourceBuffers, final int warmup, final int iterations) {
         if (payloadLength <= 0 || chunkSize <= 0 || sourceBuffers <= 0 || warmup < 0 || iterations <= 0)
@@ -51,7 +51,7 @@ public final class AeronPublisherBenchmark {
                 .build();
         final ByteBuffer[] sources = sourceBuffers(payloadLength, sourceBuffers);
         final CountingOfferer offerer = new CountingOfferer();
-        try (AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 offerer, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0)) {
             for (int i = 0; i < warmup; i++) publisher.publishTransaction(null, sources);
             offerer.reset();

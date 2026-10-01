@@ -1,5 +1,7 @@
 package peruncs.cluster.storage.aeron.crashtest;
 
+import peruncs.cluster.storage.io.FaultInjection;
+
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
@@ -21,7 +23,7 @@ public final class CrashBarrier implements AutoCloseable {
     private final CountDownLatch release = new CountDownLatch(1);
     private final long timeoutNanos;
 
-        /// Arms a barrier at one crash seam, throwing or gating on arrival.
+    /// Arms a barrier at one crash seam, throwing or gating on arrival.
     ///
     /// @param point crash seam to arm
     /// @param throwOnReach whether arrival throws instead of blocking
@@ -33,13 +35,13 @@ public final class CrashBarrier implements AutoCloseable {
         this.timeoutNanos = timeoutNanos;
     }
 
-        /// Callback adapter for writer fault seams.
+    /// Callback adapter for writer fault seams.
     ///
-    /// @param name reached seam name, ignored unless it is the armed point
+    /// @param name reached seam, ignored unless it is the armed point
     /// @param sequence transaction sequence at the seam, or `-1` for file operations
     /// @param path filesystem path at the seam, or `null` for transport operations
-    public void reached(final String name, final long sequence, final Path path) {
-        if (!this.point.name().equals(name)) return;
+    public void reached(final FaultInjection.Point name, final long sequence, final Path path) {
+        if (!this.point.name().equals(name.name())) return;
         if (this.throwOnReach) throw new SimulatedCrash(this.point, sequence);
         try {
             if (!this.release.await(this.timeoutNanos, TimeUnit.NANOSECONDS)) {
@@ -61,7 +63,7 @@ public final class CrashBarrier implements AutoCloseable {
         this.release();
     }
 
-        /// Exception used only by in-process crash tests. The crash site stays in
+    /// Exception used only by in-process crash tests. The crash site stays in
     /// the message; no accessor is needed because tests only assert the type.
     public static final class SimulatedCrash extends RuntimeException {
         /// Records a simulated crash site.

@@ -1,4 +1,4 @@
-/// This package carries cluster replication through Aeron.
+/// Carries cluster replication through Aeron.
 ///
 /// [AeronTransport] is the public
 /// transport facade; it composes one owner per lifecycle concern — runtime

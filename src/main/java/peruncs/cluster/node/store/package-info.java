@@ -1,4 +1,4 @@
-/// This package adapts Eclipse Store to cluster duty.
+/// Adapts Eclipse Store to cluster duty.
 ///
 /// It owns the guarded storage managers created through
 /// [ClusterStorageManagers] (construction policy only — the public contract

@@ -1,4 +1,4 @@
-/// This package defines the settings that shape an Aeron storage stream.
+/// Defines the settings that shape an Aeron storage stream.
 ///
 /// Configuration values describe endpoints, stream identity, frame, and poll
 /// limits. Members that share a stream must use compatible values. Settings

@@ -50,7 +50,7 @@ class AeronApplicationSectionDrainIT {
             manager.storeRoot();
 
             FaultInjection.runWithHook((name, sequence, path) -> {
-                if ("AFTER_PREPARE_BEFORE_LOCAL_WRITE".equals(name)) await(prepared, release);
+                if (name == FaultInjection.Point.AFTER_PREPARE_BEFORE_LOCAL_WRITE) await(prepared, release);
             }, () -> writer.set(Thread.ofVirtual().start(FaultInjection.inheritCurrent(() -> {
                 try {
                     manager.graphBoundary().write(() -> {
@@ -94,8 +94,10 @@ class AeronApplicationSectionDrainIT {
         final NodeConfig.Timeouts current = base.timeouts();
         final NodeConfig.Timeouts timeouts = new NodeConfig.Timeouts(
                 closeTimeout, current.mergerCache(), current.applyBudget(), current.offer(),
-                current.recordingStart(), current.recordedPosition(), current.recordingStop(), current.readerStop(),
-                current.reconnect(), current.archiveControl(), current.watermarkClose(), current.driver());
+                current.recordingStart(), current.recordedPosition(), current.abortRecordedPosition(),
+                current.recordingStop(), current.readerStop(),
+                current.reconnect(), current.archiveControl(), current.watermarkClose(), current.driver(),
+                current.indexRefresh());
         final NodeConfig.StorageConfig currentStorage = base.storage();
         final NodeConfig.StorageConfig storage = new NodeConfig.StorageConfig(storagePath,
                 currentStorage.limitBytes(), Duration.ofMinutes(1), currentStorage.gcInterval());
@@ -111,7 +113,7 @@ class AeronApplicationSectionDrainIT {
                 currentAeron.nodeId(), currentAeron.storeGeneration(), currentAeron.epoch(), currentAeron.streamId(),
                 currentAeron.recordingId(), currentAeron.watermarkStreamId(), currentAeron.retentionInterval(),
                 routableChannels, currentAeron.directories(), currentAeron.archivePolicy(),
-                currentAeron.threadingMode());
+                currentAeron.threadingMode(), currentAeron.retryPacing());
         return new NodeConfig(base.role(), storage, base.backup(), timeouts, base.limits(), aeron,
                 true, base.replicationTransport(), base.operations());
     }

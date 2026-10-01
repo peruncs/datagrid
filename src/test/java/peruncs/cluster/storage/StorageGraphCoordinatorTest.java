@@ -238,7 +238,7 @@ class StorageGraphCoordinatorTest {
         assertTrue(updateRan.get(), "materialization never ran after the read released");
     }
 
-        /// A guarded read never observes a half-applied multi-field update.
+    /// A guarded read never observes a half-applied multi-field update.
     @Test
     void guardedReadSeesOnlyCompleteMultiFieldUpdates() throws Exception {
         final StorageGraphCoordinator coordinator = new StorageGraphCoordinator();
@@ -277,7 +277,7 @@ class StorageGraphCoordinatorTest {
         assertNull(torn.get());
     }
 
-        /// drain() closes admission permanently: reads and writes admitted
+    /// drain() closes admission permanently: reads and writes admitted
     /// after the drain — or threads that passed the outer check only to be
     /// preempted — all fail closed instead of touching a closing Store.
     @Test
@@ -303,7 +303,7 @@ class StorageGraphCoordinatorTest {
         assertDoesNotThrow(() -> coordinator.drain());
     }
 
-        /// A section already holding the lock completes normally; a thread
+    /// A section already holding the lock completes normally; a thread
     /// that passed admission but waits on the section fails when the latch
     /// is checked inside the lock.
     @Test

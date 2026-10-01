@@ -36,7 +36,7 @@ class AtomicFileWriterTest {
         }
     }
 
-        /// Verifies failed replacement leaves previous file intact.
+    /// Verifies failed replacement leaves previous file intact.
     @Test
     void failedReplacementLeavesPreviousFileIntact() throws Exception {
         final Path directory = Files.createTempDirectory("atomic-metadata-");
@@ -66,7 +66,7 @@ class AtomicFileWriterTest {
         }
     }
 
-        /// Verifies crash during temporary write leaves previous file intact.
+    /// Verifies crash during temporary write leaves previous file intact.
     @Test
     void crashDuringTemporaryWriteLeavesPreviousFileIntact() throws Exception {
         final Path directory = Files.createTempDirectory("atomic-metadata-");
@@ -75,7 +75,7 @@ class AtomicFileWriterTest {
             AtomicFileWriter.write(file, channel -> write(channel, "old"));
             FaultInjection.runWithHook((phase, sequence, path) ->
             {
-                if ("DURING_FILE_WRITE".equals(phase)) throw new IllegalStateException("simulated crash");
+                if (phase == FaultInjection.Point.DURING_FILE_WRITE) throw new IllegalStateException("simulated crash");
             }, () -> assertThrows(IllegalStateException.class,
                     () -> AtomicFileWriter.write(file, channel -> write(channel, "new"))));
             assertEquals("old", Files.readString(file, StandardCharsets.UTF_8));
@@ -84,7 +84,7 @@ class AtomicFileWriterTest {
         }
     }
 
-        /// Verifies crash after temporary force before rename leaves previous file intact.
+    /// Verifies crash after temporary force before rename leaves previous file intact.
     @Test
     void crashAfterTemporaryForceBeforeRenameLeavesPreviousFileIntact() throws Exception {
         final Path directory = Files.createTempDirectory("atomic-metadata-");
@@ -93,7 +93,7 @@ class AtomicFileWriterTest {
             AtomicFileWriter.write(file, channel -> write(channel, "old"));
             FaultInjection.runWithHook((phase, sequence, path) ->
             {
-                if ("AFTER_TEMP_WRITE_BEFORE_RENAME".equals(phase)) throw new IllegalStateException("simulated crash");
+                if (phase == FaultInjection.Point.AFTER_TEMP_WRITE_BEFORE_RENAME) throw new IllegalStateException("simulated crash");
             }, () -> assertThrows(IllegalStateException.class,
                     () -> AtomicFileWriter.write(file, channel -> write(channel, "new"))));
             assertEquals("old", Files.readString(file, StandardCharsets.UTF_8));
@@ -102,7 +102,7 @@ class AtomicFileWriterTest {
         }
     }
 
-        /// Verifies crash after rename leaves the new complete file visible.
+    /// Verifies crash after rename leaves the new complete file visible.
     @Test
     void crashAfterRenameLeavesTheNewCompleteFileVisible() throws Exception {
         final Path directory = Files.createTempDirectory("atomic-file-store-");
@@ -111,7 +111,7 @@ class AtomicFileWriterTest {
             AtomicFileWriter.write(file, channel -> write(channel, "old"));
             FaultInjection.runWithHook((phase, sequence, path) ->
             {
-                if ("AFTER_RENAME_BEFORE_DIRECTORY_SYNC".equals(phase)) throw new IllegalStateException("simulated crash");
+                if (phase == FaultInjection.Point.AFTER_RENAME_BEFORE_DIRECTORY_SYNC) throw new IllegalStateException("simulated crash");
             }, () -> assertThrows(IllegalStateException.class,
                     () -> AtomicFileWriter.write(file, channel -> write(channel, "new"))));
             assertEquals("new", Files.readString(file, StandardCharsets.UTF_8));
@@ -132,7 +132,7 @@ class AtomicFileWriterTest {
         Files.writeString(destination.resolve("data"), "old");
         try {
             FaultInjection.runWithHook((phase, sequence, path) -> {
-                if ("AFTER_STORAGE_RENAME_BEFORE_DIRECTORY_SYNC".equals(phase)) {
+                if (phase == FaultInjection.Point.AFTER_STORAGE_RENAME_BEFORE_DIRECTORY_SYNC) {
                     throw new IllegalStateException("simulated install failure");
                 }
             }, () -> assertThrows(IllegalStateException.class,
@@ -148,7 +148,80 @@ class AtomicFileWriterTest {
         }
     }
 
-        /// Verifies metadata writes cannot be redirected through a nested symlink.
+    /// A crash between parking the old Store and installing the new one must not strand the old image.
+    @Test
+    void crashBetweenTheTwoRenamesIsRecoveredFromTheParkedImage() throws Exception {
+        final Path parent = Files.createTempDirectory("atomic-storage-crash-");
+        final Path source = parent.resolve("staged");
+        final Path destination = parent.resolve("storage");
+        Files.createDirectories(source);
+        Files.createDirectories(destination);
+        Files.writeString(source.resolve("data"), "new");
+        Files.writeString(destination.resolve("data"), "old");
+        try {
+            /* An Error skips the in-process rollback, like a killed process would. */
+            FaultInjection.runWithHook((phase, sequence, path) -> {
+                if (phase == FaultInjection.Point.AFTER_PREVIOUS_STORAGE_MOVED) throw new Error("simulated crash");
+            }, () -> assertThrows(Error.class, () -> AtomicFileWriter.replaceStorage(source, destination)));
+            assertTrue(Files.notExists(destination), "the crash left no live Store");
+            assertTrue(Files.isDirectory(parent.resolve(AtomicFileWriter.PREVIOUS_STORAGE_NAME)));
+
+            AtomicFileWriter.recoverInterruptedReplacement(destination);
+
+            assertEquals("old", Files.readString(destination.resolve("data")));
+            assertTrue(Files.notExists(parent.resolve(AtomicFileWriter.PREVIOUS_STORAGE_NAME)));
+        } finally {
+            delete(parent);
+        }
+    }
+
+    /// A crash after the install leaves the new Store live; recovery only removes the parked old image.
+    @Test
+    void crashAfterTheInstallKeepsTheNewStoreAndDropsTheParkedImage() throws Exception {
+        final Path parent = Files.createTempDirectory("atomic-storage-crash-late-");
+        final Path source = parent.resolve("staged");
+        final Path destination = parent.resolve("storage");
+        Files.createDirectories(source);
+        Files.createDirectories(destination);
+        Files.writeString(source.resolve("data"), "new");
+        Files.writeString(destination.resolve("data"), "old");
+        try {
+            FaultInjection.runWithHook((phase, sequence, path) -> {
+                if (phase == FaultInjection.Point.AFTER_STORAGE_RENAME_BEFORE_DIRECTORY_SYNC) throw new Error("simulated crash");
+            }, () -> assertThrows(Error.class, () -> AtomicFileWriter.replaceStorage(source, destination)));
+            assertEquals("new", Files.readString(destination.resolve("data")));
+
+            AtomicFileWriter.recoverInterruptedReplacement(destination);
+
+            assertEquals("new", Files.readString(destination.resolve("data")));
+            assertTrue(Files.notExists(parent.resolve(AtomicFileWriter.PREVIOUS_STORAGE_NAME)));
+        } finally {
+            delete(parent);
+        }
+    }
+
+    /// A Store directory reached through a symbolic link is refused, not inspected through the link.
+    @Test
+    void storeEmptinessCheckRejectsSymbolicLinkComponents() throws Exception {
+        final Path directory = Files.createTempDirectory("atomic-store-empty-");
+        final Path target = Files.createTempDirectory("atomic-store-empty-target-");
+        try {
+            assertTrue(AtomicFileWriter.isMissingOrEmptyStore(directory.resolve("absent")));
+            Files.writeString(directory.resolve("writer.lock"), "");
+            assertTrue(AtomicFileWriter.isMissingOrEmptyStore(directory), "only the lock file means no Store yet");
+            Files.writeString(directory.resolve("data"), "x");
+            assertFalse(AtomicFileWriter.isMissingOrEmptyStore(directory));
+            final Path link = directory.resolve("link");
+            Files.createSymbolicLink(link, target);
+            assertThrows(peruncs.cluster.errors.NodeException.class,
+                    () -> AtomicFileWriter.isMissingOrEmptyStore(link.resolve("storage")));
+        } finally {
+            delete(directory);
+            delete(target);
+        }
+    }
+
+    /// Verifies metadata writes cannot be redirected through a nested symlink.
     @Test
     void rejectsNestedSymbolicLink() throws Exception {
         final Path directory = Files.createTempDirectory("atomic-file-store-link-");
@@ -164,8 +237,8 @@ class AtomicFileWriterTest {
         }
     }
 
-        /// Verifies deletes cannot be redirected through a nested symlink: the
-        /// last-moment re-check rejects the link instead of removing a file in
+    /// Verifies deletes cannot be redirected through a nested symlink: the
+    /// last-moment re-check rejects the link instead of removing a file in
     /// the link target.
     @Test
     void deleteRejectsNestedSymbolicLink() throws Exception {
@@ -194,7 +267,7 @@ class AtomicFileWriterTest {
             Files.writeString(file, "old");
             Files.writeString(replacement, "new");
             final boolean deleted = FaultInjection.callWithHook((phase, sequence, path) -> {
-                if ("AFTER_REGULAR_DELETE".equals(phase)) {
+                if (phase == FaultInjection.Point.AFTER_REGULAR_DELETE) {
                     try {
                         Files.move(replacement, file);
                     } catch (final IOException failure) {

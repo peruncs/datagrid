@@ -44,12 +44,12 @@ class AeronReplicationPublisherTest {
                 .build();
     }
 
-        /// Verifies retries back pressure and preserves source position.
+    /// Verifies retries back pressure and preserves source position.
     @Test
     void retriesBackPressureAndPreservesSourcePosition() {
         final AtomicInteger calls = new AtomicInteger();
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> calls.getAndIncrement() < 2
                         ? Publication.BACK_PRESSURED
                         : calls.get(),
@@ -68,10 +68,20 @@ class AeronReplicationPublisherTest {
     void eachTransactionOwnsItsFrameBuffer() {
         final List<DirectBuffer> offeredBuffers = new ArrayList<>();
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
-                (buffer, offset, length) -> {
-                    offeredBuffers.add(buffer);
-                    return offeredBuffers.size();
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
+                new AeronOfferRetryer.Offerer() {
+                    @Override
+                    public long offer(final DirectBuffer buffer, final int offset, final int length) {
+                        offeredBuffers.add(buffer);
+                        return offeredBuffers.size();
+                    }
+
+                    @Override
+                    public long offer(final io.aeron.DirectBufferVector[] vectors) {
+                        /* The first vector is always the transaction's own header buffer. */
+                        offeredBuffers.add(vectors[0].buffer());
+                        return offeredBuffers.size();
+                    }
                 }, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
             final byte[] payload = new byte[300];
             publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(payload)});
@@ -85,10 +95,10 @@ class AeronReplicationPublisherTest {
         assertNotSame(offeredBuffers.get(0), offeredBuffers.get(3));
     }
 
-        /// Verifies times out and fails closed after persistent back pressure.
+    /// Verifies times out and fails closed after persistent back pressure.
     @Test
     void timesOutAndFailsClosedAfterPersistentBackPressure() {
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> Publication.BACK_PRESSURED,
                 configuration(1_000_000L).maxMessageLength(), configuration(1_000_000L), CLUSTER, 1, 0
         )) {
@@ -99,7 +109,7 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies timeout diagnostics identify the Aeron status and connectivity.
+    /// Verifies timeout diagnostics identify the Aeron status and connectivity.
     @Test
     void timeoutDiagnosticsIdentifyNotConnectedPublication() {
         final AeronReplicationConfiguration configuration = configuration(1_000_000L);
@@ -121,11 +131,11 @@ class AeronReplicationPublisherTest {
         assertTrue(failure.getMessage().contains("connected=false"));
     }
 
-        /// Verifies closed and max position statuses are fatal.
+    /// Verifies closed and max position statuses are fatal.
     @Test
     void closedAndMaxPositionStatusesAreFatal() {
         for (final long status : new long[]{Publication.CLOSED, Publication.MAX_POSITION_EXCEEDED}) {
-            try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+            try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                     (buffer, offset, length) -> status,
                     configuration(50_000_000L).maxMessageLength(), configuration(50_000_000L), CLUSTER, 1, 0
             )) {
@@ -135,22 +145,22 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies rejection of message limit larger than configuration.
+    /// Verifies rejection of message limit larger than configuration.
     @Test
     void rejectsMessageLimitLargerThanConfiguration() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
-        assertThrows(IllegalArgumentException.class, () -> AeronReplicationPublisher.forTests(
+        assertThrows(IllegalArgumentException.class, () -> PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength() + 1,
                 configuration, CLUSTER, 1, 0));
     }
 
-        /// Verifies emits dictionary chunks before data and commit.
+    /// Verifies emits dictionary chunks before data and commit.
     @Test
     void emitsDictionaryChunksBeforeDataAndCommit() {
         final List<byte[]> messages = new ArrayList<>();
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) ->
                 {
                     final byte[] copy = new byte[length];
@@ -160,7 +170,7 @@ class AeronReplicationPublisherTest {
                 }, configuration.maxMessageLength(), configuration, CLUSTER, 4, 10
         )) {
             final byte[] data = {1, 2, 3};
-            final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
+            final PreparedTransaction prepared = publisher.prepareTransaction(
                     new byte[]{9, 8}, new ByteBuffer[]{ByteBuffer.wrap(data)});
             assertEquals(10, prepared.sequence());
             assertEquals(3, prepared.dataLength());
@@ -199,11 +209,6 @@ class AeronReplicationPublisherTest {
             }
 
             @Override
-            public boolean supportsVectors() {
-                return true;
-            }
-
-            @Override
             public long offer(final DirectBufferVector[] vectors) {
                 if (vectorAttempts.getAndIncrement() == 0) return Publication.BACK_PRESSURED;
                 final int length = DirectBufferVector.validateAndComputeLength(vectors);
@@ -231,7 +236,7 @@ class AeronReplicationPublisherTest {
         first.put((byte) 99).put((byte) 98).put(payload, 0, split).flip().position(2);
         final ByteBuffer second = ByteBuffer.allocateDirect(payload.length - split + 2);
         second.put((byte) 97).put((byte) 96).put(payload, split, payload.length - split).flip().position(2);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 offerer, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
             publisher.publishTransaction(null, new ByteBuffer[]{first, second});
         }
@@ -258,14 +263,14 @@ class AeronReplicationPublisherTest {
         assertEquals((int) crc.getValue(), commit.commitCrc32c());
     }
 
-        /// The allocation-free checksum path must produce the same CRC and
+    /// The allocation-free checksum path must produce the same CRC and
     /// restore caller buffer state even when chunks span several sources.
     @Test
     void checksumCoversChunkBoundariesWithoutAllocatingViews() {
         final List<byte[]> messages = new ArrayList<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(4).maxTransactionBytes(1024).build();
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) ->
                 {
                     final byte[] copy = new byte[length];
@@ -296,12 +301,12 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies publishes across multiple source buffers without changing their positions.
+    /// Verifies publishes across multiple source buffers without changing their positions.
     @Test
     void publishesAcrossMultipleSourceBuffersWithoutChangingTheirPositions() {
         final List<byte[]> messages = new ArrayList<>();
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) ->
                 {
                     final byte[] copy = new byte[length];
@@ -320,12 +325,12 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies closing an abandoned prepared transaction publishes an abort marker.
+    /// A transaction the local Store already accepted must never be aborted by closing its token.
     @Test
-    void closingAnAbandonedPreparedTransactionPublishesAnAbortMarker() {
+    void closingALocallyAcceptedTransactionFailsClosedInsteadOfAborting() {
         final List<byte[]> messages = new ArrayList<>();
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) ->
                 {
                     final byte[] copy = new byte[length];
@@ -333,7 +338,31 @@ class AeronReplicationPublisherTest {
                     messages.add(copy);
                     return messages.size();
                 }, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
-            try (AeronReplicationPublisher.PreparedTransaction ignored = publisher.prepareTransaction(
+            final int framesBeforeClose;
+            try (PreparedTransaction accepted = publisher.prepareTransaction(
+                    null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{7})})) {
+                accepted.markLocallyAccepted();
+                framesBeforeClose = messages.size();
+            }
+            assertEquals(framesBeforeClose, messages.size(), "no ABORT frame may follow local acceptance");
+            assertTrue(publisher.isFailed(), "the publisher must stop accepting writes");
+        }
+    }
+
+    /// Verifies closing an abandoned prepared transaction publishes an abort marker.
+    @Test
+    void closingAnAbandonedPreparedTransactionPublishesAnAbortMarker() {
+        final List<byte[]> messages = new ArrayList<>();
+        final AeronReplicationConfiguration configuration = configuration(50_000_000L);
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
+                (buffer, offset, length) ->
+                {
+                    final byte[] copy = new byte[length];
+                    buffer.getBytes(offset, copy);
+                    messages.add(copy);
+                    return messages.size();
+                }, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
+            try (PreparedTransaction ignored = publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{7})})) {
                 assertNotNull(ignored);
             }
@@ -348,7 +377,7 @@ class AeronReplicationPublisherTest {
     void lowLevelPrepareKeepsPublisherReadyAfterRecordedAbort() {
         final AtomicBoolean rejectData = new AtomicBoolean(true);
         final AeronReplicationConfiguration configuration = configuration(5_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> {
                     final var envelope = AeronReplicationEnvelope.decode(buffer, offset, length);
                     if (envelope.kind() == AeronReplicationEnvelope.Kind.STORE_BINARY && rejectData.get()) {
@@ -375,7 +404,7 @@ class AeronReplicationPublisherTest {
         final AtomicBoolean rejectData = new AtomicBoolean(true);
         final IllegalStateException cause = new IllegalStateException("simulated offer failure");
         final AeronReplicationConfiguration configuration = configuration(5_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> {
                     final var envelope = AeronReplicationEnvelope.decode(buffer, offset, length);
                     if (envelope.kind() == AeronReplicationEnvelope.Kind.STORE_BINARY && rejectData.get()) {
@@ -400,16 +429,16 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies publisher shutdown aborts an outstanding token and invokes its abort callback.
+    /// Verifies publisher shutdown aborts an outstanding token and invokes its abort callback.
     @Test
     void publisherShutdownInvokesPendingAbortCallback() {
         final AtomicInteger abortCallbacks = new AtomicInteger();
         final AtomicLong abortPosition = new AtomicLong(-1);
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length,
                 configuration.maxMessageLength(), configuration, CLUSTER, 1, 0);
-        final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
+        final PreparedTransaction prepared = publisher.prepareTransaction(
                 null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{6})});
         prepared.onAbort(position -> {
             abortPosition.set(position);
@@ -422,17 +451,17 @@ class AeronReplicationPublisherTest {
         assertTrue(abortPosition.get() >= 0);
     }
 
-        /// A transient abort offer failure keeps the token retryable and never emits two aborts.
+    /// A transient abort offer failure keeps the token retryable and never emits two aborts.
     @Test
     void closeCanRetryPendingAbortAfterNotConnectedFailure() {
         final AtomicInteger offers = new AtomicInteger();
         final AtomicBoolean failAbort = new AtomicBoolean(true);
         final AeronReplicationConfiguration configuration = configuration(1_000_000L);
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> offers.getAndIncrement() == 0 || !failAbort.get()
                         ? length : Publication.NOT_CONNECTED,
                 configuration.maxMessageLength(), configuration, CLUSTER, 1, 0);
-        final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
+        final PreparedTransaction prepared = publisher.prepareTransaction(
                 null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{6})});
 
         assertThrows(ReplicationUnavailableException.class, publisher::close);
@@ -443,14 +472,14 @@ class AeronReplicationPublisherTest {
         assertEquals(0L, prepared.sequence());
     }
 
-        /// Verifies a direct publisher abort invokes the same callback as shutdown abort.
+    /// Verifies a direct publisher abort invokes the same callback as shutdown abort.
     @Test
     void directAbortInvokesPendingAbortCallback() {
         final AtomicInteger abortCallbacks = new AtomicInteger();
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
-            final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
+            final PreparedTransaction prepared = publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{6})});
             prepared.onAbort(position -> abortCallbacks.incrementAndGet());
             assertTrue(publisher.abort(prepared) >= 0);
@@ -458,13 +487,13 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// A publisher cannot overwrite an outstanding token with a second reservation.
+    /// A publisher cannot overwrite an outstanding token with a second reservation.
     @Test
     void rejectsSecondPreparedTransactionUntilTheFirstIsTerminal() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
-            final AeronReplicationPublisher.PreparedTransaction first = publisher.prepareTransaction(
+            final PreparedTransaction first = publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})});
             assertThrows(IllegalStateException.class, () -> publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{2})}));
@@ -474,12 +503,12 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies a crash after token creation cannot publish a duplicate abort on shutdown.
+    /// Verifies a crash after token creation cannot publish a duplicate abort on shutdown.
     @Test
     void prepareCrashDoesNotPublishDuplicateAbortOnShutdown() {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) ->
                 {
                     kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
@@ -487,7 +516,7 @@ class AeronReplicationPublisherTest {
                 }, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
             FaultInjection.runWithHook((name, sequence, path) ->
             {
-                if ("AFTER_PREPARE".equals(name)) throw new IllegalStateException("after prepare");
+                if (name == FaultInjection.Point.AFTER_PREPARE) throw new IllegalStateException("after prepare");
             }, () -> assertThrows(WriteRejectedException.class, () -> publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})})));
             publisher.close();
@@ -498,12 +527,12 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies publishes an explicit empty store chunk.
+    /// Verifies publishes an explicit empty store chunk.
     @Test
     void publishesAnExplicitEmptyStoreChunk() {
         final List<byte[]> messages = new ArrayList<>();
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) ->
                 {
                     final byte[] copy = new byte[length];
@@ -521,13 +550,13 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies rejection of transaction larger than configured limit before offering.
+    /// Verifies rejection of transaction larger than configured limit before offering.
     @Test
     void rejectsTransactionLargerThanConfiguredLimitBeforeOffering() {
         final AtomicInteger offers = new AtomicInteger();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> {
                     offers.incrementAndGet();
                     return 1;
@@ -539,15 +568,15 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies failed commit leaves publisher failed closed.
+    /// Verifies failed commit leaves publisher failed closed.
     @Test
     void failedCommitLeavesPublisherFailedClosed() {
         final AtomicInteger offers = new AtomicInteger();
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> offers.incrementAndGet() == 1 ? 1 : Publication.CLOSED,
                 configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
-            final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
+            final PreparedTransaction prepared = publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})});
             assertThrows(ReplicationUnavailableException.class, () -> publisher.commit(prepared));
             /* The publisher is already failed closed: further terminals are a
@@ -556,12 +585,12 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies partial prepare failure is terminal and cannot skip the reserved sequence.
+    /// Verifies partial prepare failure is terminal and cannot skip the reserved sequence.
     @Test
     void partialPrepareFailureIsTerminalAndCannotSkipTheReservedSequence() {
         final AtomicInteger offers = new AtomicInteger();
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> offers.incrementAndGet() == 1 ? length : Publication.CLOSED,
                 configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
             assertThrows(ReplicationUnavailableException.class, () -> publisher.prepareTransaction(
@@ -579,7 +608,7 @@ class AeronReplicationPublisherTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512)
                 .offerTimeoutNanos(TimeUnit.MILLISECONDS.toNanos(5)).build();
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> {
                     final AeronReplicationEnvelope.Kind kind =
                             AeronReplicationEnvelope.decode(buffer, offset, length).kind();
@@ -603,26 +632,26 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies abort failure fails closed after prepared chunks were published.
+    /// Verifies abort failure fails closed after prepared chunks were published.
     @Test
     void abortFailureFailsClosedAfterPreparedChunksWerePublished() {
         final AtomicInteger offers = new AtomicInteger();
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> offers.incrementAndGet() == 1 ? length : Publication.CLOSED,
                 configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
-            final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
+            final PreparedTransaction prepared = publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})});
             assertThrows(ReplicationUnavailableException.class, () -> publisher.abort(prepared));
             assertThrows(IllegalStateException.class, () -> publisher.commit(prepared));
         }
     }
 
-        /// Verifies close is idempotent and prevents further offers.
+    /// Verifies close is idempotent and prevents further offers.
     @Test
     void closeIsIdempotentAndPreventsFurtherOffers() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
             publisher.close();
             publisher.close();
@@ -631,12 +660,12 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies commit waits for and returns archive recorded position.
+    /// Verifies commit waits for and returns archive recorded position.
     @Test
     void commitWaitsForAndReturnsArchiveRecordedPosition() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
         final AtomicInteger offers = new AtomicInteger();
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> offers.incrementAndGet(), configuration.maxMessageLength(), configuration,
                 CLUSTER, 1, 0, offeredPosition -> offeredPosition + 100
         )) {
@@ -644,11 +673,11 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies sequence exhaustion is detected before the next reservation wraps.
+    /// Verifies sequence exhaustion is detected before the next reservation wraps.
     @Test
     void sequenceExhaustionIsDetectedBeforeWraparound() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 CLUSTER, 1, Long.MAX_VALUE - 1)) {
             assertDoesNotThrow(() -> publisher.publishTransaction(
@@ -658,19 +687,17 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// A durable reservation cannot be bypassed by an independent publisher call.
+    /// A durable reservation cannot be bypassed by an independent publisher call.
     @Test
     void reservationMustBeConsumedOrReleasedBeforeAnotherPublication() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
             final long reserved = publisher.reserveSequence();
             assertEquals(0L, reserved);
             assertTrue(publisher.hasSequenceReservation());
             assertThrows(IllegalStateException.class,
                     () -> publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})}));
-            assertThrows(IllegalStateException.class,
-                    () -> publisher.synchronizeNextSequence(2L));
             publisher.releaseReservedSequence(reserved);
             assertFalse(publisher.hasSequenceReservation());
             assertDoesNotThrow(() -> publisher.publishTransaction(
@@ -678,42 +705,42 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Explicit preparation consumes exactly the reservation returned by reserveSequence.
+    /// Explicit preparation consumes exactly the reservation returned by reserveSequence.
     @Test
     void explicitPreparationConsumesTheMatchingReservation() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
             final ByteBuffer[] buffers = {ByteBuffer.wrap(new byte[]{3, 4})};
-            final AeronReplicationPublisher.TransactionMetadata metadata = publisher.transactionMetadata(buffers, 1);
             final long reserved = publisher.reserveSequence();
-            final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
-                    null, buffers, reserved, metadata);
+            final PreparedTransaction prepared = publisher.prepareTransaction(
+                    null, buffers, 1, reserved);
             assertFalse(publisher.hasSequenceReservation());
             assertEquals(reserved, prepared.sequence());
             publisher.commit(prepared);
         }
     }
 
+    /// The COMMIT checksum covers the concatenation of every source buffer, whatever the split.
     @Test
-    void transactionMetadataResetsItsReusedChecksum() {
+    void commitChecksumCoversTheConcatenatedSourceBuffers() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final byte[] first = {3, 4};
+        final byte[] second = {9};
+        final byte[] third = {5, 6, 7};
+        final byte[] all = {3, 4, 9, 5, 6, 7};
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
-            final byte[] first = {3, 4};
-            final byte[] second = {9};
-            assertEquals(AeronReplicationEnvelope.crc32c(first),
-                    publisher.transactionMetadata(new ByteBuffer[]{ByteBuffer.wrap(first)}, 1).crc32c());
-            assertEquals(AeronReplicationEnvelope.crc32c(second),
-                    publisher.transactionMetadata(new ByteBuffer[]{ByteBuffer.wrap(second)}, 1).crc32c());
-            assertEquals(AeronReplicationEnvelope.crc32c(new byte[0]),
-                    publisher.transactionMetadata(new ByteBuffer[0], 0).crc32c());
+            final var prepared = publisher.prepareTransaction(null, new ByteBuffer[]{
+                    ByteBuffer.wrap(first), ByteBuffer.wrap(second), ByteBuffer.wrap(third)});
+            assertEquals(AeronReplicationEnvelope.crc32c(all), prepared.dataCrc32c());
+            publisher.commit(prepared);
         }
     }
 
-        /// A commit marker that retries under back pressure must not hold the
-        /// publisher state monitor: monitoring and close() must stay responsive
-        /// while the offer is in flight.
+    /// A commit marker that retries under back pressure must not hold the
+    /// publisher state monitor: monitoring and close() must stay responsive
+    /// while the offer is in flight.
     @Test
     void slowCommitOfferDoesNotBlockStateAccessors() throws Exception {
         final CountDownLatch commitOfferEntered = new CountDownLatch(1);
@@ -721,7 +748,7 @@ class AeronReplicationPublisherTest {
         final AtomicInteger offers = new AtomicInteger();
         final AtomicReference<Throwable> commitFailure = new AtomicReference<>();
         final AeronReplicationConfiguration configuration = configuration(30_000_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) ->
                 {
                     if (offers.incrementAndGet() == 1) {
@@ -739,7 +766,7 @@ class AeronReplicationPublisherTest {
                     return length;
                 },
                 configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
-            final AeronReplicationPublisher.PreparedTransaction prepared = publisher.prepareTransaction(
+            final PreparedTransaction prepared = publisher.prepareTransaction(
                     null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1})});
             final Thread committing = Thread.ofVirtual().start(() ->
             {
@@ -769,11 +796,11 @@ class AeronReplicationPublisherTest {
         }
     }
 
-        /// Verifies a second claim with a different token fails the publisher closed.
+    /// Verifies a second claim with a different token fails the publisher closed.
     @Test
     void secondClaimWithDifferentTokenFailsClosed() {
         final AeronReplicationConfiguration configuration = configuration(50_000_000L);
-        try (final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        try (final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length,
                 configuration.maxMessageLength(), configuration, CLUSTER, 1, 0)) {
             publisher.claimFencingToken(7L);

@@ -55,7 +55,7 @@ class ClusterStorageManagerShutdownTest {
             public void checkOpen() {
             }
         };
-        final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+        final ClusterStorageManager<Object> manager = TestManagers.guarding(
                 store, () -> false, nodeClose,
                 new StorageGraphCoordinator());
 
@@ -117,7 +117,7 @@ class ClusterStorageManagerShutdownTest {
             public void checkOpen() {
             }
         };
-        final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+        final ClusterStorageManager<Object> manager = TestManagers.guarding(
                 store, () -> false, nodeClose,
                 new StorageGraphCoordinator());
         final AtomicReference<Throwable> firstFailure = new AtomicReference<>();
@@ -188,7 +188,7 @@ class ClusterStorageManagerShutdownTest {
             public void checkOpen() {
             }
         };
-        final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+        final ClusterStorageManager<Object> manager = TestManagers.guarding(
                 store, () -> false, nodeClose,
                 new StorageGraphCoordinator());
         assertTrue(manager.shutdown());

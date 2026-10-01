@@ -27,7 +27,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class StorageBinaryImportIntegrationTest {
     private static EmbeddedStorageManager startExisting(final Path path, final CapturingDistributor capture) {
         final var foundation = foundation(path);
-        DistributedStorage.configureWriting(foundation, capture, new ReplicatingTargetFactory(capture));
+        final TypeDictionaryOutbox outbox = new TypeDictionaryOutbox();
+        DistributedStorage.configureWriting(foundation, outbox, new ReplicatingTargetFactory(outbox, capture::distributeData));
         return foundation.start();
     }
 
@@ -37,7 +38,8 @@ class StorageBinaryImportIntegrationTest {
             final CapturingDistributor capture
     ) {
         final var foundation = foundation(path);
-        DistributedStorage.configureWriting(foundation, capture, new ReplicatingTargetFactory(capture));
+        final TypeDictionaryOutbox outbox = new TypeDictionaryOutbox();
+        DistributedStorage.configureWriting(foundation, outbox, new ReplicatingTargetFactory(outbox, capture::distributeData));
         return foundation.start(initialRoot);
     }
 
@@ -101,7 +103,7 @@ class StorageBinaryImportIntegrationTest {
         }
     }
 
-        /// Verifies imports the same binary transactions twice and survives restart.
+    /// Verifies imports the same binary transactions twice and survives restart.
     @Test
     void importsTheSameBinaryTransactionsTwiceAndSurvivesRestart() throws Exception {
         final Path root = Files.createTempDirectory("datagrid-store-import-");
@@ -162,7 +164,7 @@ class StorageBinaryImportIntegrationTest {
         }
     }
 
-        /// Regression guard for preserved Store transaction boundaries inside
+    /// Regression guard for preserved Store transaction boundaries inside
     /// one coalesced graph/index flush.
     @Test
     void coalescedReplayImportsQueuedTransactionsAsOneBatch() throws Exception {
@@ -265,17 +267,11 @@ class StorageBinaryImportIntegrationTest {
         }
     }
 
-    private static final class CapturingDistributor implements ReplicationPublisher {
+    private static final class CapturingDistributor {
         private final List<List<ByteBuffer>> transactions = new ArrayList<>();
         private int maximumChannelCount;
-        private int dictionariesSinceTransaction;
 
-        @Override
-        public synchronized void distributeData(final Binary data) {
-            if (this.dictionariesSinceTransaction > 1) {
-                throw new AssertionError("Serializer must coalesce type dictionary export per Store commit");
-            }
-            this.dictionariesSinceTransaction = 0;
+        synchronized void distributeData(final String dictionary, final Binary data) {
             final List<ByteBuffer> copy = new ArrayList<>();
             final int[] channelCount = {0};
             data.iterateChannelChunks(chunk ->
@@ -289,14 +285,7 @@ class StorageBinaryImportIntegrationTest {
             this.transactions.add(copy);
         }
 
-        @Override
-        public synchronized void distributeTypeDictionary(final String ignored) {
-            this.dictionariesSinceTransaction++;
-        }
 
-        @Override
-        public void dispose() {
-        }
     }
 
     public static final class Root {

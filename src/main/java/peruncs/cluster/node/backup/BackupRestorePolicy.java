@@ -1,5 +1,6 @@
 package peruncs.cluster.node.backup;
 
+import peruncs.cluster.storage.io.AtomicFileWriter;
 import peruncs.cluster.errors.NodeException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
@@ -64,7 +65,8 @@ public final class BackupRestorePolicy {
         if (!this.ownAuthoritativeStore) {
             try {
                 provider = provider.fillUnknowns(BackupMetadata.Identity.of(this.positionProvider.latest()));
-            } catch (final RuntimeException unavailable) {
+            } catch (final NodeException unavailable) {
+                /* Only a typed 'no boundary yet' is tolerated; a programming error must surface. */
                 LOGGER.log(System.Logger.Level.DEBUG,
                         "Replication provider reports no backup identity; using configured identity",
                         unavailable);
@@ -81,49 +83,47 @@ public final class BackupRestorePolicy {
     /// Installs the newest compatible backup when no local Store exists.
     ///
     /// @param storageRootPath Store root directory
-    /// @param backend         backup backend
+    /// An existing local Store is always retained, and the backup volume is not touched
+    /// at all: a read-only or unavailable cold-backup volume must not stop a node that
+    /// already has its Store.
+    ///
+    /// @param backendSupplier supplies the backup backend; called only when the Store is missing
     /// @return `true` when a backup was installed
     /// @throws NodeException when no compatible backup exists or restore fails
     public boolean restoreLatestBackupIfRequired(
             final Path storageRootPath,
-            final StorageBackupBackend backend
+            final Supplier<? extends StorageBackupBackend> backendSupplier
     ) {
         final boolean storageExists = !isMissingOrEmpty(storageRootPath);
+        if (storageExists) {
+            LOGGER.log(System.Logger.Level.INFO,
+                    "Existing local storage found; retaining it and its Store replication mark");
+            return false;
+        }
+        final StorageBackupBackend backend = backendSupplier.get();
         final BackupMetadata.Identity configured = this.configuredIdentity();
         final BackupMetadata selected = backend.findLatestCompatibleBackup(configured);
         if (selected == null) {
-            if (!storageExists && this.ownAuthoritativeStore && backend.containsBackups()) {
+            if (this.ownAuthoritativeStore && backend.containsBackups()) {
                 throw new ReseedRequiredException(
                         "writer Store is absent or empty; the shared reader backup volume cannot provide an authoritative writer image");
             }
-            if (!storageExists && backend.containsBackups()) {
+            if (backend.containsBackups()) {
                 throw new NodeException(
                         "No backup on the shared volume is compatible with this node %s; refusing to install an unrelated image"
                                 .formatted(configured));
             }
-            if (!storageExists) {
-                return false;
-            }
-            LOGGER.log(System.Logger.Level.WARNING,
-                    "No backup on the shared volume is compatible with this node %s; keeping local storage"
-                            .formatted(configured));
             return false;
         }
-        if (!storageExists) {
-            if (this.ownAuthoritativeStore) {
-                throw new ReseedRequiredException(
-                        "writer Store is absent or empty; a shared reader backup cannot replace the authoritative writer image");
-            }
-            this.restoreBackup(backend, selected, storageRootPath);
-            return true;
+        if (this.ownAuthoritativeStore) {
+            throw new ReseedRequiredException(
+                    "writer Store is absent or empty; a shared reader backup cannot replace the authoritative writer image");
         }
-
-        LOGGER.log(System.Logger.Level.INFO,
-                "Existing local storage found; retaining it and its Store replication mark");
-        return false;
+        this.restoreBackup(backend, selected, storageRootPath);
+        return true;
     }
 
-        /// Installs a selected backup as a reader seed.
+    /// Installs a selected backup as a reader seed.
     ///
     /// @param backend         backup backend
     /// @param selected        selected backup metadata
@@ -147,11 +147,6 @@ public final class BackupRestorePolicy {
     }
 
     private static boolean isMissingOrEmpty(final Path directory) {
-        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) return true;
-        try (var entries = Files.list(directory)) {
-            return entries.noneMatch(entry -> !entry.getFileName().toString().equals("writer.lock"));
-        } catch (final IOException failure) {
-            throw new NodeException("Cannot inspect storage directory %s".formatted(directory), failure);
-        }
+        return AtomicFileWriter.isMissingOrEmptyStore(directory);
     }
 }

@@ -114,7 +114,7 @@ public final class StorageGraphCoordinator {
         return this.drainTimeoutMillis;
     }
 
-        /// Runs application graph access under the shared read side.
+    /// Runs application graph access under the shared read side.
     ///
     /// Concurrent reads overlap; a materialization holding the write side
     /// delays the read until it has finished. Once a write section failed,
@@ -130,7 +130,7 @@ public final class StorageGraphCoordinator {
         });
     }
 
-        /// Runs application graph access under the shared read side.
+    /// Runs application graph access under the shared read side.
     ///
     /// @param <T>    result type
     /// @param action graph access to run
@@ -141,7 +141,7 @@ public final class StorageGraphCoordinator {
         return this.section(this.lock.readLock(), action, false);
     }
 
-        /// Runs a graph mutation under the exclusive write side.
+    /// Runs a graph mutation under the exclusive write side.
     ///
     /// The write excludes every read and every other write until the update
     /// has finished. A throwing update leaves the graph potentially
@@ -158,7 +158,7 @@ public final class StorageGraphCoordinator {
         });
     }
 
-        /// Runs a graph mutation under the exclusive write side and returns its result.
+    /// Runs a graph mutation under the exclusive write side and returns its result.
     ///
     /// Same exclusivity and invalidation semantics as [#write(Runnable)].
     ///
@@ -197,7 +197,7 @@ public final class StorageGraphCoordinator {
         }
     }
 
-        /// Returns the latched graph invalidity, or `null` while every write
+    /// Returns the latched graph invalidity, or `null` while every write
     /// section so far completed.
     ///
     /// @return invalidity failure, or `null`
@@ -205,7 +205,7 @@ public final class StorageGraphCoordinator {
         return this.invalidity.get();
     }
 
-        /// Runs an application mutation under the exclusive write side.
+    /// Runs an application mutation under the exclusive write side.
     ///
     /// Unlike the replication write sections, this path does NOT infer
     /// invalidation from a thrown callback: application code validates before
@@ -229,7 +229,7 @@ public final class StorageGraphCoordinator {
         return this.writeSection(update, false);
     }
 
-        /// Runs an application mutation under the exclusive write side.
+    /// Runs an application mutation under the exclusive write side.
     ///
     /// Same semantics as [#writeExclusive(Supplier)].
     ///

@@ -24,6 +24,9 @@ import static org.eclipse.serializer.util.X.notNull;
 /// At most one backup thread is active. A concurrent request is rejected
 /// explicitly instead of being silently discarded, so callers can retry or
 /// report the busy state to an operator.
+///
+/// An interface so the maintenance scheduler and the backup node manager can be tested against a
+/// controllable fake (`NodeMaintenanceSchedulerTest`, `BackupNodeManagerTest`).
 public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
     /// Creates a backup task executor.
     ///
@@ -155,9 +158,8 @@ public interface StorageBackupTaskExecutor extends StorageTaskExecutor {
         private Default(final StorageConnection connection, final StorageBackupManager backupManager,
                         final long closeTimeoutMillis, final Duration storageCheckCloseTimeout) {
             this(connection, backupManager, closeTimeoutMillis, storageCheckCloseTimeout,
-                    Executors.newSingleThreadExecutor(Thread.ofVirtual()
-                    .name("EclipseStore-StorageBackup", 0L)
-                    .factory()));
+                    Executors.newSingleThreadExecutor(runnable ->
+                            Thread.ofPlatform().daemon().name("peruncs-storage-backup").unstarted(runnable)));
         }
 
         Default(final StorageConnection connection,

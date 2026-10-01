@@ -30,6 +30,48 @@ class AeronOfferRetryerTest {
                 () -> "unexpected failure: " + failure.getMessage());
     }
 
+    /// A closed publication or an exhausted position space is final: no retry, no timeout wait.
+    @Test
+    void closedAndMaxPositionExceededFailImmediately() {
+        for (final long result : new long[]{Publication.CLOSED, Publication.MAX_POSITION_EXCEEDED}) {
+            final AtomicInteger offers = new AtomicInteger();
+            final AeronOfferRetryer retryer = new AeronOfferRetryer((buffer, offset, length) -> {
+                offers.incrementAndGet();
+                return result;
+            }, AeronReplicationConfiguration.defaults());
+            final var failure = assertThrows(ReplicationUnavailableException.class,
+                    () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64));
+            assertTrue(failure.getMessage().startsWith("Aeron publication failed"), failure.getMessage());
+            assertEquals(1, offers.get(), "a final result must not be retried");
+        }
+    }
+
+    /// A subscriber that is not connected yet and a pending admin action are retried until the deadline.
+    @Test
+    void notConnectedAndAdminActionAreRetriedUntilTheDeadline() {
+        for (final long result : new long[]{Publication.NOT_CONNECTED, Publication.ADMIN_ACTION}) {
+            final var now = new AtomicLong(1_000_000L);
+            final AeronOfferRetryer retryer = new AeronOfferRetryer(
+                    (buffer, offset, length) -> result, AeronReplicationConfiguration.defaults(),
+                    () -> now.getAndAdd(1_000_000_000L));
+            final var failure = assertThrows(ReplicationUnavailableException.class,
+                    () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64));
+            assertTrue(failure.getMessage().startsWith("Aeron offer timed out"), failure.getMessage());
+            assertTrue(failure.getMessage().contains(result == Publication.NOT_CONNECTED
+                    ? "NOT_CONNECTED" : "ADMIN_ACTION"), failure.getMessage());
+        }
+    }
+
+    /// A result code this code does not know is reported as such instead of hidden behind a timeout.
+    @Test
+    void anUnknownPublicationResultFailsFast() {
+        final AeronOfferRetryer retryer = new AeronOfferRetryer(
+                (buffer, offset, length) -> -99L, AeronReplicationConfiguration.defaults());
+        final var failure = assertThrows(ReplicationUnavailableException.class,
+                () -> retryer.offer(new UnsafeBuffer(new byte[64]), 64));
+        assertTrue(failure.getMessage().contains("unknown Aeron publication result"), failure.getMessage());
+    }
+
     /// Verifies an immediately accepted offer returns its position without parking.
     @Test
     void succeedsWithoutParkingWhenAccepted() {

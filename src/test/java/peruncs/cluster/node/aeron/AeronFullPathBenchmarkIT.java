@@ -6,7 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /// Smoke-checks that the full-path benchmark records writer, reader, and graph-boundary metrics.
-class AeronFullPathBenchmarkTest {
+///
+/// It starts real nodes and measures for seconds, so it runs with the integration profile, not the
+/// unit gate. The integration JVM keeps the pool's checked mode on, which changes buffer retention:
+/// read real throughput and latency numbers only from `-Pbench` runs.
+class AeronFullPathBenchmarkIT {
     /// Verifies the benchmark measures the store, archive, reader-import, and cursor path and reports sane percentiles.
     @Test
     void measuresConcurrentStoreArchiveAndReaderPath() throws Exception {

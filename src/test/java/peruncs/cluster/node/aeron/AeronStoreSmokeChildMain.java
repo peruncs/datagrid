@@ -7,7 +7,6 @@ import peruncs.cluster.node.aeron.AeronStoreIntegrationIT.IndexedArticle;
 import peruncs.cluster.node.aeron.AeronStoreIntegrationIT.ReaderNode;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
 import peruncs.cluster.storage.ReplicationPosition;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
 
 import java.nio.file.Path;
 import java.util.UUID;
@@ -70,7 +69,7 @@ public final class AeronStoreSmokeChildMain {
         try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
                         ports[0], ports[1], ports[2]))) {
-            final ReplicationPublisher distributor = writerTransport.distributor();
+            final Distribution distributor = new Distribution();
             final IndexRoot initial = new IndexRoot();
             initial.articles = GigaMap.New();
             AeronStoreIntegrationIT.configureIndexes(initial.articles);
@@ -98,7 +97,7 @@ public final class AeronStoreSmokeChildMain {
         try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
                         ports[0], ports[1], ports[2]))) {
-            final ReplicationPublisher distributor = writerTransport.distributor();
+            final Distribution distributor = new Distribution();
             final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(
                     writerStore, distributor, writerTransport);
             assertFencingToken(writerTransport, 2L);
@@ -137,7 +136,7 @@ public final class AeronStoreSmokeChildMain {
         try (ClusterReplicationTransport writerTransport = new AeronTransport(
                 AeronStoreIntegrationIT.properties(root.resolve("writer"), clusterId, writerNodeId, generation, "writer", -1L,
                         ports[0], ports[1], ports[2]))) {
-            final ReplicationPublisher distributor = writerTransport.distributor();
+            final Distribution distributor = new Distribution();
             final EmbeddedStorageManager writer = AeronStoreIntegrationIT.startExistingIndex(
                     writerStore, distributor, writerTransport);
             assertFencingToken(writerTransport, 3L);
@@ -173,7 +172,7 @@ public final class AeronStoreSmokeChildMain {
     }
 
     private static void assertFencingToken(final ClusterReplicationTransport transport, final long expected) {
-        final long actual = transport.replicationMark().fencingToken;
+        final long actual = transport.replicationMark().fencingToken();
         if (actual != expected) {
             throw new AssertionError("writer startup token %s, expected %s".formatted(actual, expected));
         }

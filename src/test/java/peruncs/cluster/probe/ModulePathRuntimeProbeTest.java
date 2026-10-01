@@ -88,7 +88,11 @@ class ModulePathRuntimeProbeTest {
                 import org.eclipse.store.gigamap.jvector.Vectorizer;
                 import org.eclipse.store.gigamap.types.GigaMap;
                 import peruncs.cluster.api.ClusterIndexes;
-                final class FacadeUse {
+                public final class FacadeUse {
+                    public static void main(String[] args) {
+                        useFacade();
+                        System.out.println("NAMED-CONSUMER-OK");
+                    }
                     static final class Populator extends DocumentPopulator<String> {
                         public void populate(Document document, String value) { }
                     }
@@ -124,6 +128,29 @@ class ModulePathRuntimeProbeTest {
             fail("named-module consumer compilation timed out");
         }
         assertEquals(0, compiler.exitValue(), Files.readString(log));
+
+        /* Run it too: the named consumer must also work at run time, with the index facade and its
+         * transitive Lucene and JVector types resolved as named modules. */
+        final Path runLog = root.resolve("named-consumer-run.log");
+        final List<String> runModulePath = new ArrayList<>(paths.modulePath());
+        runModulePath.add(output.toString());
+        final Process runner = new ProcessBuilder(
+                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "--enable-preview",
+                "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "--add-modules", "jdk.incubator.vector",
+                "--module-path", String.join(File.pathSeparator, runModulePath),
+                "-m", "api.consumer/consumer.FacadeUse")
+                .redirectErrorStream(true)
+                .redirectOutput(runLog.toFile())
+                .start();
+        if (!runner.waitFor(60, TimeUnit.SECONDS)) {
+            runner.destroyForcibly();
+            fail("named-module consumer run timed out");
+        }
+        final String runOutput = Files.readString(runLog);
+        assertEquals(0, runner.exitValue(), runOutput);
+        assertTrue(runOutput.contains("NAMED-CONSUMER-OK"), runOutput);
     }
 
     private static RuntimePaths runtimePaths() {

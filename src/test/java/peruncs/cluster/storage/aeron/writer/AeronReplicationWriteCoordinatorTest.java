@@ -13,7 +13,7 @@ import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.WriteRejectedException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
+import peruncs.cluster.storage.binary.TypeDictionaryOutbox;
 import peruncs.cluster.storage.io.FaultInjection;
 
 import java.nio.ByteBuffer;
@@ -38,7 +38,7 @@ class AeronReplicationWriteCoordinatorTest {
     void maintenanceClosesWriteAdmission() throws Exception {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
@@ -67,12 +67,12 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-        /// A publisher has one owner so dictionaries and reservations cannot diverge.
+    /// A publisher has one owner so dictionaries and reservations cannot diverge.
     @Test
     void rejectsMultipleCoordinatorsForOnePublisher() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator first = new AeronReplicationWriteCoordinator(publisher);
@@ -80,12 +80,12 @@ class AeronReplicationWriteCoordinatorTest {
         first.dispose();
     }
 
-        /// Coordinator ownership prevents callers from bypassing the fenced path.
+    /// Coordinator ownership prevents callers from bypassing the fenced path.
     @Test
     void coordinatorOwnedPublisherRejectsUnfencedPreparation() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
@@ -94,12 +94,12 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-        /// Rejects a new transaction when the Archive free-space admission guard is closed.
+    /// Rejects a new transaction when the Archive free-space admission guard is closed.
     @Test
     void rejectsWritesBelowArchiveCapacityThreshold() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AtomicBoolean capacity = new AtomicBoolean();
@@ -127,7 +127,7 @@ class AeronReplicationWriteCoordinatorTest {
     void capacityAdmissionReceivesPayloadAndDictionaryBytes() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AtomicLong required = new AtomicLong();
@@ -147,7 +147,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-        /// Verifies Archive preparation precedes the local Store write.
+    /// Verifies Archive preparation precedes the local Store write.
     @Test
     void archiveFirstPublishesBeforeLocalEnqueue() {
         final List<String> events = new ArrayList<>();
@@ -156,7 +156,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                 .build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) ->
                 {
                     events.add("archive");
@@ -179,14 +179,14 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        AeronStorageBinaryReplicationTarget.create(local, coordinator)
+        WriterTargets.create(local, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{7})));
         assertEquals(List.of("archive", "local", "archive", "terminal"), events);
         assertEquals(1, sequences.size());
         coordinator.dispose();
     }
 
-        /// A delegate write failure after entering local persistence is
+    /// A delegate write failure after entering local persistence is
     /// uncertain, not certainly rejected: no ABORT is emitted, and the
     /// the Store mark and Archive tail leave restart recovery unambiguous.
     @Test
@@ -194,7 +194,7 @@ class AeronReplicationWriteCoordinatorTest {
         final List<String> events = new ArrayList<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> {
                     events.add("archive");
                     return length;
@@ -211,20 +211,20 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.create(failing, coordinator)
+        assertThrows(IllegalStateException.class, () -> WriterTargets.create(failing, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         assertTrue(events.contains("archive"), "prepare frames reach the Archive before local persistence");
         assertFalse(events.contains("ABORT"), "an uncertain local write must not emit a contradictory abort");
         coordinator.dispose();
     }
 
-        /// A rejected transaction retains its dictionary for the next successful commit.
+    /// A rejected transaction retains its dictionary for the next successful commit.
     @Test
     void rejectedTransactionRetainsDictionaryForRetry() {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) ->
                 {
                     kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
@@ -244,7 +244,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.create(local, coordinator);
+        final AeronStorageBinaryReplicationTarget target = WriterTargets.create(local, coordinator);
         assertThrows(IllegalStateException.class,
                 () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         /* After the first local write failed, the publisher is failed closed:
@@ -263,7 +263,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512)
                 .build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
@@ -278,20 +278,20 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.create(failing, coordinator)
+        assertThrows(IllegalStateException.class, () -> WriterTargets.create(failing, coordinator)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         assertTrue(publisher.isFailed(), "a local write failure leaves the outcome uncertain");
         assertEquals(1L, coordinator.nextSequence());
         coordinator.dispose();
     }
 
-        /// A post-acceptance archive-first failure retains uncertainty and emits no contradictory abort.
+    /// A post-acceptance archive-first failure retains uncertainty and emits no contradictory abort.
     @Test
     void archivePostAcceptanceFailureLeavesUncertainWithoutAbort() {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) ->
                 {
                     kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
@@ -312,8 +312,8 @@ class AeronReplicationWriteCoordinatorTest {
         try {
             FaultInjection.runWithHook((name, sequence, path) ->
             {
-                if ("AFTER_LOCAL_WRITE_BEFORE_COMMIT".equals(name)) throw failure;
-            }, () -> assertThrows(IllegalStateException.class, () -> AeronStorageBinaryReplicationTarget.create(local, coordinator)
+                if (name == FaultInjection.Point.AFTER_LOCAL_WRITE_BEFORE_COMMIT) throw failure;
+            }, () -> assertThrows(IllegalStateException.class, () -> WriterTargets.create(local, coordinator)
                     .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2})))));
             assertEquals(List.of(AeronReplicationEnvelope.Kind.STORE_BINARY), kinds,
                     "an accepted local write must not be followed by an archive ABORT");
@@ -328,7 +328,7 @@ class AeronReplicationWriteCoordinatorTest {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> {
                     kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
                     return length;
@@ -349,9 +349,9 @@ class AeronReplicationWriteCoordinatorTest {
         final IllegalStateException failure = new IllegalStateException("injected after prepare");
         try {
             FaultInjection.runWithHook((name, sequence, path) -> {
-                if ("AFTER_PREPARE_BEFORE_LOCAL_WRITE".equals(name)) throw failure;
+                if (name == FaultInjection.Point.AFTER_PREPARE_BEFORE_LOCAL_WRITE) throw failure;
             }, () -> assertSame(failure, assertThrows(IllegalStateException.class,
-                    () -> AeronStorageBinaryReplicationTarget.create(local, coordinator)
+                    () -> WriterTargets.create(local, coordinator)
                             .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))))));
             assertEquals(0, localWrites.get());
             assertEquals(List.of(AeronReplicationEnvelope.Kind.STORE_BINARY), kinds,
@@ -364,12 +364,12 @@ class AeronReplicationWriteCoordinatorTest {
     }
 
 
-        /// Verifies capacity exhaustion keeps its own rejection message.
+    /// Verifies capacity exhaustion keeps its own rejection message.
     @Test
     void capacityExhaustionKeepsDistinctMessage() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -392,7 +392,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512)
                 .offerTimeoutNanos(TimeUnit.MILLISECONDS.toNanos(20)).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
@@ -428,7 +428,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512)
                 .offerTimeoutNanos(TimeUnit.MILLISECONDS.toNanos(5)).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> {
                     final AeronReplicationEnvelope.Kind kind = AeronReplicationEnvelope.decode(buffer, offset, length).kind();
                     kinds.add(kind);
@@ -464,13 +464,13 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-        /// Verifies commit failure is marked uncertain and coordinator cannot pretend success.
+    /// Verifies commit failure is marked uncertain and coordinator cannot pretend success.
     @Test
     void commitFailureIsMarkedUncertainAndCoordinatorCannotPretendSuccess() {
         final AtomicInteger offers = new AtomicInteger();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> offers.incrementAndGet() == 1 ? length : Publication.CLOSED,
                 configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
@@ -480,7 +480,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-        /// A back-pressure timeout during a commit keeps its own failure
+    /// A back-pressure timeout during a commit keeps its own failure
     /// category: it must not be relabeled as fencing loss, and the transaction
     /// must still be recorded uncertain.
     @Test
@@ -488,7 +488,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).offerTimeoutNanos(1_000_000L).build();
         final AtomicInteger offers = new AtomicInteger();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> offers.incrementAndGet() == 1 ? length : Publication.BACK_PRESSURED,
                 configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
@@ -513,7 +513,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512)
                 .offerTimeoutNanos(TimeUnit.MILLISECONDS.toNanos(2)).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> {
                     final AeronReplicationEnvelope.Kind kind =
                             AeronReplicationEnvelope.decode(buffer, offset, length).kind();
@@ -533,8 +533,8 @@ class AeronReplicationWriteCoordinatorTest {
             @Override public void write(final Binary data) { }
             @Override public boolean isWritable() { return true; }
         };
-        final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.create(
-                local, coordinator, ReplicationPublisher.noOp(), committedSequence::set, () -> true);
+        final AeronStorageBinaryReplicationTarget target = WriterTargets.create(
+                local, coordinator, new TypeDictionaryOutbox(), committedSequence::set, () -> true);
         try {
             final ReplicationPendingException pending = assertThrows(ReplicationPendingException.class,
                     () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
@@ -568,7 +568,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512)
                 .offerTimeoutNanos(TimeUnit.MILLISECONDS.toNanos(1)).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> {
                     final AeronReplicationEnvelope.Kind kind =
                             AeronReplicationEnvelope.decode(buffer, offset, length).kind();
@@ -582,7 +582,7 @@ class AeronReplicationWriteCoordinatorTest {
             @Override public boolean isWritable() { return true; }
         };
         final AeronStorageBinaryReplicationTarget target =
-                AeronStorageBinaryReplicationTarget.create(local, coordinator);
+                WriterTargets.create(local, coordinator);
 
         assertThrows(ReplicationPendingException.class,
                 () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
@@ -592,39 +592,23 @@ class AeronReplicationWriteCoordinatorTest {
         assertTrue(publisher.isClosed());
     }
 
-        /// An interrupt landing on the unlock/relock hand-off must restore
+    /// An interrupt landing on the unlock/relock hand-off must restore
     /// write-lock ownership before surfacing the failure: the caller's finally
     /// unlocks unconditionally, so throwing without the hold would mask the
     /// original fault behind an IllegalMonitorStateException.
-        /// Verifies persistence target consumes dictionary from shared distributor.
+    /// Verifies persistence target consumes dictionary from shared distributor.
     @Test
     void persistenceTargetConsumesDictionaryFromSharedDistributor() {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
         final var configuration = AeronReplicationConfiguration.builder().termLength(64 * 1024)
                 .chunkSize(256).maxTransactionBytes(1024).build();
-        final var publisher = AeronReplicationPublisher.forTests((buffer, offset, length) -> {
+        final var publisher = PublisherFixtures.forTests((buffer, offset, length) -> {
             kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
             return length;
         }, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
         final var coordinator = new AeronReplicationWriteCoordinator(publisher);
-        final var source = new ReplicationPublisher() {
-            private String dictionary = "type";
-
-            public void distributeData(final Binary ignored) {
-            }
-
-            public void distributeTypeDictionary(final String ignored) {
-            }
-
-            public String consumeTypeDictionary() {
-                final String value = this.dictionary;
-                this.dictionary = null;
-                return value;
-            }
-
-            public void dispose() {
-            }
-        };
+        final var source = new TypeDictionaryOutbox();
+        source.stageIncremental("type");
         final PersistenceTarget<Binary> local = new PersistenceTarget<>() {
             public void write(final Binary ignored) {
             }
@@ -633,7 +617,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        AeronStorageBinaryReplicationTarget.create(local, coordinator, source, ignored -> {
+        WriterTargets.create(local, coordinator, source, ignored -> {
         }, () -> true)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
         assertEquals(List.of(AeronReplicationEnvelope.Kind.TYPE_DICTIONARY,
@@ -641,36 +625,20 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-        /// A dictionary transferred from a shared source survives local rejection.
+    /// A dictionary transferred from a shared source survives local rejection.
     @Test
     void sharedDictionarySourceIsRetainedAcrossRejectedStoreWrite() {
         final List<AeronReplicationEnvelope.Kind> kinds = new ArrayList<>();
         final var configuration = AeronReplicationConfiguration.builder().termLength(64 * 1024)
                 .chunkSize(256).maxTransactionBytes(1024).build();
-        final var publisher = AeronReplicationPublisher.forTests((buffer, offset, length) ->
+        final var publisher = PublisherFixtures.forTests((buffer, offset, length) ->
         {
             kinds.add(AeronReplicationEnvelope.decode(buffer, offset, length).kind());
             return length;
         }, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
         final var coordinator = new AeronReplicationWriteCoordinator(publisher);
-        final var source = new ReplicationPublisher() {
-            private String dictionary = "type";
-
-            public void distributeData(final Binary ignored) {
-            }
-
-            public void distributeTypeDictionary(final String ignored) {
-            }
-
-            public String consumeTypeDictionary() {
-                final String value = this.dictionary;
-                this.dictionary = null;
-                return value;
-            }
-
-            public void dispose() {
-            }
-        };
+        final var source = new TypeDictionaryOutbox();
+        source.stageIncremental("type");
         final AtomicInteger writes = new AtomicInteger();
         final PersistenceTarget<Binary> local = new PersistenceTarget<>() {
             public void write(final Binary ignored) {
@@ -681,7 +649,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        final var target = AeronStorageBinaryReplicationTarget.create(local, coordinator, source,
+        final var target = WriterTargets.create(local, coordinator, source,
                 ignored -> {
                 }, () -> true);
         final var first = ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}));
@@ -696,7 +664,7 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-        /// All Serializer channels, not only the channel-zero view, are published.
+    /// All Serializer channels, not only the channel-zero view, are published.
     @Test
     void collectsEverySerializerChannelForReplication() {
         final ChunksBuffer[] channels = new ChunksBuffer[4];
@@ -722,13 +690,13 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-        /// Verifies ignored distribution writes locally without offering aeron frames.
+    /// Verifies ignored distribution writes locally without offering aeron frames.
     @Test
     void ignoredDistributionWritesLocallyWithoutOfferingAeronFrames() {
         final AtomicInteger offers = new AtomicInteger();
         final var configuration = AeronReplicationConfiguration.builder().termLength(64 * 1024)
                 .chunkSize(256).maxTransactionBytes(1024).build();
-        final var publisher = AeronReplicationPublisher.forTests((buffer, offset, length) -> {
+        final var publisher = PublisherFixtures.forTests((buffer, offset, length) -> {
             offers.incrementAndGet();
             return length;
         }, configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
@@ -743,7 +711,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        AeronStorageBinaryReplicationTarget.create(local, coordinator, null, ignored -> {
+        WriterTargets.create(local, coordinator, null, ignored -> {
         }, () -> false)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
         assertEquals(1, localWrites.get());
@@ -751,14 +719,14 @@ class AeronReplicationWriteCoordinatorTest {
         coordinator.dispose();
     }
 
-        /// Verifies committed sequence callback does not advance on uncertain commit.
+    /// Verifies committed sequence callback does not advance on uncertain commit.
     @Test
     void committedSequenceCallbackDoesNotAdvanceOnUncertainCommit() {
         final AtomicInteger offers = new AtomicInteger();
         final AtomicLong committed = new AtomicLong(-1);
         final var configuration = AeronReplicationConfiguration.builder().termLength(64 * 1024)
                 .chunkSize(256).maxTransactionBytes(1024).build();
-        final var publisher = AeronReplicationPublisher.forTests(
+        final var publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> offers.incrementAndGet() == 1 ? length : Publication.CLOSED,
                 configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
         final var coordinator = new AeronReplicationWriteCoordinator(publisher);
@@ -770,7 +738,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        assertThrows(ReplicationPendingException.class, () -> AeronStorageBinaryReplicationTarget.create(
+        assertThrows(ReplicationPendingException.class, () -> WriterTargets.create(
                 local, coordinator, null, committed::set, () -> true).write(
                 ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
         assertEquals(-1, committed.get(), "uncertain commit must not advance the local index");
@@ -782,7 +750,7 @@ class AeronReplicationWriteCoordinatorTest {
     void fatalCommitErrorDoesNotWriteAnUncertaintyMarker() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
@@ -790,7 +758,7 @@ class AeronReplicationWriteCoordinatorTest {
         try {
             FaultInjection.runWithHook((name, sequence, path) ->
             {
-                if ("AFTER_COMMIT_OFFER".equals(name)) throw fatal;
+                if (name == FaultInjection.Point.AFTER_COMMIT_OFFER) throw fatal;
             }, () -> {
                 final AssertionError thrown = assertThrows(AssertionError.class,
                         () -> coordinator.distributeData(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
@@ -804,12 +772,12 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-        /// A fenced commit must restore the entry hold count so later writers proceed.
+    /// A fenced commit must restore the entry hold count so later writers proceed.
     @Test
     void fencedCommitReleasesWriteLockForOtherThreads() throws InterruptedException {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .termLength(64 * 1024).chunkSize(256).maxTransactionBytes(1024).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(
@@ -830,8 +798,8 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-        /// Concurrent commit and abort threads plus a fault-injected
-        /// acknowledgement must never leak the coordinator write lock.
+    /// Concurrent commit and abort threads plus a fault-injected
+    /// acknowledgement must never leak the coordinator write lock.
     ///
     /// A leaked hold (for example from an error path that forgets to release)
     /// would deadlock every later writer, so each phase is followed by a
@@ -845,7 +813,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AtomicReference<Throwable> abortFailure = new AtomicReference<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0, position ->
                 {
@@ -914,8 +882,8 @@ class AeronReplicationWriteCoordinatorTest {
         }
     }
 
-        /// While a commit waits for its Archive position, a second Store write
-        /// waits on ownership without holding or spinning on the write lock.
+    /// While a commit waits for its Archive position, a second Store write
+    /// waits on ownership without holding or spinning on the write lock.
     @Test
     void commitWaitsForConcurrentStoreWriteAdmission() throws Exception {
         final CountDownLatch commitWaitEntered = new CountDownLatch(1);
@@ -924,7 +892,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AtomicInteger acknowledgements = new AtomicInteger();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0, position ->
                 {
@@ -993,7 +961,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AtomicReference<Throwable> secondFailure = new AtomicReference<>();
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> {
                     frames.add(AeronReplicationEnvelope.decode(buffer, offset, length));
                     return frames.size();
@@ -1011,15 +979,14 @@ class AeronReplicationWriteCoordinatorTest {
                     return position;
                 });
         final AeronReplicationWriteCoordinator coordinator = new AeronReplicationWriteCoordinator(publisher);
-        final ReplicationPublisher dictionaries =
-                ReplicationPublisher.Caching(ReplicationPublisher.noOp());
+        final TypeDictionaryOutbox dictionaries = new TypeDictionaryOutbox();
         final PersistenceTarget<Binary> local = new PersistenceTarget<>() {
             @Override public void write(final Binary data) { }
             @Override public boolean isWritable() { return true; }
         };
-        final AeronStorageBinaryReplicationTarget target = AeronStorageBinaryReplicationTarget.create(
+        final AeronStorageBinaryReplicationTarget target = WriterTargets.create(
                 local, coordinator, dictionaries, ignored -> { }, () -> true);
-        dictionaries.distributeTypeDictionary("first-type");
+        dictionaries.stageIncremental("first-type");
         final Thread first = Thread.ofVirtual().start(() -> {
             try {
                 target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1, 2, 3})));
@@ -1030,7 +997,7 @@ class AeronReplicationWriteCoordinatorTest {
         Thread second = null;
         try {
             assertTrue(firstCommitWaiting.await(10, TimeUnit.SECONDS));
-            dictionaries.distributeTypeDictionary("second-type");
+            dictionaries.stageIncremental("second-type");
             second = Thread.ofVirtual().start(() -> {
                 try {
                     target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{4, 5, 6})));
@@ -1058,7 +1025,6 @@ class AeronReplicationWriteCoordinatorTest {
             first.join(10_000L);
             if (second != null) second.join(10_000L);
             coordinator.dispose();
-            dictionaries.dispose();
         }
     }
 
@@ -1067,10 +1033,10 @@ class AeronReplicationWriteCoordinatorTest {
     void foreignTokenCannotStealActiveWrite() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
-        final AeronReplicationPublisher firstPublisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher firstPublisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
-        final AeronReplicationPublisher secondPublisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher secondPublisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0);
         final AeronReplicationWriteCoordinator first = new AeronReplicationWriteCoordinator(firstPublisher);
@@ -1100,7 +1066,7 @@ class AeronReplicationWriteCoordinatorTest {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512).build();
         final AtomicInteger acknowledgements = new AtomicInteger();
-        final AeronReplicationPublisher publisher = AeronReplicationPublisher.forTests(
+        final AeronReplicationPublisher publisher = PublisherFixtures.forTests(
                 (buffer, offset, length) -> length, configuration.maxMessageLength(), configuration,
                 UUID.randomUUID(), 1, 0, position -> {
                     if (acknowledgements.incrementAndGet() == 2) {

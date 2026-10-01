@@ -31,7 +31,7 @@ import static org.eclipse.serializer.util.X.notNull;
 public final class RejectingPersistenceTarget implements PersistenceTarget<Binary> {
     private final PersistenceTarget<Binary> delegate;
 
-        /// Creates a rejecting target around a delegate.
+    /// Creates a rejecting target around a delegate.
     ///
     /// @param delegate lifecycle delegate, never `null`
     /// @return rejecting target

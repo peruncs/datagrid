@@ -71,12 +71,10 @@ public final class ReplicationMarkCrashChildMain {
         final EmbeddedStorageManager storage = foundation.start();
         try {
             final CrashRoot root = (CrashRoot) storage.root();
-            final long sequence = mark.sequence + 1L;
+            final long sequence = mark.sequence() + 1L;
             final CrashBatch batch = batch(sequence);
             root.latest = batch;
-            mark.prepareStartPosition = 8_192L;
-            mark.fencingToken = 1L;
-            mark.sequence = sequence;
+            mark.reserve(mark.recordingId(), 1L, sequence, 8_192L);
             final Storer storer = storage.createStorer();
             storer.store(root);
             storer.store(batch);

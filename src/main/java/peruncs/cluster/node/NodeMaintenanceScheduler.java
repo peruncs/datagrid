@@ -28,7 +28,18 @@ import static org.eclipse.serializer.util.X.notNull;
 final class NodeMaintenanceScheduler implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(NodeMaintenanceScheduler.class.getName());
     private final ScheduledThreadPoolExecutor scheduler;
-    private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
+    /* Tasks are a small fixed set; each runs on its own platform thread so a long task never
+     * delays the timer or the other tasks, and idle threads expire. */
+    private final ExecutorService workers = Executors.newCachedThreadPool(new ThreadFactory()
+    {
+        private final AtomicInteger count = new AtomicInteger();
+
+        @Override
+        public Thread newThread(final Runnable task) {
+            return Thread.ofPlatform().daemon()
+                    .name("peruncs-maintenance-%s".formatted(this.count.incrementAndGet())).unstarted(task);
+        }
+    });
     private final AtomicReference<Error> fatalFailure = new AtomicReference<>();
     private final ConcurrentHashMap<String, RuntimeException> degradedFailures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> consecutiveFailures = new ConcurrentHashMap<>();
@@ -44,12 +55,12 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
         this.scheduler = new ScheduledThreadPoolExecutor(1, task ->
                 Thread.ofPlatform()
                         .daemon()
-                        .name("datagrid-housekeeper-%s".formatted(threadCount.incrementAndGet()))
+                        .name("peruncs-housekeeper-%s".formatted(threadCount.incrementAndGet()))
                         .unstarted(task));
         this.scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
 
-        /// Creates a scheduler with one daemon thread and virtual task threads.
+    /// Creates a scheduler with one daemon thread and platform task threads.
     ///
     /// @return a scheduler ready for task submission
     static NodeMaintenanceScheduler create() {
@@ -72,7 +83,7 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
             final int failures = this.consecutiveFailures
                     .computeIfAbsent(scheduled.name(), ignored -> new AtomicInteger())
                     .incrementAndGet();
-            if (failures >= this.operations.maintenanceFailureThreshold()) {
+            if (failures >= scheduled.failureThreshold()) {
                 this.degradedFailures.put(scheduled.name(), failure);
             }
         } catch (final Error failure) {
@@ -85,8 +96,8 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
         }
     }
 
-        /// Returns the fatal maintenance failure, or the first task failure that
-        /// repeated past the degradation threshold, or `null` while healthy.
+    /// Returns the fatal maintenance failure, or the first task failure that
+    /// repeated past the degradation threshold, or `null` while healthy.
     ///
     /// @return failure requiring health degradation, or `null`
     Throwable failure() {
@@ -96,12 +107,26 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
         return null;
     }
 
-        /// Registers one periodic task. Tasks must be scheduled before start.
+    /// Registers one periodic task. Tasks must be scheduled before start.
     ///
     /// @param name     human-readable task name used in log messages
     /// @param task     the work to run
     /// @param interval delay between the end of one run and the start of the next
     synchronized void schedule(final String name, final Runnable task, final Duration interval) {
+        this.schedule(name, task, interval, this.operations.maintenanceFailureThreshold());
+    }
+
+    /// Registers one periodic task that degrades the node after its own number of consecutive failures.
+    ///
+    /// Use a low threshold for work whose silent failure is costly, such as Archive retention.
+    ///
+    /// @param name             human-readable task name used in log messages
+    /// @param task             the work to run
+    /// @param interval         delay between the end of one run and the start of the next
+    /// @param failureThreshold consecutive failures after which the node reports degraded
+    synchronized void schedule(final String name, final Runnable task, final Duration interval,
+                               final int failureThreshold) {
+        if (failureThreshold <= 0) throw new IllegalArgumentException("failureThreshold must be positive");
         if (this.closed || this.closing) {
             throw new IllegalStateException("Node housekeeper is closed");
         }
@@ -126,10 +151,10 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
                     "Housekeeper task '%s' interval must be at least one millisecond".formatted(name));
         }
         LOGGER.log(INFO, "Scheduling housekeeper task '%s' every %s".formatted(name, interval));
-        this.pending.add(new ScheduledTask(name, task, intervalMillis, new AtomicBoolean()));
+        this.pending.add(new ScheduledTask(name, task, intervalMillis, new AtomicBoolean(), failureThreshold));
     }
 
-        /// Starts firing the scheduled tasks. The first run of each task waits one interval.
+    /// Starts firing the scheduled tasks. The first run of each task waits one interval.
     synchronized void start() {
         if (this.closed || this.closing) {
             throw new IllegalStateException("Node housekeeper is closed");
@@ -178,14 +203,21 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
         }
         LOGGER.log(INFO, "Shutting down node housekeeper");
         this.scheduler.shutdownNow();
-        this.workers.shutdownNow();
+        /* Running tasks finish first: an interrupted retention purge would fail the writer closed.
+         * Only a task that outlives most of the close budget is interrupted. */
+        this.workers.shutdown();
         try {
             final long timeoutMillis = this.operations.maintenanceCloseTimeout().toMillis();
             final long deadline = ReplicationRetry.deadlineNanos(TimeUnit.MILLISECONDS.toNanos(timeoutMillis));
             final boolean schedulerStopped = this.scheduler.awaitTermination(
                     timeoutMillis, TimeUnit.MILLISECONDS);
-            final boolean workersStopped = this.workers.awaitTermination(
+            boolean workersStopped = this.workers.awaitTermination(
+                    ReplicationRetry.remainingNanos(deadline) / 5L * 4L, TimeUnit.NANOSECONDS);
+            if (!workersStopped) {
+                this.workers.shutdownNow();
+                workersStopped = this.workers.awaitTermination(
                     ReplicationRetry.remainingNanos(deadline), TimeUnit.NANOSECONDS);
+            }
             if (!schedulerStopped || !workersStopped) {
                 throw new IllegalStateException(
                         "Node housekeeper workers did not stop within %s ms"
@@ -205,6 +237,7 @@ final class NodeMaintenanceScheduler implements AutoCloseable {
         return this.closed && this.scheduler.isTerminated() && this.workers.isTerminated();
     }
 
-    private record ScheduledTask(String name, Runnable task, long intervalMillis, AtomicBoolean running) {
+    private record ScheduledTask(String name, Runnable task, long intervalMillis, AtomicBoolean running,
+                                 int failureThreshold) {
     }
 }

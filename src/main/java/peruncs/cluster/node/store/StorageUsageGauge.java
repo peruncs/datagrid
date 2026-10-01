@@ -2,6 +2,8 @@ package peruncs.cluster.node.store;
 
 import org.eclipse.serializer.afs.types.ADirectory;
 
+import java.io.FileNotFoundException;
+import java.nio.file.NoSuchFileException;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -11,7 +13,9 @@ import static org.eclipse.serializer.util.X.notNull;
 /// Measures the bytes currently used by a storage directory.
 ///
 /// A running Store may remove a file while the directory is being visited.
-/// That file is skipped and the measurement continues.
+/// That file is skipped and the measurement continues. Any other failure
+/// makes the whole measurement unknown (`-1`): an understated total must
+/// never reopen write admission.
 public final class StorageUsageGauge {
     private static final System.Logger LOGGER = System.getLogger(StorageUsageGauge.class.getName());
     /// Refresh cadence for the cached directory measurement.
@@ -42,7 +46,7 @@ public final class StorageUsageGauge {
 
     /// Measures used bytes synchronously, updating the snapshot returned to readers.
     ///
-    /// @return measured bytes
+    /// @return measured bytes, or `-1` when part of the directory could not be measured
     public long measureNow() {
         final long sizeBytes = this.totalSize(this.storageDir);
         this.cachedBytes = sizeBytes;
@@ -60,11 +64,13 @@ public final class StorageUsageGauge {
         /* Overflow is latched, not repeatedly logged: once usage saturates
          * the long space, every file of every refresh would otherwise warn. */
         final boolean[] overflowLogged = { false };
-        this.measureDirectory(dir, total, overflowLogged);
-        return total[0];
+        final boolean[] incomplete = { false };
+        this.measureDirectory(dir, total, overflowLogged, incomplete);
+        return incomplete[0] ? -1L : total[0];
     }
 
-    private void measureDirectory(final ADirectory dir, final long[] total, final boolean[] overflowLogged) {
+    private void measureDirectory(
+            final ADirectory dir, final long[] total, final boolean[] overflowLogged, final boolean[] incomplete) {
         dir.iterateFiles(file -> {
             try {
                 total[0] = Math.addExact(total[0], file.size());
@@ -75,13 +81,31 @@ public final class StorageUsageGauge {
                     LOGGER.log(WARNING, "Storage size overflow while measuring %s".formatted(file));
                 }
             } catch (final RuntimeException failure) {
-                LOGGER.log(DEBUG, "Could not measure storage file %s; it may have been removed".formatted(file), failure);
+                this.noteFailure("file " + file, failure, incomplete);
             }
         });
         try {
-            dir.iterateDirectories(child -> this.measureDirectory(child, total, overflowLogged));
+            dir.iterateDirectories(child -> this.measureDirectory(child, total, overflowLogged, incomplete));
         } catch (final RuntimeException failure) {
-            LOGGER.log(DEBUG, "Could not measure a storage directory; it may have been removed", failure);
+            this.noteFailure("a storage directory", failure, incomplete);
         }
+    }
+
+    private void noteFailure(final String what, final RuntimeException failure, final boolean[] incomplete) {
+        if (disappeared(failure)) {
+            LOGGER.log(DEBUG, "Skipping %s: it was removed while measuring".formatted(what), failure);
+            return;
+        }
+        incomplete[0] = true;
+        LOGGER.log(WARNING, "Could not measure %s; storage usage is unknown".formatted(what), failure);
+    }
+
+    /// Reports whether the failure is a concurrent removal rather than an I/O or permission error.
+    private static boolean disappeared(final Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof NoSuchFileException || cause instanceof FileNotFoundException) return true;
+            if (cause.getCause() == cause) return false;
+        }
+        return false;
     }
 }

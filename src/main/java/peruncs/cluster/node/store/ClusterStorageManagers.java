@@ -24,27 +24,15 @@ public final class ClusterStorageManagers {
 
     /// Creates a write-gated manager for writer nodes.
     ///
-    /// @param <T>                   root type
-    /// @param delegate              started delegate Store manager
-    /// @param storageLimitReached reports whether a writer limit is reached
-    /// @param nodeClose             complete node teardown
-    /// @param graphCoordinator      coordinator shared with replication
-    /// @param replicationMark       mark to include in each write, or `null` for Store-only nodes
-    /// @param prepareReplicationCommit updates the mark before serializer commit
+    /// @param <T>                      root type
+    /// @param delegate                 started delegate Store manager
+    /// @param storageLimitReached      reports whether a writer limit is reached
+    /// @param nodeClose                complete node teardown
+    /// @param graphCoordinator         coordinator shared with replication
+    /// @param replicationMark          mark included in each write, or `null` for Store-only nodes
+    /// @param prepareReplicationCommit updates the mark before the Serializer commit
+    /// @param cancelReplicationCommit  releases the reservation when the commit never reaches the target
     /// @return guarded manager
-    public static <T> ClusterStorageManager<T> guarding(
-            final StorageManager delegate,
-            final BooleanSupplier storageLimitReached,
-            final NodeClose nodeClose,
-            final StorageGraphCoordinator graphCoordinator,
-            final ReplicationMark replicationMark,
-            final Consumer<ReplicationMark> prepareReplicationCommit) {
-        return guarding(delegate, storageLimitReached, nodeClose, graphCoordinator,
-                replicationMark, prepareReplicationCommit, ignored -> {
-                });
-    }
-
-    /// Creates a writer facade whose Store commits own a cancelable replication sequence.
     public static <T> ClusterStorageManager<T> guarding(
             final StorageManager delegate,
             final BooleanSupplier storageLimitReached,
@@ -59,38 +47,14 @@ public final class ClusterStorageManagers {
                 notNull(prepareReplicationCommit), notNull(cancelReplicationCommit));
     }
 
-    /// Creates a Store-only guarded manager.
-    ///
-    /// @param <T> root type
-    /// @param delegate started delegate Store manager
-    /// @param storageLimitReached reports whether a writer limit is reached
-    /// @param nodeClose complete node teardown
-    /// @param graphCoordinator shared graph coordinator
-    /// @return guarded manager
-    public static <T> ClusterStorageManager<T> guarding(
-            final StorageManager delegate,
-            final BooleanSupplier storageLimitReached,
-            final NodeClose nodeClose,
-            final StorageGraphCoordinator graphCoordinator) {
-        return guarding(delegate, storageLimitReached, nodeClose, graphCoordinator, null, ignored -> {
-        });
-    }
-
-    /// Creates a read-only manager for reader and backup-reader nodes.
+    /// Creates a read-only manager for reader and backup-reader nodes, hiding the transport's reserved root.
     ///
     /// @param <T>              root type
     /// @param delegate         started delegate Store manager
     /// @param nodeClose        complete node teardown
     /// @param graphCoordinator coordinator shared with replication
+    /// @param replicationMark  mark to hide from the application roots, or `null`
     /// @return read-only manager
-    public static <T> ClusterStorageManager<T> readOnly(
-            final StorageManager delegate,
-            final NodeClose nodeClose,
-            final StorageGraphCoordinator graphCoordinator) {
-        return readOnly(delegate, nodeClose, graphCoordinator, null);
-    }
-
-    /// Creates a read-only facade that hides the transport's reserved root.
     public static <T> ClusterStorageManager<T> readOnly(
             final StorageManager delegate,
             final NodeClose nodeClose,

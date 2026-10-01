@@ -13,21 +13,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /// with a producer-owned text. If a future Aeron version changes the text or
 /// adds an error code, this test fails and the probe must be updated.
 class AeronArchiveRetentionClassificationTest {
-        /// Verifies the active-recording code defers retention.
+    /// Verifies the active-recording code defers retention.
     @Test
     void activeRecordingCodeDefersRetention() {
         assertTrue(AeronArchiveFailures.replayInProgressDetach(
                 new ArchiveException("active recording", ArchiveException.ACTIVE_RECORDING)));
     }
 
-        /// Verifies the pinned Aeron 1.53 replay-in-progress text defers retention.
+    /// Verifies the pinned Aeron 1.53 replay-in-progress text defers retention.
     @Test
     void replayInProgressTextDefersRetention() {
         assertTrue(AeronArchiveFailures.replayInProgressDetach(
                 new ArchiveException("GENERIC: invalid detach: replay in progress", ArchiveException.GENERIC)));
     }
 
-        /// Verifies unrelated GENERIC failures stay fatal.
+    /// Verifies unrelated GENERIC failures stay fatal.
     @Test
     void unrelatedGenericFailureStaysFatal() {
         assertFalse(AeronArchiveFailures.replayInProgressDetach(

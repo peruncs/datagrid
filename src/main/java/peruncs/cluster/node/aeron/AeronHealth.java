@@ -45,25 +45,49 @@ final class AeronHealth implements ReplicationHealth {
      * flooding the operator. */
     private final Set<String> warnedProbes = ConcurrentHashMap.newKeySet();
 
+    /// Failure and capacity probes shared by every role.
+    ///
+    /// @param closed             the transport is closed
+    /// @param driverFailed       the MediaDriver failed
+    /// @param capacityAvailable  the Archive can take another maximum-size transaction
+    /// @param watermarkFailed    the reader-to-writer watermark channel failed
+    record Signals(BooleanSupplier closed, BooleanSupplier driverFailed, BooleanSupplier capacityAvailable,
+                   BooleanSupplier watermarkFailed) {
+    }
+
+    /// Writer-side probes.
+    ///
+    /// @param ready the installed writer can accept durable writes
+    /// @param role  this node is the writer
+    /// @param state recovery or publication state, or `null` while healthy
+    record WriterProbes(BooleanSupplier ready, BooleanSupplier role, Supplier<ReplicationState> state) {
+    }
+
+    /// Positions and capacity reported in the status.
+    ///
+    /// @param archiveUsableSpace    usable Archive bytes
+    /// @param writerDurablePosition durable writer Archive position
+    /// @param writerDurableSequence durable writer sequence
+    /// @param appliedSequence       last sequence applied by the reader
+    record Positions(LongSupplier archiveUsableSpace, LongSupplier writerDurablePosition,
+                     LongSupplier writerDurableSequence, LongSupplier appliedSequence) {
+    }
+
     AeronHealth(final StorageControllerAdapter storage, final ReplicationApplier client,
-                final BooleanSupplier closed, final BooleanSupplier driverFailed, final BooleanSupplier capacityAvailable,
-                final BooleanSupplier writerReady, final BooleanSupplier writerRole,
-                final Supplier<ReplicationState> writerState, final LongSupplier archiveUsableSpace,
-                final LongSupplier writerDurablePosition, final LongSupplier writerDurableSequence,
-                final LongSupplier appliedSequence, final BooleanSupplier watermarkFailed) {
+                final Signals signals, final WriterProbes writer, final Positions positions) {
         this.storage = Objects.requireNonNull(storage, "storage");
         this.client = client;
-        this.closed = Objects.requireNonNull(closed, "closed");
-        this.driverFailed = Objects.requireNonNull(driverFailed, "driverFailed");
-        this.capacityAvailable = Objects.requireNonNull(capacityAvailable, "capacityAvailable");
-        this.writerReady = Objects.requireNonNull(writerReady, "writerReady");
-        this.writerRole = Objects.requireNonNull(writerRole, "writerRole");
-        this.writerState = Objects.requireNonNull(writerState, "writerState");
-        this.archiveUsableSpace = Objects.requireNonNull(archiveUsableSpace, "archiveUsableSpace");
-        this.writerDurablePosition = Objects.requireNonNull(writerDurablePosition, "writerDurablePosition");
-        this.writerDurableSequence = Objects.requireNonNull(writerDurableSequence, "writerDurableSequence");
-        this.appliedSequence = Objects.requireNonNull(appliedSequence, "appliedSequence");
-        this.watermarkFailed = Objects.requireNonNull(watermarkFailed, "watermarkFailed");
+        this.closed = Objects.requireNonNull(signals.closed(), "closed");
+        this.driverFailed = Objects.requireNonNull(signals.driverFailed(), "driverFailed");
+        this.capacityAvailable = Objects.requireNonNull(signals.capacityAvailable(), "capacityAvailable");
+        this.watermarkFailed = Objects.requireNonNull(signals.watermarkFailed(), "watermarkFailed");
+        this.writerReady = Objects.requireNonNull(writer.ready(), "writerReady");
+        this.writerRole = Objects.requireNonNull(writer.role(), "writerRole");
+        this.writerState = Objects.requireNonNull(writer.state(), "writerState");
+        this.archiveUsableSpace = Objects.requireNonNull(positions.archiveUsableSpace(), "archiveUsableSpace");
+        this.writerDurablePosition = Objects.requireNonNull(positions.writerDurablePosition(), "writerDurablePosition");
+        this.writerDurableSequence = Objects.requireNonNull(positions.writerDurableSequence(), "writerDurableSequence");
+        this.appliedSequence = Objects.requireNonNull(positions.appliedSequence(), "appliedSequence");
     }
 
     /// Reports whether this view belongs to the supplied provider pair.
@@ -146,7 +170,7 @@ final class AeronHealth implements ReplicationHealth {
         }
     }
 
-        /// Logs one probe failure at warning and every later one at debug.
+    /// Logs one probe failure at warning and every later one at debug.
     ///
     /// @param probe probe name used in the message and the once-per-probe set
     /// @param probeFailure failure thrown by a supplier
@@ -187,9 +211,9 @@ final class AeronHealth implements ReplicationHealth {
             return ReplicationState.STARTING;
         }
         if (this.client.failure() instanceof ReseedRequiredException) {
-            /* The reader proved its Store mark unusable or could not
-             * reattach within its reconnect budget; retrying the same mark
-             * would fail again, so report the typed reseed signal. */
+            /* The recording no longer covers the reader's Store mark, so
+             * retrying the same mark would fail again: report the typed
+             * reseed signal. An unreachable Archive is a plain failure. */
             return ReplicationState.RESEED_REQUIRED;
         }
         if (this.client.failure() != null) return ReplicationState.FAILED;
@@ -197,8 +221,8 @@ final class AeronHealth implements ReplicationHealth {
         return this.client.isLive() ? ReplicationState.LIVE : ReplicationState.REPLAYING;
     }
 
-        /// Marks this view inactive so later probes report a stable failure
-        /// without invoking any lifecycle supplier.
+    /// Marks this view inactive so later probes report a stable failure
+    /// without invoking any lifecycle supplier.
     @Override
     public void close() {
         this.active = false;

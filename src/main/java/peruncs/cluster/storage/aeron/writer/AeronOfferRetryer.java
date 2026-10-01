@@ -3,6 +3,7 @@ package peruncs.cluster.storage.aeron.writer;
 import io.aeron.DirectBufferVector;
 import io.aeron.Publication;
 import org.agrona.DirectBuffer;
+import org.agrona.concurrent.UnsafeBuffer;
 import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.storage.ReplicationRetry;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
@@ -38,10 +39,6 @@ final class AeronOfferRetryer {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    boolean supportsVectors() {
-        return this.offerer.supportsVectors();
-    }
-
     /// Offers until Aeron accepts the frame or its deadline expires.
     ///
     /// @throws ReplicationUnavailableException when the thread is interrupted, the
@@ -56,7 +53,6 @@ final class AeronOfferRetryer {
 
     /// Offers a reusable vector message until Aeron accepts it or its deadline expires.
     long offer(final DirectBufferVector[] vectors) {
-        if (!this.offerer.supportsVectors()) throw new UnsupportedOperationException("vector offers are unsupported");
         final int length = DirectBufferVector.validateAndComputeLength(vectors);
         return this.offerLoop(null, vectors, length, this.configuration.offerTimeoutNanos());
     }
@@ -118,14 +114,17 @@ final class AeronOfferRetryer {
     interface Offerer {
         long offer(DirectBuffer buffer, int offset, int length);
 
-        /// Returns whether this offerer supports Aeron's gathering offer.
-        default boolean supportsVectors() {
-            return false;
-        }
-
-        /// Offers one gathered message; implementations opt in with `supportsVectors()`.
+        /// Offers one gathered message. The default flattens the vectors into one buffer for offerers
+        /// that cannot gather; a real publication overrides it and sends the vectors without a copy.
         default long offer(final DirectBufferVector[] vectors) {
-            throw new UnsupportedOperationException("vector offers are unsupported");
+            final int length = DirectBufferVector.validateAndComputeLength(vectors);
+            final UnsafeBuffer flat = new UnsafeBuffer(new byte[length]);
+            int at = 0;
+            for (final DirectBufferVector vector : vectors) {
+                flat.putBytes(at, vector.buffer(), vector.offset(), vector.length());
+                at += vector.length();
+            }
+            return this.offer(flat, 0, length);
         }
 
         /// Returns the publication connectivity observed by the offerer. Test

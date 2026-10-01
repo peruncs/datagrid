@@ -28,6 +28,11 @@ import java.util.zip.CRC32C;
 /// The production Archive reader and the test-only live reader use this same
 /// state machine. That keeps ordering, checksum, and cursor hand-off rules in
 /// one place.
+///
+/// Threading contract: the polling thread owns the transaction being assembled and the delivery
+/// state, and runs every fragment callback. Other threads only read the volatile progress and
+/// failure fields, and `dispose()` may run on any thread; it takes the same monitors the polling
+/// thread takes, which is why the monitors stay.
 final class TransactionAssembler {
     /* ChunksWrapper requires a direct buffer even for an empty binary.  Reuse one
      * immutable zero-capacity view instead of allocating native memory per empty
@@ -136,7 +141,7 @@ final class TransactionAssembler {
         this.resolvedBoundary = new CursorSnapshot(required.initialSequence(), required.initialPosition());
         this.lastAppliedSequence = required.initialSequence();
         this.nextExpectedSequence = required.initialSequence() + 1;
-        /* ScopedValue bindings are not inherited by the virtual-thread poller
+        /* ScopedValue bindings are not inherited by the poller thread
          * (final Scoped Values dropped inheritance), so the hook must be
          * captured here, on the thread that constructs the assembler, while
          * the caller's binding is still dynamically visible. */
@@ -311,7 +316,7 @@ final class TransactionAssembler {
         return false;
     }
 
-        /// Observation hook for crash tests: fires after one data chunk of a
+    /// Observation hook for crash tests: fires after one data chunk of a
     /// multi-chunk transaction has been buffered.
     @FunctionalInterface
     interface ChunkObserver {
@@ -327,12 +332,12 @@ final class TransactionAssembler {
     /// Crash-test hook captured at construction; `null` in production.
     private final ChunkObserver chunkObserver;
 
-        /// Runs an action with the chunk observer bound to its dynamic scope.
+    /// Runs an action with the chunk observer bound to its dynamic scope.
     ///
     /// The binding must surround the reader CONSTRUCTION, not its polling:
     /// scoped values are captured when the [TransactionAssembler] is built on
     /// the caller thread, because final [ScopedValue] bindings are not
-    /// inherited by the reader's virtual-thread poller. Test bridge only;
+    /// inherited by the reader's platform poller thread. Test bridge only;
     /// unbound in production, and the assembler never allocates for the hook
     /// when it is unbound.
     ///
@@ -424,7 +429,7 @@ final class TransactionAssembler {
         this.delivery.prepareCommit(dictionary, direct, completed, envelope, position);
     }
 
-        /// Raises the stale-token floor after a frame is fully accepted.
+    /// Raises the stale-token floor after a frame is fully accepted.
     ///
     /// Data chunks never call this directly; their token is adopted by the
     /// commit that validates the assembled transaction.
@@ -434,28 +439,28 @@ final class TransactionAssembler {
         }
     }
 
-        /// Returns the last sequence resolved by a terminal marker.
+    /// Returns the last sequence resolved by a terminal marker.
     ///
     /// @return last resolved transaction sequence, or the initial value
     long lastResolvedSequence() {
         return this.resolvedBoundary.sequence();
     }
 
-        /// Returns the last sequence materialized by the Store receiver.
+    /// Returns the last sequence materialized by the Store receiver.
     ///
     /// @return last applied transaction sequence, or the initial value
     long lastAppliedSequence() {
         return this.lastAppliedSequence;
     }
 
-        /// Returns the expected cluster identity.
+    /// Returns the expected cluster identity.
     ///
     /// @return cluster identity enforced on every frame
     UUID clusterId() {
         return this.clusterId;
     }
 
-        /// Returns the expected writer epoch.
+    /// Returns the expected writer epoch.
     ///
     /// @return writer epoch enforced on every frame
     long epoch() {
@@ -472,14 +477,14 @@ final class TransactionAssembler {
         this.lastAcceptedFencingToken = fencingToken;
     }
 
-        /// Returns the greatest writer fencing token accepted so far.
+    /// Returns the greatest writer fencing token accepted so far.
     ///
     /// @return greatest accepted fencing token, or the seeded floor
     long fencingToken() {
         return this.lastAcceptedFencingToken;
     }
 
-        /// Returns the Archive position of the last resolved transaction.
+    /// Returns the Archive position of the last resolved transaction.
     ///
     /// @return last resolved Archive position, or the initial value
     long lastResolvedPosition() {
@@ -493,28 +498,28 @@ final class TransactionAssembler {
                 || this.unflushedDeliveryBytes() >= this.configuration.maxTransactionBytes();
     }
 
-        /// Returns an atomic sequence and position snapshot for cursor persistence.
+    /// Returns an atomic sequence and position snapshot for cursor persistence.
     ///
     /// @return consistent cursor snapshot; atomic by construction
     CursorSnapshot cursorSnapshot() {
         return this.resolvedBoundary;
     }
 
-        /// Returns whether chunks are waiting for a terminal marker.
+    /// Returns whether chunks are waiting for a terminal marker.
     ///
     /// @return `true` while an incomplete transaction retains native buffers
     synchronized boolean hasIncompleteTransaction() {
         return this.transaction != null;
     }
 
-        /// Returns the latched terminal failure, or `null` while healthy.
+    /// Returns the latched terminal failure, or `null` while healthy.
     ///
     /// @return terminal failure, or `null`
     RuntimeException failure() {
         return this.failure.get();
     }
 
-        /// Latches the terminal failure without waiting for an in-flight delivery.
+    /// Latches the terminal failure without waiting for an in-flight delivery.
     ///
     /// Aeron invokes this from its client conductor error handler, where a
     /// Store import that holds the delivery monitor for seconds would block the
@@ -529,7 +534,7 @@ final class TransactionAssembler {
         this.failure.compareAndSet(null, exception);
     }
 
-        /// Releases native buffers retained by an incomplete transaction.
+    /// Releases native buffers retained by an incomplete transaction.
     ///
     /// This only acquires the assembler monitor, whose critical section never
     /// covers Store import, so disposal cannot be blocked by a slow receiver.
@@ -738,7 +743,7 @@ final class TransactionAssembler {
         }
     }
 
-        /// Delivers one validated transaction outside the assembler monitor.
+    /// Delivers one validated transaction outside the assembler monitor.
     private final class Delivery {
         private String dictionary;
         private ByteBuffer data;
@@ -854,7 +859,7 @@ final class TransactionAssembler {
         }
     }
 
-        /// One resolved transaction staged onto the delivery barrier.
+    /// One resolved transaction staged onto the delivery barrier.
     ///
     /// Carries everything the flush needs to publish the transaction: sequence
     /// and Archive position for the cursor, the terminal kind, and the commit
@@ -872,7 +877,7 @@ final class TransactionAssembler {
     ) {
     }
 
-        /// Flushes every staged transaction of the current delivery barrier.
+    /// Flushes every staged transaction of the current delivery barrier.
     ///
     /// Called by the polling loop after a full window, an idle poll, or stop.
     /// The blocking materialization wait never runs inside a fragment
@@ -934,7 +939,7 @@ final class TransactionAssembler {
         }
     }
 
-        /// Reports transactions staged but not yet published by a barrier flush.
+    /// Reports transactions staged but not yet published by a barrier flush.
     ///
     /// The cursor callback uses this to persist only the barrier's tail
     /// cursor: intermediate cursors within one barrier are superseded by the

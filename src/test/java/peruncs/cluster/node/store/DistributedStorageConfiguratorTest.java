@@ -6,7 +6,7 @@ import org.eclipse.serializer.persistence.types.PersistenceTypeDictionary;
 import org.eclipse.serializer.persistence.types.PersistenceTypeDictionaryExporter;
 import org.junit.jupiter.api.Test;
 import peruncs.cluster.storage.binary.DistributingTypeDictionaryExporter;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
+import peruncs.cluster.storage.binary.TypeDictionaryOutbox;
 
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
@@ -19,28 +19,28 @@ class DistributedStorageConfiguratorTest {
     /// Verifies a store implementing both target and dictionary-exporter contracts keeps both after decoration.
     @Test
     void preservesTargetAndDictionaryExporterContracts() {
-        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(new NoOpDistributor(), java.util.function.UnaryOperator.identity());
+        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(new TypeDictionaryOutbox(), java.util.function.UnaryOperator.identity());
         final Object decorated = configurator.apply(new BothContracts());
 
         assertInstanceOf(PersistenceTarget.class, decorated);
         assertInstanceOf(PersistenceTypeDictionaryExporter.class, decorated);
     }
 
-        /// Plain subjects that implement neither SPI pass through untouched.
+    /// Plain subjects that implement neither SPI pass through untouched.
     @Test
     void plainObjectsPassThroughUnchanged() {
-        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(new NoOpDistributor(), java.util.function.UnaryOperator.identity());
+        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(new TypeDictionaryOutbox(), java.util.function.UnaryOperator.identity());
         final Object subject = new Object();
 
         assertSame(subject, configurator.apply(subject));
     }
 
-        /// A target-only subject is wrapped by the configured target factory.
+    /// A target-only subject is wrapped by the configured target factory.
     @Test
     void targetOnlySubjectUsesTargetFactory() {
         final List<PersistenceTarget<Binary>> seen = new ArrayList<>();
         final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(
-                new NoOpDistributor(),
+                new TypeDictionaryOutbox(),
                 delegate -> {
                     seen.add(delegate);
                     return delegate;
@@ -51,23 +51,23 @@ class DistributedStorageConfiguratorTest {
         assertEquals(List.of(target), seen);
     }
 
-        /// An exporter-only subject gains the distributing exporter contract.
+    /// An exporter-only subject gains the distributing exporter contract.
     @Test
     void exporterOnlySubjectIsDecorated() {
-        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(new NoOpDistributor(), java.util.function.UnaryOperator.identity());
+        final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(new TypeDictionaryOutbox(), java.util.function.UnaryOperator.identity());
         final PersistenceTypeDictionaryExporter exporter = exporterProxy();
 
         assertInstanceOf(DistributingTypeDictionaryExporter.class, configurator.apply(exporter));
     }
 
-        /// The combined adapter forwards target lifecycle calls to the wrapped
+    /// The combined adapter forwards target lifecycle calls to the wrapped
     /// target, so Store startup and shutdown reach the real target.
     @Test
     void bothContractsForwardTargetLifecycle() {
         final List<String> lifecycle = new ArrayList<>();
         final PersistenceTarget<Binary> target = lifecycleTargetProxy(lifecycle);
         final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(
-                new NoOpDistributor(), delegate -> target);
+                new TypeDictionaryOutbox(), delegate -> target);
 
         final PersistenceTarget<Binary> decorated = configurator.apply(new BothContracts());
         assertNotNull(decorated);
@@ -78,12 +78,12 @@ class DistributedStorageConfiguratorTest {
                 "the combined adapter must forward target lifecycle calls");
     }
 
-        /// The combined adapter forwards writes to the factory target.
+    /// The combined adapter forwards writes to the factory target.
     @Test
     void bothContractsForwardWritesToFactoryTarget() {
         final List<Binary> written = new ArrayList<>();
         final DistributedStorage.Configurator configurator = new DistributedStorage.Configurator(
-                new NoOpDistributor(), delegate -> targetProxy(written));
+                new TypeDictionaryOutbox(), delegate -> targetProxy(written));
 
         final PersistenceTarget<Binary> decorated = configurator.apply(new BothContracts());
         assertNotNull(decorated);
@@ -162,20 +162,6 @@ class DistributedStorageConfiguratorTest {
 
         @Override
         public void exportTypeDictionary(final PersistenceTypeDictionary typeDictionary) {
-        }
-    }
-
-    private static final class NoOpDistributor implements ReplicationPublisher {
-        @Override
-        public void distributeData(final Binary data) {
-        }
-
-        @Override
-        public void distributeTypeDictionary(final String typeDictionaryData) {
-        }
-
-        @Override
-        public void dispose() {
         }
     }
 }

@@ -47,13 +47,13 @@ class ModuleDescriptorConsistencyTest {
         }
     }
 
-        /// The descriptor names this module.
+    /// The descriptor names this module.
     @Test
     void descriptorNamesThisModule() {
         assertEquals("peruncs.cluster", descriptor().name());
     }
 
-        /// Every export maps to a package directory that actually holds classes.
+    /// Every export maps to a package directory that actually holds classes.
     @Test
     void everyExportMapsToAPackageWithClasses() throws Exception {
         final Path classes = classesDirectory();
@@ -69,7 +69,7 @@ class ModuleDescriptorConsistencyTest {
         }
     }
 
-        /// The `requires` set tracks the upstream gigamap-jvector spelling.
+    /// The `requires` set tracks the upstream gigamap-jvector spelling.
     ///
     /// The published gigamap-jvector descriptor misspells its own module name
     /// (`org.eclipes.store.gigamap.jvector`); our `requires` directive must
@@ -88,7 +88,7 @@ class ModuleDescriptorConsistencyTest {
                 "upstream has not published the corrected spelling yet: " + required);
     }
 
-        /// The exported facade exposes the Store and Serializer contracts in
+    /// The exported facade exposes the Store and Serializer contracts in
     /// its signatures, plus the types exposed by the index facade, so only
     /// those public API dependencies flow transitively to consumers.
     @Test
@@ -120,7 +120,7 @@ class ModuleDescriptorConsistencyTest {
         assertEquals(Set.of("peruncs.cluster.api", "peruncs.cluster.errors"), exports);
     }
 
-        /// No public type from a non-exported package of this module may
+    /// No public type from a non-exported package of this module may
     /// appear in the signature of an exported API member.
     ///
     /// Consumers on the module path can only read exported packages; a public
@@ -185,7 +185,7 @@ class ModuleDescriptorConsistencyTest {
                 "exported signatures reference public types of unexported packages: " + violations);
     }
 
-        /// Collects forbidden types referenced by one exported type's public
+    /// Collects forbidden types referenced by one exported type's public
     /// surface: methods (including inherited public ones), constructors,
     /// fields, and public nested types.
     private static Set<String> forbiddenSignatureReferences(final Class<?> exported, final Set<String> forbidden) {

@@ -10,6 +10,7 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
+import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.crashtest.ArchiveArtifactMutator;
@@ -76,8 +77,7 @@ class AeronArchiveReplicationIT {
         long stopPosition;
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(media, archiveContext);
              AeronArchive archive = AeronArchive.connect(client)) {
-            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, liveChannel, 1001, configuration, clusterId, 2, 0, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(archive, liveChannel, 1001, new AeronArchiveReplicationPublisher.PublisherSetup(configuration, clusterId, 2, AeronReplicationEnvelope.defaultWireNonce(clusterId)), 0);
             await(publisher.publication()::isConnected, 10_000);
             publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[70_000])});
             recordingId = awaitRecordingId(publisher);
@@ -148,8 +148,7 @@ class AeronArchiveReplicationIT {
                     .controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
             try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext);
                  AeronArchive archive = AeronArchive.connect(archiveClientContext)) {
-                try (AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                        archive, liveChannel, 1001, configuration, clusterId, 2, 0, AeronReplicationEnvelope.defaultWireNonce(clusterId))) {
+                try (AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(archive, liveChannel, 1001, new AeronArchiveReplicationPublisher.PublisherSetup(configuration, clusterId, 2, AeronReplicationEnvelope.defaultWireNonce(clusterId)), 0)) {
                     await(publisher.publication()::isConnected, 10_000);
                     publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[70_000])});
                     recordingId = awaitRecordingId(publisher);
@@ -182,7 +181,7 @@ class AeronArchiveReplicationIT {
         }
     }
 
-        /// Verifies truncated archive catalog cannot silently create a replacement recording.
+    /// Verifies truncated archive catalog cannot silently create a replacement recording.
     @Test
     void truncatedArchiveCatalogCannotSilentlyCreateAReplacementRecording() throws Exception {
         final ArchiveFixture fixture = createStoppedRecording("datagrid-aeron-catalog-");
@@ -215,7 +214,7 @@ class AeronArchiveReplicationIT {
         }
     }
 
-        /// Verifies truncated recording frame fails archive inspection.
+    /// Verifies truncated recording frame fails archive inspection.
     @Test
     void truncatedRecordingFrameFailsArchiveInspection() throws Exception {
         final ArchiveFixture fixture = createStoppedRecording("datagrid-aeron-tail-");
@@ -253,7 +252,7 @@ class AeronArchiveReplicationIT {
         }
     }
 
-        /// Verifies fragmented data and its terminal marker are inspected across poll boundaries.
+    /// Verifies fragmented data and its terminal marker are inspected across poll boundaries.
     @Test
     void fragmentedTailIsInspectedAcrossPollBoundaries() throws Exception {
         final ArchiveFixture fixture = createStoppedRecording("datagrid-aeron-fragmented-tail-");
@@ -283,7 +282,7 @@ class AeronArchiveReplicationIT {
         }
     }
 
-        /// Verifies replays recorded udp messages and joins live.
+    /// Verifies replays recorded udp messages and joins live.
     @Test
     void replaysRecordedUdpMessagesAndJoinsLive() throws Exception {
         final int controlPort = freePort();
@@ -323,8 +322,7 @@ class AeronArchiveReplicationIT {
 
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext);
              AeronArchive archive = AeronArchive.connect(archiveClientContext)) {
-            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, liveChannel, 1001, configuration, clusterId, 2, 0, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(archive, liveChannel, 1001, new AeronArchiveReplicationPublisher.PublisherSetup(configuration, clusterId, 2, AeronReplicationEnvelope.defaultWireNonce(clusterId)), 0);
             await(publisher.publication()::isConnected, 10_000);
             final byte[] data = new byte[70_000];
             for (int i = 0; i < data.length; i++) {
@@ -340,11 +338,9 @@ class AeronArchiveReplicationIT {
             assertTrue(publisher.publication().position() > 0, "writer publication must progress with zero external readers");
             publisher.close();
             await(() -> archive.getStopPosition(recordingId) >= firstStop, 10_000);
-            assertThrows(IllegalArgumentException.class, () -> AeronArchiveReplicationPublisher.extend(
-                    archive, recordingId, 1002, configuration, clusterId, 2, 1, AeronReplicationEnvelope.defaultWireNonce(clusterId)));
+            assertThrows(IllegalArgumentException.class, () -> AeronArchiveReplicationPublisher.extend(archive, recordingId, 1002, new AeronArchiveReplicationPublisher.PublisherSetup(configuration, clusterId, 2, AeronReplicationEnvelope.defaultWireNonce(clusterId)), 1));
             final byte[] resumedData = new byte[]{8, 6, 7, 5};
-            final AeronArchiveReplicationPublisher resumed = AeronArchiveReplicationPublisher.extend(
-                    archive, recordingId, 1001, configuration, clusterId, 2, 1, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+            final AeronArchiveReplicationPublisher resumed = AeronArchiveReplicationPublisher.extend(archive, recordingId, 1001, new AeronArchiveReplicationPublisher.PublisherSetup(configuration, clusterId, 2, AeronReplicationEnvelope.defaultWireNonce(clusterId)), 1);
             await(resumed.publication()::isConnected, 10_000);
             resumed.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(resumedData)});
             assertEquals(recordingId, awaitRecordingId(resumed));
@@ -444,9 +440,7 @@ class AeronArchiveReplicationIT {
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext);
              AeronArchive archive = AeronArchive.connect(clientContext)) {
             final UUID clusterId = UUID.randomUUID();
-            try (AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, liveChannel, 1001, configuration, clusterId, 1, 0,
-                    AeronReplicationEnvelope.defaultWireNonce(clusterId))) {
+            try (AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(archive, liveChannel, 1001, new AeronArchiveReplicationPublisher.PublisherSetup(configuration, clusterId, 1, AeronReplicationEnvelope.defaultWireNonce(clusterId)), 0)) {
                 await(publisher.publication()::isConnected, 10_000);
                 publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[70_000])});
                 final long recordingId = awaitRecordingId(publisher);
@@ -470,7 +464,7 @@ class AeronArchiveReplicationIT {
         }
     }
 
-        /// A closed Archive must not make the publisher report a successful close while
+    /// A closed Archive must not make the publisher report a successful close while
     /// its recording may still be active. The wrapper is retained so a caller can
     /// retry the Archive stop after reconnecting the control client.
     @Test
@@ -495,8 +489,7 @@ class AeronArchiveReplicationIT {
                 .controlChannel(controlChannel).replicationChannel("aeron:udp?endpoint=localhost:0");
         try (ArchivingMediaDriver driver = ArchivingMediaDriver.launch(mediaContext, archiveContext)) {
             final AeronArchive archive = AeronArchive.connect(archiveClientContext);
-            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                    archive, liveChannel, 1001, configuration, UUID.randomUUID(), 1, 0, AeronReplicationEnvelope.defaultWireNonce(UUID.randomUUID()));
+            final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(archive, liveChannel, 1001, new AeronArchiveReplicationPublisher.PublisherSetup(configuration, UUID.randomUUID(), 1, AeronReplicationEnvelope.defaultWireNonce(UUID.randomUUID())), 0);
             try {
                 await(publisher.publication()::isConnected, 10_000);
                 publisher.publishTransaction(null, new ByteBuffer[]{ByteBuffer.wrap(new byte[]{1, 2, 3})});
@@ -556,8 +549,7 @@ class AeronArchiveReplicationIT {
                 final AeronArchiveReplicationPublisher publisher;
                 final long recordingId;
                 {
-                    publisher = AeronArchiveReplicationPublisher.create(
-                            archiveClient, liveChannel, 1001, configuration, clusterId, 2, 0, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+                    publisher = AeronArchiveReplicationPublisher.create(archiveClient, liveChannel, 1001, new AeronArchiveReplicationPublisher.PublisherSetup(configuration, clusterId, 2, AeronReplicationEnvelope.defaultWireNonce(clusterId)), 0);
                     try {
                         await(publisher.publication()::isConnected, 10_000);
                         for (int i = 0; i < transactions; i++) {
@@ -617,7 +609,7 @@ class AeronArchiveReplicationIT {
     /// reader's reconnect budget fails closed with a typed RESEED_REQUIRED
     /// signal instead of surfacing a raw ArchiveException.
     @Test
-    void archiveGoneBeyondReconnectBudgetLatchesTypedReseedFailure() throws Exception {
+    void archiveGoneBeyondReconnectBudgetLatchesTypedUnavailableFailure() throws Exception {
         final int controlPort = freePort();
         final String directory = Files.createTempDirectory("datagrid-aeron-reseed-").toString();
         final File archiveDirectory = new File(directory, "archive");
@@ -643,8 +635,7 @@ class AeronArchiveReplicationIT {
                          archiveContext(directory, archiveDirectory, controlChannel, true));
                  AeronArchive archiveClient =
                          connectArchive(archiveClientContext.clone().aeron(aeron).ownsAeronClient(false))) {
-                final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(
-                        archiveClient, liveChannel, 1001, configuration, clusterId, 2, 0, AeronReplicationEnvelope.defaultWireNonce(clusterId));
+                final AeronArchiveReplicationPublisher publisher = AeronArchiveReplicationPublisher.create(archiveClient, liveChannel, 1001, new AeronArchiveReplicationPublisher.PublisherSetup(configuration, clusterId, 2, AeronReplicationEnvelope.defaultWireNonce(clusterId)), 0);
                 final long recordingId;
                 try {
                     await(publisher.publication()::isConnected, 10_000);
@@ -675,11 +666,12 @@ class AeronArchiveReplicationIT {
                     await(() -> reader.lastResolvedSequence() >= 2 || reader.failure() != null, 15_000);
                     assertNull(reader.failure());
                     /* The Archive goes away and never returns: the reconnect
-                     * budget must expire into the typed reseed signal. */
+                     * budget must expire into a typed, non-reseed failure: the
+                     * Store mark and recording are intact. */
                     archive.close();
                     await(() -> reader.failure() != null, 15_000);
-                    assertInstanceOf(ReseedRequiredException.class, reader.failure(),
-                            "an unrecoverable Archive loss must surface as RESEED_REQUIRED, not a raw ArchiveException");
+                    assertInstanceOf(ReplicationUnavailableException.class, reader.failure(),
+                            "a lost Archive must surface as a typed unavailable failure, not a raw ArchiveException or a reseed");
                     assertEquals(ReplicationApplier.StopOutcome.FAILED, reader.stopOutcome());
                 } finally {
                     reader.dispose();

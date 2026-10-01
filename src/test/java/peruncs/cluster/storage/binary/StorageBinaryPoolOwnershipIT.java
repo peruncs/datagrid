@@ -20,9 +20,12 @@ import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/// Checks 10,000 real Store updates while the reader retains at most one native buffer.
+/// Checks real Store updates (1,000 by default; see `TRANSACTIONS`) while the reader retains at most one native buffer.
 class StorageBinaryPoolOwnershipIT {
-    private static final int TRANSACTIONS = 10_000;
+    /// Wall time is dominated by two Store fsyncs per transaction (about 25 ms on macOS, measured with JFR:
+    /// the JVM uses a few seconds of CPU in five minutes), so the default is a tenth of the full run.
+    /// Run the full 10,000 with `-Dpool.transactions=10000`.
+    private static final int TRANSACTIONS = Integer.getInteger("pool.transactions", 1_000);
     private static final int MAX_PAYLOAD_BYTES = 1 << 20;
 
     @Test
@@ -43,26 +46,16 @@ class StorageBinaryPoolOwnershipIT {
                             readerFoundation.getConnectionFoundation(), reader, coordinator::write,
                             0L, 2L << 20, 2L << 20, MAX_PAYLOAD_BYTES,
                             60_000L, 30_000L, 5_000L, 4_096, coordinator));
-            final ReplicationPublisher publisher = ReplicationPublisher.Caching(new ReplicationPublisher() {
-                @Override
-                public void distributeData(final Binary data) {
-                    merger.receiveData(data);
-                    merger.awaitApplied();
-                }
-
-                @Override
-                public void distributeTypeDictionary(final String dictionary) {
-                    merger.receiveTypeDictionary(dictionary);
-                }
-
-                @Override
-                public void dispose() {
-                }
+            final TypeDictionaryOutbox outbox = new TypeDictionaryOutbox();
+            final ReplicatingTargetFactory targets = new ReplicatingTargetFactory(outbox, (dictionary, data) -> {
+                if (dictionary != null) merger.receiveTypeDictionary(dictionary);
+                merger.receiveData(data);
+                merger.awaitApplied();
             });
 
             try {
                 final EmbeddedStorageFoundation<?> writerFoundation = foundation(writerPath);
-                DistributedStorage.configureWriting(writerFoundation, publisher, new ReplicatingTargetFactory(publisher));
+                DistributedStorage.configureWriting(writerFoundation, outbox, targets);
                 try (final EmbeddedStorageManager writer = writerFoundation.start()) {
                     final PayloadRecord record = (PayloadRecord) writer.root();
                     final PayloadRecord replicated = (PayloadRecord) reader.root();
@@ -82,11 +75,7 @@ class StorageBinaryPoolOwnershipIT {
                     }
                 }
             } finally {
-                try {
-                    merger.dispose();
-                } finally {
-                    publisher.dispose();
-                }
+                merger.dispose();
             }
         }
     }

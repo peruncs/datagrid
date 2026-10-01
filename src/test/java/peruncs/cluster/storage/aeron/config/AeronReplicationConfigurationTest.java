@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Pins the validation that keeps writer and reader framing compatible.
 class AeronReplicationConfigurationTest {
-        /// Verifies that defaults expose Aeron and Data Grid limits.
+    /// Verifies that defaults expose Aeron and Data Grid limits.
     @Test
     void defaultsExposeAeronAndDataGridLimits() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.defaults();
@@ -18,7 +18,7 @@ class AeronReplicationConfigurationTest {
                 "a replay backlog must drain in a few polls rather than ten fragments at a time");
     }
 
-        /// Verifies the reader fragment limit is configurable and must be positive.
+    /// Verifies the reader fragment limit is configurable and must be positive.
     @Test
     void readerFragmentLimitIsConfigurableAndValidated() {
         final AeronReplicationConfiguration tuned = AeronReplicationConfiguration.builder()
@@ -31,7 +31,7 @@ class AeronReplicationConfigurationTest {
                 .readerFragmentsPerPoll(-1).build());
     }
 
-        /// Verifies the validated record is value-based: equal limits are equal objects.
+    /// Verifies the validated record is value-based: equal limits are equal objects.
     @Test
     void equalLimitsAreEqualRecords() {
         final AeronReplicationConfiguration first = AeronReplicationConfiguration.builder()
@@ -42,7 +42,7 @@ class AeronReplicationConfigurationTest {
         assertEquals(first.hashCode(), second.hashCode());
     }
 
-        /// Verifies rejection of chunk that cannot fit one aeron message.
+    /// Verifies rejection of chunk that cannot fit one aeron message.
     @Test
     void rejectsChunkThatCannotFitOneAeronMessage() {
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
@@ -51,7 +51,7 @@ class AeronReplicationConfigurationTest {
                 .build());
     }
 
-        /// Verifies acceptance of tuned values when the invariant holds.
+    /// Verifies acceptance of tuned values when the invariant holds.
     @Test
     void acceptsTunedValuesWhenTheInvariantHolds() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
@@ -63,7 +63,7 @@ class AeronReplicationConfigurationTest {
         assertEquals(4 * 1024 * 1024, configuration.maxMessageLength());
     }
 
-        /// Verifies that all tunable limits are set through the typed builder.
+    /// Verifies that all tunable limits are set through the typed builder.
     @Test
     void readsAllTunableLimitsFromTheBuilder() {
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
@@ -85,7 +85,7 @@ class AeronReplicationConfigurationTest {
         assertEquals(8000, configuration.recordingStopTimeoutNanos());
     }
 
-        /// Verifies rejection of invalid term mtu chunk and timeout values.
+    /// Verifies rejection of invalid term mtu chunk and timeout values.
     @Test
     void rejectsInvalidTermMtuChunkAndTimeoutValues() {
         assertThrows(IllegalArgumentException.class, () -> AeronReplicationConfiguration.builder()
@@ -110,7 +110,7 @@ class AeronReplicationConfigurationTest {
                 .termLength(1 << 30).chunkSize(20 * 1024 * 1024).maxTransactionBytes(20 * 1024 * 1024).build());
     }
 
-        /// Verifies that the packet-count limit is inclusive and rejects its first overflow.
+    /// Verifies that the packet-count limit is inclusive and rejects its first overflow.
     @Test
     void validatesMaximumPacketCount() {
         assertDoesNotThrow(() -> AeronReplicationConfiguration.builder()
@@ -125,8 +125,8 @@ class AeronReplicationConfigurationTest {
 
         /// Verifies rejection of a null durability mode through the builder.
 
-        /// Verifies a custom retry policy is carried into the built configuration
-        /// and drives the reader idle strategy.
+    /// Verifies a custom retry policy is carried into the built configuration
+    /// and drives the reader idle strategy.
     @Test
     void propagatesCustomRetryPolicy() {
         final AeronRetryPolicy custom = new AeronRetryPolicy(

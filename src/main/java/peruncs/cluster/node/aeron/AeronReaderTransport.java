@@ -94,8 +94,8 @@ final class AeronReaderTransport {
         final long recordingId = settings().topology().recordingId() >= 0
                 ? settings().topology().recordingId() : this.discoverReaderRecordingId();
         validateStartingMark(startingMark, recordingId);
-        final long initialSequence = startingMark.sequence;
-        final long cursorPosition = startingMark.prepareStartPosition;
+        final long initialSequence = startingMark.sequence();
+        final long cursorPosition = startingMark.prepareStartPosition();
         final AtomicReference<AeronArchiveReader> readerRef = new AtomicReference<>();
         final AeronArchiveReader replacement;
         /* Replacement runs through the reader slot, which takes its own
@@ -128,16 +128,21 @@ final class AeronReaderTransport {
                     .transactionResolved(snapshot -> {
                         final AeronArchiveReader current = readerRef.get();
                         if (current != null && current == this.readers.current()) {
-                            this.facade.writerTransport().advanceSequence(snapshot.sequence() + 1);
-                            /* The imported mark is the durable boundary. Publish
-                             * its prepare position so retention cannot remove any
-                             * bytes needed to resume from the same Store image. */
-                            this.publishReaderWatermark(new CursorSnapshot(snapshot.sequence(),
-                                    snapshot.position()), recordingId);
+                            /* The imported Store mark is the durable boundary, and a restart
+                             * resumes replay at its prepare start. Publish exactly that
+                             * position, not the end of the commit frame, so the writer's
+                             * retention never purges the segment a restart still needs. An
+                             * ABORT-only barrier leaves the mark unchanged, so the watermark
+                             * simply repeats. */
+                            final long durableSequence = startingMark.sequence();
+                            if (durableSequence >= 0L) {
+                                this.publishReaderWatermark(new CursorSnapshot(durableSequence,
+                                        startingMark.prepareStartPosition()), recordingId);
+                            }
                         }
                     })
                     .build());
-            created.seedFencingToken(startingMark.fencingToken);
+            created.seedFencingToken(startingMark.fencingToken());
             return created;
         });
         readerRef.set(replacement);
@@ -147,17 +152,17 @@ final class AeronReaderTransport {
         if (initialSequence >= 0) {
             this.publishReaderWatermark(new CursorSnapshot(initialSequence, cursorPosition), recordingId);
         }
-        return new ClientAdapter(replacement, recordingId, settings().topology().clusterId(),
+        return new ClientAdapter(replacement, startingMark, recordingId, settings().topology().clusterId(),
                 settings().topology().identity().nodeId(), settings().topology().identity().storeGeneration(), settings().topology().epoch());
     }
 
     /// Rejects a Store mark that belongs to another replication history.
     private void validateStartingMark(final ReplicationMark mark, final long expectedRecordingId) {
-        if (!Objects.equals(mark.clusterId, settings().topology().clusterId()) ||
-            !Objects.equals(mark.storeGeneration, settings().topology().identity().storeGeneration()) ||
-            mark.epoch != settings().topology().epoch() || mark.recordingId != expectedRecordingId ||
-            mark.sequence < -1L || mark.fencingToken < 0L ||
-            (mark.sequence >= 0L && mark.prepareStartPosition < 0L)) {
+        if (!Objects.equals(mark.clusterId(), settings().topology().clusterId()) ||
+            !Objects.equals(mark.storeGeneration(), settings().topology().identity().storeGeneration()) ||
+            mark.epoch() != settings().topology().epoch() || mark.recordingId() != expectedRecordingId ||
+            mark.sequence() < -1L || mark.fencingToken() < 0L ||
+            (mark.sequence() >= 0L && mark.prepareStartPosition() < 0L)) {
             throw reseedRequired("Store replication mark does not match the configured reader or recording", null);
         }
     }
@@ -279,6 +284,7 @@ final class AeronReaderTransport {
     /// Adds the neutral message-position view to the Aeron client.
     private record ClientAdapter(
             AeronArchiveReader delegate,
+            ReplicationMark mark,
             long recordingId,
             UUID clusterId,
             UUID nodeId,
@@ -293,7 +299,12 @@ final class AeronReaderTransport {
         }
 
         public ReplicationPosition position() {
-            final CursorSnapshot snapshot = this.delegate().cursorSnapshot();
+            /* The boundary a Store image can be restarted from: its mark, not the end of the last
+             * commit frame the assembler resolved. Before the first applied transaction the mark is
+             * empty and the position is reported as unknown (-1), never the assembler's cursor. */
+            final CursorSnapshot snapshot = this.mark().sequence() >= 0L
+                    ? new CursorSnapshot(this.mark().sequence(), this.mark().prepareStartPosition())
+                    : new CursorSnapshot(-1L, -1L);
             return new ReplicationPosition(this.clusterId(), this.storeGeneration(), this.epoch(),
                     this.recordingId(), snapshot.sequence(), snapshot.position(),
                     this.delegate().fencingToken(), this.nodeId());

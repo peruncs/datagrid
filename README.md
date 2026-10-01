@@ -19,7 +19,10 @@ Store's JVector index uses for SIMD acceleration ([configuration guide](https://
 Maven applies these flags to its test and integration-test JVMs.
 
 On the module path, target the export at `org.eclipse.serializer.base`
-instead of `ALL-UNNAMED`.
+instead of `ALL-UNNAMED`, and open the Store's vector package to the cluster module so the
+reader can retire stale JVector graphs:
+`--add-opens org.eclipes.store.gigamap.jvector/org.eclipse.store.gigamap.jvector=peruncs.cluster`
+(the upstream module name really is spelled `eclipes`). A node that cannot do so fails at startup.
 
 ```bash
 mvn test                      # default gate
@@ -150,7 +153,8 @@ network file system. The backup volume is the only path that may be shared.
 | `PERUNCS_STORAGE_PATH` | `storage` | Store and writer lock (`<path>/storage`) | local |
 | `PERUNCS_AERON_DIRECTORY` | `<PERUNCS_STORAGE_PATH>/aeron` | Aeron MediaDriver files (recreated at start) | local; tmpfs such as `/dev/shm` recommended; `/tmp` rejected in production |
 | `PERUNCS_AERON_ARCHIVE_DIRECTORY` | `<aeron dir>.archive` | Aeron Archive recording | local, durable |
-| `PERUNCS_BACKUP_PATH` | `backups` | backup archives | may be a shared network volume |
+| `PERUNCS_BACKUP_PATH` | `backups` | finished backup archives | may be a shared network volume |
+| `PERUNCS_BACKUP_WORKSPACE_PATH` | `<PERUNCS_STORAGE_PATH>/backup-workspace` | uncompressed export and compression of a backup | local; needs room for the Store plus its archive |
 
 - Production paths must be absolute.
 - The driver, Archive, and Store paths must not overlap.
@@ -169,7 +173,7 @@ routable between peers; production mode rejects loopback and wildcard
 endpoints.
 
 - The development live channel is
-  `control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=datagrid-<cluster>`.
+  `control=localhost:40123|control-mode=dynamic|fc=max|term-length=16m|alias=peruncs-<cluster>`.
 - **Several clusters on one network:** give each cluster its own
   `PERUNCS_AERON_CLUSTER_ID`, its own control, replay, and watermark
   endpoints, and its own stream ids.
@@ -186,6 +190,9 @@ value is supplied; paths and channels with derived defaults are described above.
 | `PERUNCS_REPLICATION_ROLE` | `unset` |
 | `PERUNCS_STORAGE_PATH` | `storage` |
 | `PERUNCS_BACKUP_PATH` | `backups` |
+| `PERUNCS_BACKUP_WORKSPACE_PATH` | `unset` |
+| `PERUNCS_BACKUP_MAX_ENTRIES` | `1048576` |
+| `PERUNCS_BACKUP_PUBLICATION_LOCK_TIMEOUT_MILLIS` | `30000` |
 | `PERUNCS_KEPT_BACKUPS_COUNT` | `3` |
 | `PERUNCS_STORAGE_LIMIT_CHECKER_INTERVAL_MINUTES` | `unset` |
 | `PERUNCS_GC_INTERVAL_MINUTES` | `unset` |
@@ -203,8 +210,10 @@ value is supplied; paths and channels with derived defaults are described above.
 | `PERUNCS_BACKUP_RETENTION_RETRY_DELAY_MILLIS` | `100` |
 | `PERUNCS_BACKUP_PUBLICATION_RETRY_ATTEMPTS` | `3` |
 | `PERUNCS_MAINTENANCE_FAILURE_THRESHOLD` | `3` |
+| `PERUNCS_WRITER_RECOVERY_ATTEMPTS` | `3` |
 | `PERUNCS_MAINTENANCE_CLOSE_TIMEOUT_MILLIS` | `5000` |
 | `PERUNCS_STORAGE_CHECK_CLOSE_TIMEOUT_MILLIS` | `5000` |
+| `PERUNCS_INDEX_REFRESH_TIMEOUT_MILLIS` | `600000` |
 | `PERUNCS_INDEX_VALIDATION_MAX_OBJECTS` | `65536` |
 | `PERUNCS_AERON_ARCHIVE_DIRECTORY` | `unset` |
 | `PERUNCS_AERON_DIRECTORY` | `unset` |
@@ -216,6 +225,11 @@ value is supplied; paths and channels with derived defaults are described above.
 | `PERUNCS_AERON_OFFER_TIMEOUT_NANOS` | `30000000000` |
 | `PERUNCS_AERON_RECORDING_START_TIMEOUT_NANOS` | `30000000000` |
 | `PERUNCS_AERON_RECORDED_POSITION_TIMEOUT_NANOS` | `30000000000` |
+| `PERUNCS_AERON_ABORT_RECORDED_POSITION_TIMEOUT_NANOS` | `5000000000` |
+| `PERUNCS_AERON_RETRY_IDLE_MAX_PARK_NANOS` | `1000000` |
+| `PERUNCS_AERON_RETRY_JITTER_CAP_NANOS` | `1000000` |
+| `PERUNCS_AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS` | `10000000` |
+| `PERUNCS_AERON_RETENTION_OPERATION_TIMEOUT_MILLIS` | `60000` |
 | `PERUNCS_AERON_RECORDING_STOP_TIMEOUT_NANOS` | `30000000000` |
 | `PERUNCS_AERON_READER_STOP_TIMEOUT_NANOS` | `30000000000` |
 | `PERUNCS_AERON_RECONNECT_TIMEOUT_NANOS` | `30000000000` |
@@ -265,9 +279,11 @@ A node reporting `RESEED_REQUIRED` needs the same procedure.
   status for backup and post-publication maintenance failures. Operator
   actions:
   - standalone nodes report `ReplicationState.NOT_CONFIGURED`;
-  - `FAILED`: stop serving and inspect;
+  - `FAILED`: stop serving and inspect; a node whose Archive stayed unreachable past
+    the reconnect budget also reports `FAILED` and resumes from the same Store mark
+    after a restart;
   - `DEGRADED`: may serve, but fix the dependency;
-  - `RESEED_REQUIRED`: stop and reseed.
+  - `RESEED_REQUIRED`: stop and reseed (the recording no longer covers the Store mark).
 - `startStorageChecks()`: periodic Store checks (writer and reader).
 - `createBackup(BackupSlot)`: backup-reader only; returns a
   `CompletableFuture<BackupInfo>`. A concurrent request completes the future
@@ -298,7 +314,9 @@ application. A typical mapping:
 - **Behaviour:** the writer checks retention on its maintenance schedule and
   deletes complete Archive segments only after every listed reader has
   confirmed the boundary. Without the list or a complete quorum, history is
-  kept.
+  kept. Each reader reports the position its restart would resume at (the
+  prepare start of the transaction in its Store mark), and the writer keeps the
+  Archive segment that holds the oldest such position.
 - **Capacity procedure:**
   1. Alert when `archiveUsableSpaceBytes` approaches
      `PERUNCS_AERON_MIN_ARCHIVE_FREE_BYTES` (below it, writes are

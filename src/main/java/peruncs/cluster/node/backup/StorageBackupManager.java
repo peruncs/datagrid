@@ -11,6 +11,7 @@ import peruncs.cluster.storage.ReplicationRetry;
 import peruncs.cluster.storage.binary.ReplicationApplier;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
@@ -29,6 +30,10 @@ import static org.eclipse.serializer.util.X.notNull;
 /// that executor rejects a concurrent request with `BUSY` and this manager
 /// itself does not queue or lock, so callers must sequence backup requests
 /// through the task executor.
+///
+/// This is an interface only so the task executor's single-flight, failure and callback behaviour can
+/// be tested against a manager whose backup blocks or fails on demand (`StorageBackupTaskExecutorTest`);
+/// `create` returns the one production implementation.
 public interface StorageBackupManager {
     /// Creates a backup manager.
     ///
@@ -101,7 +106,7 @@ public interface StorageBackupManager {
     /// @throws NodeException if backup creation or publication fails
     BackupInfo createStorageBackup(BackupSlot slot) throws NodeException;
 
-        /// Lists available backups.
+    /// Lists available backups.
     ///
     /// @return backup metadata
     /// @throws NodeException if listing fails
@@ -461,19 +466,10 @@ public interface StorageBackupManager {
         /// interrupt flag is restored so the caller's cancellation policy still
         /// sees it.
         private void awaitNextPoll() throws NodeException {
-            if (Thread.currentThread().isInterrupted()) {
-                throw new NodeException("Interrupted while waiting for the replication reader boundary");
-            }
-            try {
-                Thread.sleep(this.operations.backupStopPollInterval().toMillis());
-            } catch (final InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new NodeException(
-                        "Interrupted while waiting for the replication reader boundary", interrupted);
-            }
+            pause(this.operations.backupStopPollInterval(), "Interrupted while waiting for the replication reader boundary");
         }
 
-                /// Resolves the retention position from the newest backup compatible
+        /// Resolves the retention position from the newest backup compatible
         /// with this node, excluding the backup that was just created.
         ///
         /// Counting from the newest backup overall would hand retention a
@@ -497,7 +493,7 @@ public interface StorageBackupManager {
             return this.backend.retentionBoundary(previous);
         }
 
-                /// Retries a purge that is temporarily blocked by an active Archive replay.
+        /// Retries a purge that is temporarily blocked by an active Archive replay.
         /// Replay ownership is intentionally not interrupted: the retention provider
         /// returns a deferred result, the bounded retry gives a short-lived replay a
         /// chance to finish, and a still-active replay is retained for the next backup
@@ -514,14 +510,14 @@ public interface StorageBackupManager {
         }
 
         private void sleepRetentionRetryDelay() throws NodeException {
-            if (Thread.currentThread().isInterrupted()) {
-                throw new NodeException("Interrupted while waiting to retry replication retention");
-            }
-            try {
-                Thread.sleep(this.operations.backupRetentionRetryDelay().toMillis());
-            } catch (final InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new NodeException("Interrupted while waiting to retry replication retention", interrupted);
+            pause(this.operations.backupRetentionRetryDelay(), "Interrupted while waiting to retry replication retention");
+        }
+
+        /// Waits for a delay and turns an interrupt, before or during the wait, into a domain failure
+        /// while leaving the interrupt flag set for the caller's cancellation policy.
+        private static void pause(final Duration delay, final String interruptedMessage) throws NodeException {
+            if (Thread.currentThread().isInterrupted() || ReplicationRetry.parkInterrupted(delay.toNanos())) {
+                throw new NodeException(interruptedMessage);
             }
         }
     }

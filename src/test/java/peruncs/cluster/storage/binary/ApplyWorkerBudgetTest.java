@@ -24,7 +24,7 @@ class ApplyWorkerBudgetTest {
         return new ApplyWorker(owner, new ApplyQueue(owner, pool, 1L, 1L << 20, 60_000L), pool, New(), watchdog,
                 StorageBinaryDataMergerTestSupport.foundation(),
                 StorageBinaryDataMergerTestSupport.connection(),
-                handler, 0L, 10_000, budgetMs);
+                handler, 0L, 10_000, budgetMs, budgetMs * 10L);
     }
 
     /// Minimal merger lifecycle stub recording latched failures.

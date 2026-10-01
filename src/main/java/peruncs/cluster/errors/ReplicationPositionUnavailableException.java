@@ -1,8 +1,8 @@
-package peruncs.cluster.errors.internal;
-
-import peruncs.cluster.errors.NodeException;
+package peruncs.cluster.errors;
 
 /// Reports that this node cannot establish a durable replication boundary.
+///
+/// Thrown by the node internals; applications normally meet it as a cause.
 public final class ReplicationPositionUnavailableException extends NodeException {
     /// Creates an exception with a message.
     public ReplicationPositionUnavailableException(final String message) {

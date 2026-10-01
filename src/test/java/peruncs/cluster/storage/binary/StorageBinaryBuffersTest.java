@@ -12,8 +12,8 @@ import static org.junit.jupiter.api.Assertions.*;
 /// without mutating the source, and owned extraction returns the original
 /// direct buffers normalized in place.
 class StorageBinaryBuffersTest {
-        /// Borrowed views normalize Serializer's position-as-length representation
-        /// without mutating the source or leaking the intermediate duplicate.
+    /// Borrowed views normalize Serializer's position-as-length representation
+    /// without mutating the source or leaking the intermediate duplicate.
     @Test
     void importArrayNormalizesChunksWrapperBuffers() {
         final ByteBuffer source = XMemory.allocateDirectNative(8);
@@ -30,7 +30,7 @@ class StorageBinaryBuffersTest {
         }
     }
 
-        /// Import views preserve channel order for a multi-buffer binary.
+    /// Import views preserve channel order for a multi-buffer binary.
     @Test
     void importArrayPreservesChannelOrder() {
         final ByteBuffer first = XMemory.allocateDirectNative(8);
@@ -50,7 +50,7 @@ class StorageBinaryBuffersTest {
         }
     }
 
-        /// Owned import returns the original buffers normalized in place.
+    /// Owned import returns the original buffers normalized in place.
     @Test
     void ownedArrayReturnsOriginalsNormalized() {
         final ByteBuffer source = XMemory.allocateDirectNative(8);
@@ -68,7 +68,7 @@ class StorageBinaryBuffersTest {
         }
     }
 
-        /// Owned import preserves channel order with per-buffer logical lengths.
+    /// Owned import preserves channel order with per-buffer logical lengths.
     @Test
     void ownedArrayPreservesChannelOrderWithPerBufferLengths() {
         final ByteBuffer first = XMemory.allocateDirectNative(8);
@@ -91,11 +91,11 @@ class StorageBinaryBuffersTest {
         }
     }
 
-        /// Owned import preserves every channel buffer by identity and leaves
-        /// the sources at position zero afterwards — successors of the
-        /// removed `bufferArray` assertions. The upstream wrapper owns the
-        /// limit representation, so only identity, position, and the logical
-        /// length are pinned.
+    /// Owned import preserves every channel buffer by identity and leaves
+    /// the sources at position zero afterwards — successors of the
+    /// removed `bufferArray` assertions. The upstream wrapper owns the
+    /// limit representation, so only identity, position, and the logical
+    /// length are pinned.
     @Test
     void ownedArrayPreservesAllChannelBuffersByIdentity() {
         final ByteBuffer first = XMemory.allocateDirectNative(8);
@@ -118,8 +118,8 @@ class StorageBinaryBuffersTest {
         }
     }
 
-        /// Normalization is not destructive for the borrowed path: repeated
-        /// imports of the same wrapper produce equivalent, independent views.
+    /// Normalization is not destructive for the borrowed path: repeated
+    /// imports of the same wrapper produce equivalent, independent views.
     @Test
     void importArrayIsRepeatableWithoutSourceMutation() {
         final ByteBuffer source = XMemory.allocateDirectNative(8);
@@ -137,14 +137,14 @@ class StorageBinaryBuffersTest {
         }
     }
 
-        /// Owned import rejects a missing binary instead of failing mid-iteration.
+    /// Owned import rejects a missing binary instead of failing mid-iteration.
     @Test
     void ownedArrayRejectsNullBinary() {
         assertThrows(NullPointerException.class,
                 () -> StorageBinaryBuffers.ownedArray(null));
     }
 
-        /// Borrowed import rejects a missing binary instead of failing mid-iteration.
+    /// Borrowed import rejects a missing binary instead of failing mid-iteration.
     @Test
     void importArrayRejectsNullBinary() {
         assertThrows(NullPointerException.class,

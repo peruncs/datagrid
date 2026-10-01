@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /// Verifies the distributing exporter updates the local delegate before
 /// publishing, so receivers learn type definitions first.
 class DistributingTypeDictionaryExporterTest {
-        /// Local export happens before distribution, with the assembled dictionary.
+    /// Local export happens before distribution, with the assembled dictionary.
     @Test
     void localExportPrecedesDistribution() {
         final List<String> order = new ArrayList<>();
@@ -36,23 +36,13 @@ class DistributingTypeDictionaryExporterTest {
                     if (method.getDeclaringClass() == Object.class) return objectMethodValue(proxy, method, args);
                     return "assembled-dictionary";
                 });
-        final ReplicationPublisher distributor = (ReplicationPublisher) Proxy.newProxyInstance(
-                DistributingTypeDictionaryExporterTest.class.getClassLoader(),
-                new Class<?>[]{ReplicationPublisher.class},
-                (proxy, method, args) -> {
-                    if (method.getDeclaringClass() == Object.class) return objectMethodValue(proxy, method, args);
-                    if (method.getName().equals("distributeTypeDictionary")) {
-                        order.add("distributor");
-                        distributed.set((String) args[0]);
-                    }
-                    return null;
-                });
+        final TypeDictionaryOutbox outbox = new TypeDictionaryOutbox();
 
-        new DistributingTypeDictionaryExporter(delegate, assembler, distributor)
+        new DistributingTypeDictionaryExporter(delegate, assembler, outbox)
                 .exportTypeDictionary(dictionaryProxy());
 
-        assertEquals(List.of("delegate", "distributor"), order);
-        assertEquals("assembled-dictionary", distributed.get());
+        assertEquals(List.of("delegate"), order, "the local exporter runs first");
+        assertEquals("assembled-dictionary", outbox.consume());
     }
 
     private static Object objectMethodValue(

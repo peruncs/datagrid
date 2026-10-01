@@ -12,7 +12,6 @@ import peruncs.cluster.node.store.StorageTaskExecutor;
 import peruncs.cluster.storage.ReplicationPosition;
 import peruncs.cluster.storage.StorageGraphCoordinator;
 import peruncs.cluster.storage.binary.ReplicationApplier;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
 
 import java.lang.reflect.Proxy;
 import java.util.UUID;
@@ -23,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /// creation and never changes, so an unsupported transition is
 /// unrepresentable.
 class StorageNodeManagerRolesTest {
-        /// A fixed-role reader never distributes.
+    /// A fixed-role reader never distributes.
     @Test
     void readerNeverDistributes() {
         final StorageNodeManager manager = manager(NodeRole.READER, true);
@@ -34,8 +33,8 @@ class StorageNodeManagerRolesTest {
         assertFalse(manager.isRunningStorageChecks());
     }
 
-        /// A fixed writer reports itself as the writer and derives its
-        /// health from the distributor instead of a reader health check.
+    /// A fixed writer reports itself as the writer and derives its
+    /// health from the distributor instead of a reader health check.
     @Test
     void writerManagerIsWriter() {
         final StorageNodeManager manager = manager(NodeRole.WRITER, true);
@@ -45,12 +44,11 @@ class StorageNodeManagerRolesTest {
         assertTrue(manager.isHealthy(), "a writer must not depend on a reader health check");
     }
 
-        /// The reader reports its current sequence from the replication client.
+    /// The reader reports its current sequence from the replication client.
     @Test
     void readerReportsClientSequence() {
         final ReplicationApplier client = stub(ReplicationApplier.class);
         final StorageNodeManager manager = StorageNodeManager.create(new StorageNodeManager.Configuration(
-                stub(ReplicationPublisher.class),
                 stub(StorageTaskExecutor.class),
                 client,
                 healthCheck(),
@@ -67,14 +65,13 @@ class StorageNodeManagerRolesTest {
         assertEquals(0L, status.appliedSequence());
     }
 
-        /// A latched graph invalidity surfaces through status: the node is
-        /// neither healthy nor ready until it reloads or reseeds.
+    /// A latched graph invalidity surfaces through status: the node is
+    /// neither healthy nor ready until it reloads or reseeds.
     @Test
     void graphInvalidationMakesTheNodeUnhealthy() {
         final StorageGraphCoordinator coordinator =
                 new StorageGraphCoordinator();
         final StorageNodeManager manager = StorageNodeManager.create(new StorageNodeManager.Configuration(
-                stub(ReplicationPublisher.class),
                 stub(StorageTaskExecutor.class),
                 stub(ReplicationApplier.class),
                 healthCheck(),
@@ -93,7 +90,7 @@ class StorageNodeManagerRolesTest {
         assertFalse(manager.isReady(), "an invalidated graph must fail readiness");
     }
 
-        /// The writer flag reflects the fixed role.
+    /// The writer flag reflects the fixed role.
     @Test
     void writerFlagReflectsFixedRole() {
         final StorageNodeManager reader = manager(NodeRole.READER, true);
@@ -113,7 +110,6 @@ class StorageNodeManagerRolesTest {
 
     private static StorageNodeManager manager(final NodeRole role, final boolean replicationEnabled) {
         return StorageNodeManager.create(new StorageNodeManager.Configuration(
-                stub(ReplicationPublisher.class),
                 stub(StorageTaskExecutor.class),
                 stub(ReplicationApplier.class),
                 healthCheck(),

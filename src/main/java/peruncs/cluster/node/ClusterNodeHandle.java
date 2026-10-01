@@ -82,7 +82,7 @@ final class ClusterNodeHandle<T> implements ClusterNode<T> {
     private StorageNodeControl control() {
         return switch (this.role) {
             case STANDALONE, WRITER, READER -> this.assembly.storageNodeManager();
-            case BACKUP_READER -> this.assembly.backupNodeManager().storage();
+            case BACKUP_READER -> this.assembly.backupNodeManager();
         };
     }
 

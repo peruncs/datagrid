@@ -51,7 +51,7 @@ final class AeronArchiveCapacity {
         return this.available(0L);
     }
 
-        /// Reports whether the Archive can accept one transaction of the given size.
+    /// Reports whether the Archive can accept one transaction of the given size.
     ///
     /// A zero minimum reserve admits unconditionally. Otherwise the required
     /// free space is the configured reserve plus the
@@ -75,14 +75,14 @@ final class AeronArchiveCapacity {
         return this.usableSpace() >= required;
     }
 
-        /// Returns the last known usable Archive bytes.
+    /// Returns the last known usable Archive bytes.
     ///
     /// @return usable bytes, or `-1` when the filesystem probe fails
     long usableSpaceBytes() {
         return this.usableSpace();
     }
 
-        /// Drops the cached filesystem probe without touching policy.
+    /// Drops the cached filesystem probe without touching policy.
     ///
     /// Called when the runtime (re)starts so the first admission check after
     /// startup observes a fresh volume reading instead of a pre-startup value.

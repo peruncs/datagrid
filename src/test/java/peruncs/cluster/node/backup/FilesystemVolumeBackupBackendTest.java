@@ -130,6 +130,46 @@ class FilesystemVolumeBackupBackendTest {
         assertNull(backend.getLastBackup(2));
     }
 
+    /// A backup is exported in the configured node-local workspace and leaves nothing behind there.
+    @Test
+    void exportsInTheConfiguredWorkspaceAndCleansItUp(@TempDir final Path backupVolume, @TempDir final Path workspace)
+            throws Exception {
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(
+                backupConfig(backupVolume, workspace, 1 << 20), peruncs.cluster.api.NodeConfig.Operations.DEFAULT);
+        final BackupMetadata metadata = BackupMetadata.create(11L, false,
+                aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L));
+
+        backend.createBackup(noOpStorageConnection(), metadata);
+
+        assertEquals(1, backend.listBackups().size());
+        try (var left = Files.list(workspace)) {
+            assertEquals(List.of(), left.map(path -> path.getFileName().toString())
+                    .filter(name -> !name.endsWith(".lease")).toList(), "the export workspace must be cleaned up");
+        }
+    }
+
+    /// A Store with more files than a restore accepts fails the backup itself, not a later restore.
+    @Test
+    void aStoreBeyondTheRestorableEntryCountFailsTheBackupWhenItIsTaken(
+            @TempDir final Path backupVolume, @TempDir final Path workspace) {
+        final FilesystemVolumeBackupBackend backend = FilesystemVolumeBackupBackend.create(
+                backupConfig(backupVolume, workspace, 1), peruncs.cluster.api.NodeConfig.Operations.DEFAULT);
+        final BackupMetadata metadata = BackupMetadata.create(11L, false,
+                aeronCursor(CLUSTER_ONE, NODE_ONE, GENERATION_ONE, 5L, 42L, 7L));
+
+        final NodeException failure = assertThrows(NodeException.class,
+                () -> backend.createBackup(noOpStorageConnection(), metadata));
+        assertTrue(failure.getMessage().contains("PERUNCS_BACKUP_MAX_ENTRIES"), failure.getMessage());
+        assertEquals(0, backend.listBackups().size());
+    }
+
+    private static peruncs.cluster.api.NodeConfig.BackupConfig backupConfig(
+            final Path volume, final Path workspace, final int maxEntries) {
+        return new peruncs.cluster.api.NodeConfig.BackupConfig(volume, workspace, 3,
+                java.time.Duration.ofHours(1), java.time.Duration.ofSeconds(5), maxEntries,
+                java.time.Duration.ofSeconds(30));
+    }
+
     /// Verifies restore installs the Store payload while refusing an occupied destination.
     @Test
     void restoresStorage(@TempDir final Path backupVolume, @TempDir final Path root)
@@ -292,7 +332,7 @@ class FilesystemVolumeBackupBackendTest {
         final AtomicReference<Throwable> failure = new AtomicReference<>();
         final Thread publisher = Thread.ofVirtual().start(() ->
                 FaultInjection.runWithHook((point, sequence, path) -> {
-                    if (point.equals("AFTER_EXISTING_PUBLICATION_INSPECTION")) {
+                    if (point == FaultInjection.Point.AFTER_EXISTING_PUBLICATION_INSPECTION) {
                         if (inspections.incrementAndGet() == 1) {
                             inspected.countDown();
                             try {
@@ -684,7 +724,7 @@ class FilesystemVolumeBackupBackendTest {
                 destination.resolve(StorageBackupBackend.STORAGE_ENTRY).resolve("data")));
     }
 
-        /// A zero-byte storage payload does not count as an uploadable Store
+    /// A zero-byte storage payload does not count as an uploadable Store
     /// image: the partial-upload refusal fires before any local storage is
     /// destroyed.
     @Test
@@ -703,7 +743,7 @@ class FilesystemVolumeBackupBackendTest {
                 "must name the empty payload, was: %s".formatted(refusal.getMessage()));
     }
 
-        /// The validation dry run measures the real decompressed content, so an
+    /// The validation dry run measures the real decompressed content, so an
     /// upload whose actual payload exceeds the operator budget is refused —
     /// before the caller replaces local storage — regardless of what the
     /// archive's central directory declares.

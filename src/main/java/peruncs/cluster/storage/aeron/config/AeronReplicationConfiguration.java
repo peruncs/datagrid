@@ -22,6 +22,8 @@ import java.util.Objects;
 /// @param offerTimeoutNanos          bounded wait for publication and Archive progress
 /// @param recordingStartTimeoutNanos bounded wait for an Archive recording to become active
 /// @param recordedPositionTimeoutNanos bounded wait for the Archive to report a recorded position
+/// @param abortRecordedPositionTimeoutNanos bounded wait for the Archive to record an ABORT marker; shorter than
+///                                     the recorded-position wait so a dead Archive is not waited on twice
 /// @param recordingStopTimeoutNanos  bounded wait for an Archive recording to stop
 /// @param readerStopTimeoutNanos     bounded wait for a reader to stop at a resolved boundary
 /// @param reconnectTimeoutNanos      maximum duration of one Archive reconnect incident
@@ -39,6 +41,7 @@ public record AeronReplicationConfiguration(
         long offerTimeoutNanos,
         long recordingStartTimeoutNanos,
         long recordedPositionTimeoutNanos,
+        long abortRecordedPositionTimeoutNanos,
         long recordingStopTimeoutNanos,
         long readerStopTimeoutNanos,
         long reconnectTimeoutNanos,
@@ -47,21 +50,21 @@ public record AeronReplicationConfiguration(
         long readerBarrierIdleFlushNanos,
         AeronRetryPolicy retryPolicy
 ) {
-        /// Default Aeron term length in bytes.
+    /// Default Aeron term length in bytes.
     public static final int DEFAULT_TERM_LENGTH = 16 * 1024 * 1024;
-        /// Default publication MTU in bytes.
+    /// Default publication MTU in bytes.
     public static final int DEFAULT_MTU_LENGTH = 1408;
-        /// Default logical Store-data chunk size in bytes.
+    /// Default logical Store-data chunk size in bytes.
     public static final int DEFAULT_CHUNK_SIZE = 128 * 1024;
-        /// Default largest accepted transaction in bytes.
+    /// Default largest accepted transaction in bytes.
     public static final int DEFAULT_MAX_TRANSACTION_BYTES = 64 * 1024 * 1024;
-        /// Hard upper bound for the largest accepted transaction in bytes.
+    /// Hard upper bound for the largest accepted transaction in bytes.
     public static final int MAX_SUPPORTED_TRANSACTION_BYTES = AeronReplicationEnvelope.MAX_TRANSACTION_PAYLOAD_BYTES;
-        /// Default fragments consumed per reader poll; a replay backlog drains in a few polls instead of thousands.
+    /// Default fragments consumed per reader poll; a replay backlog drains in a few polls instead of thousands.
     public static final int DEFAULT_READER_FRAGMENTS_PER_POLL = 256;
     /// Default number of resolved transactions staged per reader barrier.
     public static final int DEFAULT_READER_BARRIER_MAX_TRANSACTIONS = 64;
-        /// Default barrier idle-flush delay in nanoseconds.
+    /// Default barrier idle-flush delay in nanoseconds.
     ///
     /// A staged but unflushed barrier publishes its progress once polling has
     /// been idle this long: live-tail transactions gain at most this much
@@ -72,11 +75,12 @@ public record AeronReplicationConfiguration(
     private static final long DEFAULT_OFFER_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDING_START_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS = 30_000_000_000L;
+    private static final long DEFAULT_ABORT_RECORDED_POSITION_TIMEOUT_NANOS = 5_000_000_000L;
     private static final long DEFAULT_RECORDING_STOP_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_READER_STOP_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long DEFAULT_RECONNECT_TIMEOUT_NANOS = 30_000_000_000L;
 
-        /// Validates every framing, timeout, and delivery limit.
+    /// Validates every framing, timeout, and delivery limit.
     ///
     /// @throws IllegalArgumentException when the limits cannot describe a valid
     ///                                  Aeron envelope
@@ -105,7 +109,8 @@ public record AeronReplicationConfiguration(
                     "maxTransactionBytes requires more than %s packets".formatted(AeronReplicationEnvelope.MAX_PACKET_COUNT));
         }
         if (offerTimeoutNanos <= 0 || recordingStartTimeoutNanos <= 0 ||
-            recordedPositionTimeoutNanos <= 0 || recordingStopTimeoutNanos <= 0 ||
+            recordedPositionTimeoutNanos <= 0 || abortRecordedPositionTimeoutNanos <= 0 ||
+            recordingStopTimeoutNanos <= 0 ||
             readerStopTimeoutNanos <= 0 || reconnectTimeoutNanos <= 0) {
             throw new IllegalArgumentException("all Aeron timeouts must be positive");
         }
@@ -125,14 +130,14 @@ public record AeronReplicationConfiguration(
         }
     }
 
-        /// Returns the validated default configuration.
+    /// Returns the validated default configuration.
     ///
     /// @return default configuration
     public static AeronReplicationConfiguration defaults() {
         return builder().build();
     }
 
-        /// Starts a builder with the documented defaults.
+    /// Starts a builder with the documented defaults.
     ///
     /// @return new configuration builder
     public static Builder builder() {
@@ -143,7 +148,7 @@ public record AeronReplicationConfiguration(
         return Math.min(FrameDescriptor.computeMaxMessageLength(termLength), 16 * 1024 * 1024);
     }
 
-        /// Returns the largest envelope message that this publication may offer.
+    /// Returns the largest envelope message that this publication may offer.
     /// Aeron fragments that message according to the MTU; the logical chunk must
     /// still fit within this publication limit.
     ///
@@ -152,7 +157,7 @@ public record AeronReplicationConfiguration(
         return maxMessageLengthForTermLength(this.termLength);
     }
 
-        /// Builds an immutable Aeron replication configuration with the
+    /// Builds an immutable Aeron replication configuration with the
     /// documented defaults, then applies only the setter values.
     public static final class Builder {
         private int termLength = DEFAULT_TERM_LENGTH;
@@ -162,6 +167,7 @@ public record AeronReplicationConfiguration(
         private long offerTimeoutNanos = DEFAULT_OFFER_TIMEOUT_NANOS;
         private long recordingStartTimeoutNanos = DEFAULT_RECORDING_START_TIMEOUT_NANOS;
         private long recordedPositionTimeoutNanos = DEFAULT_RECORDED_POSITION_TIMEOUT_NANOS;
+        private long abortRecordedPositionTimeoutNanos = DEFAULT_ABORT_RECORDED_POSITION_TIMEOUT_NANOS;
         private long recordingStopTimeoutNanos = DEFAULT_RECORDING_STOP_TIMEOUT_NANOS;
         private long readerStopTimeoutNanos = DEFAULT_READER_STOP_TIMEOUT_NANOS;
         private long reconnectTimeoutNanos = DEFAULT_RECONNECT_TIMEOUT_NANOS;
@@ -170,11 +176,11 @@ public record AeronReplicationConfiguration(
         private long readerBarrierIdleFlushNanos = DEFAULT_READER_BARRIER_IDLE_FLUSH_NANOS;
             private AeronRetryPolicy retryPolicy = AeronRetryPolicy.defaults();
 
-                /// Creates a builder initialized with the documented defaults.
+        /// Creates a builder initialized with the documented defaults.
         public Builder() {
         }
 
-                /// Sets the term length; it must be a power of two of at least 64 KiB.
+        /// Sets the term length; it must be a power of two of at least 64 KiB.
         ///
         /// @param value term length in bytes
         /// @return this builder
@@ -183,7 +189,7 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the aligned network MTU used by the publication.
+        /// Sets the aligned network MTU used by the publication.
         ///
         /// @param value MTU in bytes
         /// @return this builder
@@ -192,7 +198,7 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the logical data chunk size.
+        /// Sets the logical data chunk size.
         ///
         /// @param value chunk size in bytes
         /// @return this builder
@@ -201,7 +207,7 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the largest complete Store transaction accepted.
+        /// Sets the largest complete Store transaction accepted.
         ///
         /// @param value maximum transaction size in bytes
         /// @return this builder
@@ -210,7 +216,7 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the maximum wait for publication or Archive progress.
+        /// Sets the maximum wait for publication or Archive progress.
         ///
         /// @param value wait in nanoseconds
         /// @return this builder
@@ -219,7 +225,7 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the maximum wait for an Archive recording to become active.
+        /// Sets the maximum wait for an Archive recording to become active.
         ///
         /// @param value wait in nanoseconds
         /// @return this builder
@@ -228,7 +234,7 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the maximum wait for the Archive to report a recorded position.
+        /// Sets the maximum wait for the Archive to report a recorded position.
         ///
         /// @param value wait in nanoseconds
         /// @return this builder
@@ -237,7 +243,16 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the maximum wait for an Archive recording to stop.
+        /// Sets the maximum wait for the Archive to record an ABORT marker.
+        ///
+        /// @param value wait in nanoseconds
+        /// @return this builder
+        public Builder abortRecordedPositionTimeoutNanos(final long value) {
+            this.abortRecordedPositionTimeoutNanos = value;
+            return this;
+        }
+
+        /// Sets the maximum wait for an Archive recording to stop.
         ///
         /// @param value wait in nanoseconds
         /// @return this builder
@@ -246,7 +261,7 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the maximum wait for a reader to stop at a resolved boundary.
+        /// Sets the maximum wait for a reader to stop at a resolved boundary.
         ///
         /// @param value wait in nanoseconds
         /// @return this builder
@@ -264,7 +279,7 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the fragments a reader consumes per poll call.
+        /// Sets the fragments a reader consumes per poll call.
         ///
         /// A larger value drains a replay backlog in fewer polls; the default
         /// of [#DEFAULT_READER_FRAGMENTS_PER_POLL] balances replay throughput
@@ -290,7 +305,7 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets how long a partially staged delivery barrier may survive idle polls.
+        /// Sets how long a partially staged delivery barrier may survive idle polls.
         ///
         /// The poller flushes a staged barrier when the window is full, when it
         /// stops, or when polling has been idle this long; at the live tail a
@@ -305,7 +320,7 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Sets the idle pacing and probe spacing for bounded retry loops.
+        /// Sets the idle pacing and probe spacing for bounded retry loops.
         ///
         /// @param value retry policy
         /// @return this builder
@@ -314,7 +329,7 @@ public record AeronReplicationConfiguration(
             return this;
         }
 
-                /// Validates and creates the immutable configuration.
+        /// Validates and creates the immutable configuration.
         ///
         /// @return validated configuration
         /// @throws IllegalArgumentException if the limits cannot describe a valid
@@ -328,6 +343,7 @@ public record AeronReplicationConfiguration(
                     this.offerTimeoutNanos,
                     this.recordingStartTimeoutNanos,
                     this.recordedPositionTimeoutNanos,
+                    this.abortRecordedPositionTimeoutNanos,
                     this.recordingStopTimeoutNanos,
                     this.readerStopTimeoutNanos,
                     this.reconnectTimeoutNanos,

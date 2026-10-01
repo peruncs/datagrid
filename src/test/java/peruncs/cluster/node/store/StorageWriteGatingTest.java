@@ -31,7 +31,7 @@ class StorageWriteGatingTest {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final AtomicBoolean limitReached = new AtomicBoolean(true);
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.guarding(delegate, limitReached::get, newNodeClose(), new StorageGraphCoordinator());
+                    TestManagers.guarding(delegate, limitReached::get, newNodeClose(), new StorageGraphCoordinator());
 
             assertThrows(StorageLimitReachedException.class, () -> manager.store(new Payload("a")));
             assertThrows(StorageLimitReachedException.class, () -> manager.storeAll(new Payload("b")));
@@ -47,7 +47,7 @@ class StorageWriteGatingTest {
     @Test
     void writerObjectRegistryKeepsEclipseStoreBehavior(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
-            final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+            final ClusterStorageManager<Object> manager = TestManagers.guarding(
                     delegate, () -> false, newNodeClose(),
                     new StorageGraphCoordinator());
 
@@ -61,7 +61,7 @@ class StorageWriteGatingTest {
     void everyFluentStorerPathIsGatedWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.guarding(delegate, () -> true, newNodeClose(), new StorageGraphCoordinator());
+                    TestManagers.guarding(delegate, () -> true, newNodeClose(), new StorageGraphCoordinator());
 
             assertThrows(StorageLimitReachedException.class, () -> {
                 final var storer = manager.createStorer().reinitialize();
@@ -109,7 +109,7 @@ class StorageWriteGatingTest {
             delegate.storeRoot();
             final long storedRootId = delegate.persistenceManager().lookupObjectId(storedRoot);
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.readOnly(delegate, newNodeClose(), new StorageGraphCoordinator());
+                    TestManagers.readOnly(delegate, newNodeClose(), new StorageGraphCoordinator());
 
             assertThrows(ReaderWriteRejectedException.class, () -> manager.store(new Payload("a")));
             assertThrows(ReaderWriteRejectedException.class, () -> manager.storeAll(new Payload("c")));
@@ -177,7 +177,7 @@ class StorageWriteGatingTest {
             delegate.setRoot(org.eclipse.serializer.reference.Lazy.Reference(new Payload("root")));
             delegate.storeRoot();
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.guarding(
+                    TestManagers.guarding(
                             delegate, () -> false, newNodeClose(),
                             new StorageGraphCoordinator());
             final org.eclipse.store.storage.types.Database database = manager.database();
@@ -199,7 +199,7 @@ class StorageWriteGatingTest {
     void maintenanceAndRegistrationWorkWhenLimitReached(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.guarding(delegate, () -> true, newNodeClose(), new StorageGraphCoordinator());
+                    TestManagers.guarding(delegate, () -> true, newNodeClose(), new StorageGraphCoordinator());
 
             assertThrows(UnsupportedOperationException.class, () -> manager.importData(X.Enum()));
             assertDoesNotThrow(() -> manager.persistenceManager().ensureObjectId(new Payload("c")));
@@ -213,7 +213,7 @@ class StorageWriteGatingTest {
     void writerRetainsObjectRegistryAccess(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.guarding(
+                    TestManagers.guarding(
                             delegate, () -> false, newNodeClose(),
                             new StorageGraphCoordinator());
 
@@ -226,7 +226,7 @@ class StorageWriteGatingTest {
     void persistenceManagerViewDoesNotOwnTheStore(@TempDir final Path dir) {
         try (EmbeddedStorageManager delegate = start(dir)) {
             final ClusterStorageManager<Object> manager =
-                    ClusterStorageManagers.guarding(delegate, () -> false, newNodeClose(), new StorageGraphCoordinator());
+                    TestManagers.guarding(delegate, () -> false, newNodeClose(), new StorageGraphCoordinator());
 
             manager.persistenceManager().close();
             /* The borrowed target view is non-owning one level down as well:

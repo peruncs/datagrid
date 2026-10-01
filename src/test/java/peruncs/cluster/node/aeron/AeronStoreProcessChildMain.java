@@ -6,7 +6,6 @@ import org.eclipse.store.storage.embedded.types.EmbeddedStorageManager;
 import org.eclipse.store.storage.types.StorageConnection;
 import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.node.replication.ClusterReplicationTransport;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
 import peruncs.cluster.storage.aeron.crashtest.RecordingInspector;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.io.FaultInjection;
@@ -56,12 +55,12 @@ public final class AeronStoreProcessChildMain {
              * quite correctly reports that type only once. */
             FaultInjection.callWithHook((name, sequence, path) ->
             {
-                if ("AFTER_DICTIONARY_CHUNKS".equals(name)) dictionaryChunks.incrementAndGet();
+                if (name == FaultInjection.Point.AFTER_DICTIONARY_CHUNKS) dictionaryChunks.incrementAndGet();
             }, () -> {
-                final ReplicationPublisher distributor = transport.distributor();
+                final Distribution distributor = new Distribution();
                 final Function<Supplier<StorageConnection>, UnaryOperator<PersistenceTarget<Binary>>>
                         targetFactory = storage -> delegate ->
-                        transport.persistenceTargetFactory( distributor, storage).apply(new PersistenceTarget<>() {
+                        transport.persistenceTargetFactory(distributor.outbox, distributor.enabled(), storage).apply(new PersistenceTarget<>() {
                             @Override
                             public void write(final Binary data) {
                                 final int[] channels = {0};
@@ -120,14 +119,14 @@ public final class AeronStoreProcessChildMain {
                                 if (!refused) throw new AssertionError("retry after fail-closed publisher was accepted");
                             }
                         } else if (mode.startsWith("crash-")) {
-                            final long beforeSequence = transport.replicationMark().sequence;
+                            final long beforeSequence = transport.replicationMark().sequence();
                             final String crashCase = mode;
                             final String crashPoint = mode.equals("crash-before-local-write")
                                     ? "AFTER_PREPARE_BEFORE_LOCAL_WRITE" : "AFTER_LOCAL_WRITE_BEFORE_COMMIT";
                             value.objects.add(new StoreType(crashCase));
                             FaultInjection.callWithHook((point, sequence, path) ->
                             {
-                                if (!crashPoint.equals(point)) return;
+                                if (!crashPoint.equals(point.name())) return;
                                 try {
                                     Files.writeString(root.resolve("control").resolve("crash-hook"),
                                             "%s;%s;%s".formatted(beforeSequence, sequence, crashPoint));
@@ -158,10 +157,10 @@ public final class AeronStoreProcessChildMain {
                             final AeronTransport aeron = (AeronTransport) transport;
                             final var config = properties(root, clusterId, nodeId, generation, replayControlPort);
                             final var archive = aeron.runtimeOwner().archive();
-                            final long stopPosition = archive.getRecordingPosition(transport.replicationMark().recordingId);
+                            final long stopPosition = archive.getRecordingPosition(transport.replicationMark().recordingId());
                             final var evidence = RecordingInspector.inspect(
                                     archive,
-                                    transport.replicationMark().recordingId,
+                                    transport.replicationMark().recordingId(),
                                     config.aeron().channels().replay(),
                                     config.aeron().streamId(),
                                     clusterId,
@@ -236,7 +235,7 @@ public final class AeronStoreProcessChildMain {
         }
     }
 
-        /// Entity introduced only by the rejection/retry phase of the process fixture.
+    /// Entity introduced only by the rejection/retry phase of the process fixture.
     public static final class RetryType {
         /// Fixed retry marker payload.
         public final String value;

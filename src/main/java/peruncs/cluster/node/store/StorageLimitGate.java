@@ -47,7 +47,7 @@ public final class StorageLimitGate {
         return create(limitBytes, DEFAULT_RELEASE_PERMILLE);
     }
 
-        /// Creates a gate with an explicit release hysteresis.
+    /// Creates a gate with an explicit release hysteresis.
     ///
     /// @param limitBytes     the limit in bytes
     /// @param releasePermille hysteresis below the limit, in tenths of a
@@ -60,11 +60,14 @@ public final class StorageLimitGate {
         return new StorageLimitGate(limitBytes, releasePermille);
     }
 
-        /// Records one storage measurement.
+    /// Records one storage measurement.
     ///
     /// @param usedBytes measured used bytes
     public void updateUsage(final long usedBytes) {
-        if (usedBytes < 0L) return;
+        if (usedBytes < 0L) {
+            this.markUnknown();
+            return;
+        }
         this.unknownWarningLogged.set(false);
         int current;
         int updated;
@@ -79,7 +82,14 @@ public final class StorageLimitGate {
         } while (!this.state.compareAndSet(current, updated));
     }
 
-        /// Reports whether a measurement has reached the configured limit.
+    /// Marks the usage as unknown, so writes are refused until a measurement succeeds.
+    ///
+    /// An already reached limit stays reached.
+    public void markUnknown() {
+        this.state.updateAndGet(current -> current & ~MEASUREMENT_KNOWN);
+    }
+
+    /// Reports whether a measurement has reached the configured limit.
     ///
     /// @return `true` after a measurement reaches the limit
     public boolean limitReached() {
@@ -87,21 +97,21 @@ public final class StorageLimitGate {
         return (current & MEASUREMENT_KNOWN) == 0 || (current & LIMIT_REACHED) != 0;
     }
 
-        /// Returns the limit in decimal gigabytes.
+    /// Returns the limit in decimal gigabytes.
     ///
     /// @return limit in gigabytes
     public long limitGb() {
         return this.limitBytes / BYTES_PER_GIGABYTE;
     }
 
-        /// Returns the limit in bytes.
+    /// Returns the limit in bytes.
     ///
     /// @return limit in bytes
     public long limitBytes() {
         return this.limitBytes;
     }
 
-        /// Creates the periodic storage-limit check task.
+    /// Creates the periodic storage-limit check task.
     ///
     /// The task measures used disk space and records it in this gate, which
     /// request threads read to decide whether writes are still accepted.
@@ -118,10 +128,13 @@ public final class StorageLimitGate {
             final long nowMillis = System.currentTimeMillis();
             final long usedBytes = diskSpaceReader.getAsLong();
             if (usedBytes < 0L) {
+                this.markUnknown();
                 if (this.unknownWarningLogged.compareAndSet(false, true)) {
                     LOGGER.log(WARNING, "Storage usage is unknown; writes are disabled until a measurement succeeds");
                 }
-                return;
+                /* Surface the failure to the maintenance scheduler so repeated
+                 * unknown measurements degrade the node instead of staying silent. */
+                throw new IllegalStateException("storage usage is unknown");
             }
             final long usedGb = usedBytes / BYTES_PER_GIGABYTE;
             if (LOGGER.isLoggable(DEBUG)) {

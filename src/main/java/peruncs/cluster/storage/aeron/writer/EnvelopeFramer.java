@@ -3,7 +3,6 @@ package peruncs.cluster.storage.aeron.writer;
 import io.aeron.DirectBufferVector;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
-import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 import peruncs.cluster.storage.io.FaultInjection;
 
@@ -16,10 +15,9 @@ import java.util.zip.CRC32C;
 
 /// Encodes one transaction's frames in the publisher's reusable frame buffer.
 ///
-/// Full chunks use Aeron's gathering offer; smaller payloads reuse the staging area.
+/// Store data is offered with Aeron's gathering offer: a header from the reusable buffer plus vectors
+/// that point straight into the caller's buffers, so payload bytes are never copied for framing.
 final class EnvelopeFramer implements AutoCloseable {
-    /* P1-6 JMH: four-buffer crossover is the default 128 KiB chunk size. */
-    private static final int MIN_GATHER_PAYLOAD_BYTES = AeronReplicationConfiguration.DEFAULT_CHUNK_SIZE;
     private static final LazyConstant<UnsafeBuffer> EMPTY_BUFFER = LazyConstant.of(UnsafeBuffer::new);
 
     /// Publisher-wide framing values and reusable vector scratch.
@@ -91,8 +89,7 @@ final class EnvelopeFramer implements AutoCloseable {
     private final UnsafeBuffer buffer;
     private final GatherScratch gatherScratch;
     private long lastOfferPosition;
-    private final AeronReplicationEnvelope.ChecksumContext checksum =
-            new AeronReplicationEnvelope.ChecksumContext();
+    private final AeronReplicationEnvelope.HeaderEncoder header = new AeronReplicationEnvelope.HeaderEncoder();
     private final CRC32C dataCrc = new CRC32C();
     private final CRC32C chunkCrc = new CRC32C();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -112,6 +109,7 @@ final class EnvelopeFramer implements AutoCloseable {
         this.storage = configuration.storage();
         this.buffer = new UnsafeBuffer(this.storage);
         this.gatherScratch = configuration.gatherScratch();
+        this.header.identity(this.clusterId, this.epoch, this.fencingToken, this.wireNonce).sequence(sequence);
     }
 
     /// Encodes the type dictionary into one frame per chunk and offers each.
@@ -132,57 +130,16 @@ final class EnvelopeFramer implements AutoCloseable {
     /// frame per chunk, offers each frame, and returns the CRC32C of the
     /// complete logical Store binary.
     ///
-    /// The coordinator uses the returned CRC in the commit marker. The earlier
-    /// fence CRC remains a separate pass because it is the recovery evidence
-    /// written before local Store acceptance.
+    /// The coordinator uses the returned CRC in the COMMIT marker; restart
+    /// recovery and the readers verify the reassembled transaction against it.
     int offerDataChunks(final ByteBuffer[] sources, final int sourceCount, final int length) {
         if (this.closed.get()) throw new IllegalStateException("Aeron envelope framer is closed");
-        if (length >= MIN_GATHER_PAYLOAD_BYTES && this.offerer.supportsVectors()) {
-            return this.offerGatheredDataChunks(sources, sourceCount, length);
-        }
-        final CRC32C crc = this.dataCrc;
-        crc.reset();
         if (length == 0) {
             this.offerEncoded(AeronReplicationEnvelope.Kind.STORE_BINARY,
                     0, 0, 1, 0, 0, EMPTY_BUFFER.get(), 0, 0);
             return 0;
         }
-
-        final int count = chunkCount(length, this.chunkSize);
-        int sourceIndex = 0;
-        ByteBuffer source = sources[sourceIndex];
-        int sourcePosition = source.position();
-        int logicalOffset = 0;
-        for (int chunkIndex = 0; chunkIndex < count; chunkIndex++) {
-            final int chunkLength = Math.min(this.chunkSize, length - logicalOffset);
-            this.chunkCrc.reset();
-            int copied = 0;
-            while (copied < chunkLength) {
-                while (sourcePosition >= source.limit()) {
-                    if (++sourceIndex >= sourceCount) throw new IllegalArgumentException("data buffer length changed");
-                    source = sources[sourceIndex];
-                    sourcePosition = source.position();
-                }
-                /* CRC and envelope fill read the source segment directly:
-                 * no heap staging copy between the caller buffers and the
-                 * off-heap envelope. */
-                final int amount = Math.min(source.limit() - sourcePosition, chunkLength - copied);
-                updateCrc(crc, source, sourcePosition, amount);
-                updateCrc(this.chunkCrc, source, sourcePosition, amount);
-                this.buffer.putBytes(AeronReplicationEnvelope.HEADER_LENGTH + copied,
-                        source, sourcePosition, amount);
-                sourcePosition += amount;
-                copied += amount;
-            }
-            this.offerDataChunk(length, chunkIndex, count, logicalOffset,
-                    chunkLength, (int) this.chunkCrc.getValue());
-            /* Intra-transaction seam for forked crash tests: a chunk budget
-             * kills the child between two milestones of one large
-             * transaction. Unbound cost is one ScopedValue check. */
-            FaultInjection.invoke("DATA_CHUNK", this.sequence);
-            logicalOffset += chunkLength;
-        }
-        return (int) crc.getValue();
+        return this.offerGatheredDataChunks(sources, sourceCount, length);
     }
 
     private int offerGatheredDataChunks(final ByteBuffer[] sources, final int sourceCount, final int length) {
@@ -218,7 +175,7 @@ final class EnvelopeFramer implements AutoCloseable {
                 }
                 this.offerGatheredDataChunk(length, chunkIndex, count, logicalOffset, chunkLength,
                         (int) this.chunkCrc.getValue(), this.gatherScratch.vectors(vectorCount));
-                FaultInjection.invoke("DATA_CHUNK", this.sequence);
+                FaultInjection.invoke(FaultInjection.Point.DATA_CHUNK, this.sequence);
                 logicalOffset += chunkLength;
             }
             return (int) crc.getValue();
@@ -239,25 +196,6 @@ final class EnvelopeFramer implements AutoCloseable {
     /// Returns the last successfully offered frame position.
     long lastOfferPosition() {
         return this.lastOfferPosition;
-    }
-
-    /// Computes the CRC32C of the populated prefix of a reusable buffer array
-    /// without offering anything. Used for fence metadata and failure evidence.
-    static int computeDataCrc(final ByteBuffer[] sources, final int sourceCount, final int length,
-                              final CRC32C crc) {
-        crc.reset();
-        int remaining = length;
-        for (int sourceIndex = 0; sourceIndex < sourceCount; sourceIndex++) {
-            final ByteBuffer sourceBuffer = sources[sourceIndex];
-            final int amount = Math.min(remaining, sourceBuffer.remaining());
-            if (amount > 0) {
-                updateCrc(crc, sourceBuffer, sourceBuffer.position(), amount);
-                remaining -= amount;
-            }
-            if (remaining == 0) break;
-        }
-        if (remaining != 0) throw new IllegalArgumentException("data buffer length changed");
-        return (int) crc.getValue();
     }
 
     /// Returns the number of chunks a payload of `length` bytes occupies.
@@ -291,30 +229,29 @@ final class EnvelopeFramer implements AutoCloseable {
                               final DirectBuffer payload, final int payloadOffset,
                               final int payloadChunkLength) {
         if (this.closed.get()) throw new IllegalStateException("Aeron envelope framer is closed");
-        final int encodedLength = AeronReplicationEnvelope.encode(this.buffer, 0, this.clusterId,
-                this.epoch, this.fencingToken, this.wireNonce, this.sequence, kind,
-                payloadLength, chunkIndex, chunkCount, chunkOffset, commitCrc32c,
-                payload == null ? EMPTY_BUFFER.get() : payload, payloadOffset, payloadChunkLength,
-                this.checksum);
+        final int encodedLength = this.header
+                .frame(kind, payloadLength, chunkIndex, chunkCount, chunkOffset)
+                .commitCrc32c(commitCrc32c)
+                .chunkLength(payloadChunkLength)
+                .encode(this.buffer, 0, payload == null ? EMPTY_BUFFER.get() : payload, payloadOffset);
         if (encodedLength > this.maxMessageLength) {
             throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
         }
         return this.lastOfferPosition = this.offerer.offer(this.buffer, encodedLength);
     }
 
-    private void offerDataChunk(final int payloadLength, final int chunkIndex,
-                                final int chunkCount, final int chunkOffset,
-                                final int payloadChunkLength, final int payloadCrc32c) {
-        final int encodedLength = AeronReplicationEnvelope.encodeWithPayloadCrc(this.buffer, 0,
-                this.clusterId, this.epoch, this.fencingToken, this.wireNonce, this.sequence,
-                AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
-                chunkIndex, chunkCount, chunkOffset, 0, this.buffer,
-                AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,
-                payloadCrc32c, this.checksum);
+    /// Encodes the header of one data chunk whose payload is already staged behind it, or follows as vectors.
+    private int encodeDataHeader(final int payloadLength, final int chunkIndex, final int chunkCount,
+                                 final int chunkOffset, final int payloadChunkLength, final int payloadCrc32c) {
+        final int encodedLength = this.header
+                .frame(AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength, chunkIndex, chunkCount, chunkOffset)
+                .commitCrc32c(0)
+                .chunkLength(payloadChunkLength)
+                .encodeHeader(this.buffer, 0, payloadCrc32c);
         if (encodedLength > this.maxMessageLength) {
             throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
         }
-        this.lastOfferPosition = this.offerer.offer(this.buffer, encodedLength);
+        return encodedLength;
     }
 
     private void offerGatheredDataChunk(final int payloadLength, final int chunkIndex,
@@ -322,15 +259,7 @@ final class EnvelopeFramer implements AutoCloseable {
                                         final int payloadChunkLength, final int payloadCrc32c,
                                         final DirectBufferVector[] vectors) {
         /* Encode only the header; Aeron reads its payload from the remaining vectors. */
-        final int encodedLength = AeronReplicationEnvelope.encodeWithPayloadCrc(this.buffer, 0,
-                this.clusterId, this.epoch, this.fencingToken, this.wireNonce, this.sequence,
-                AeronReplicationEnvelope.Kind.STORE_BINARY, payloadLength,
-                chunkIndex, chunkCount, chunkOffset, 0, this.buffer,
-                AeronReplicationEnvelope.HEADER_LENGTH, payloadChunkLength,
-                payloadCrc32c, this.checksum);
-        if (encodedLength > this.maxMessageLength) {
-            throw new IllegalArgumentException("replication chunk exceeds Aeron max message length");
-        }
+        this.encodeDataHeader(payloadLength, chunkIndex, chunkCount, chunkOffset, payloadChunkLength, payloadCrc32c);
         vectors[0].reset(this.buffer, 0, AeronReplicationEnvelope.HEADER_LENGTH);
         this.lastOfferPosition = this.offerer.offer(vectors);
     }

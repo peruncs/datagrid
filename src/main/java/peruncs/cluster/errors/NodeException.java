@@ -1,8 +1,5 @@
 package peruncs.cluster.errors;
 
-import peruncs.cluster.errors.internal.ReplicationPositionUnavailableException;
-import peruncs.cluster.node.backup.IncompleteArchiveException;
-
 /// Signals a node lifecycle or storage failure that applications may catch at the boundary.
 ///
 /// The type is deliberately dependency-free: it extends [RuntimeException]
@@ -20,6 +17,9 @@ public sealed class NodeException extends RuntimeException permits BackupBusyExc
         PENDING,
         /// This Store image cannot resume without reseeding.
         RESEED_REQUIRED,
+        /// The operation failed for a reason that may pass: retry later with backoff, or after
+        /// freeing a resource such as storage space. No restart is needed.
+        TRANSIENT,
         /// The operation failed and has no generic retry guarantee.
         FAILED
     }
@@ -51,9 +51,19 @@ public sealed class NodeException extends RuntimeException permits BackupBusyExc
     /// Inspect the exception subtype for details; this value does not replace
     /// the type-specific recovery contract.
     public final Outcome outcome() {
-        if (this instanceof WriteRejectedException) return Outcome.RETRYABLE;
-        if (this instanceof ReplicationPendingException) return Outcome.PENDING;
-        if (this instanceof ReseedRequiredException) return Outcome.RESEED_REQUIRED;
-        return Outcome.FAILED;
+        return switch (this) {
+            case WriteRejectedException _ -> Outcome.RETRYABLE;
+            case ReplicationPendingException _ -> Outcome.PENDING;
+            case ReseedRequiredException _ -> Outcome.RESEED_REQUIRED;
+            case BackupBusyException _ -> Outcome.TRANSIENT;
+            case StorageLimitReachedException _ -> Outcome.TRANSIENT;
+            case ReplicationUnavailableException _ -> Outcome.TRANSIENT;
+            case GraphDrainTimeoutException _ -> Outcome.TRANSIENT;
+            case ReplicationPositionUnavailableException _ -> Outcome.TRANSIENT;
+            case GraphInvalidatedException _, CorruptReplicationDataException _, ReaderWriteRejectedException _,
+                 IncompleteArchiveException _, WrongRoleException _ -> Outcome.FAILED;
+            case ReplicationException _ -> Outcome.FAILED;
+            case NodeException _ -> Outcome.FAILED;
+        };
     }
 }

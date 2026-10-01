@@ -1,4 +1,4 @@
-/// This package defines the private envelopes used on an Aeron stream.
+/// Defines the private envelopes used on an Aeron stream.
 ///
 /// An envelope carries one fragment of a replication transaction and its
 /// framing information. Readers validate the version and boundaries before

@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -21,6 +22,11 @@ class StoreIndexReflectionTest {
                 VectorIndex.class.getClassLoader(), new Class<?>[]{VectorIndex.class}, (proxy, method, args) -> null);
 
         assertThrows(IllegalStateException.class, () -> StoreIndexReflection.invalidateVectorGraph(index));
+    }
+
+    @Test
+    void thePinnedStoreVersionHasTheExpectedVectorIndexLayout() {
+        assertDoesNotThrow(StoreIndexReflection::verifyLayout);
     }
 
     @Test

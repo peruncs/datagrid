@@ -8,6 +8,7 @@ import org.agrona.SystemUtil;
 import peruncs.cluster.api.NodeConfig;
 import peruncs.cluster.api.NodeRole;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
+import peruncs.cluster.storage.aeron.config.AeronRetryPolicy;
 import peruncs.cluster.storage.aeron.wire.AeronReplicationEnvelope;
 
 import java.nio.file.Path;
@@ -103,14 +104,19 @@ record AeronSettings(
     /// @param driverTimeoutMillis           MediaDriver timeout in milliseconds
     /// @param archiveControlTimeoutNanos    timeout for one synchronous Archive control request
     /// @param watermarkCloseTimeoutNanos    flush budget when a watermark channel closes
+    /// @param retentionOperationTimeoutMillis bound of one retention command and of stopping its agent
+    /// @param writerRecoveryAttempts          consecutive transient writer-recovery failures before `FAILED`
     record Timeouts(
             long driverTimeoutMillis,
             long archiveControlTimeoutNanos,
-            long watermarkCloseTimeoutNanos
+            long watermarkCloseTimeoutNanos,
+            long retentionOperationTimeoutMillis,
+            int writerRecoveryAttempts
     ) {
         Timeouts {
             if (driverTimeoutMillis <= 0L || archiveControlTimeoutNanos <= 0L ||
-                watermarkCloseTimeoutNanos <= 0L) {
+                watermarkCloseTimeoutNanos <= 0L || retentionOperationTimeoutMillis <= 0L ||
+                writerRecoveryAttempts <= 0) {
                 throw new IllegalArgumentException("Aeron per-concern timeouts must be positive");
             }
         }
@@ -187,9 +193,11 @@ record AeronSettings(
                 .offerTimeoutNanos(budgets.offer().toNanos())
                 .recordingStartTimeoutNanos(budgets.recordingStart().toNanos())
                 .recordedPositionTimeoutNanos(budgets.recordedPosition().toNanos())
+                .abortRecordedPositionTimeoutNanos(budgets.abortRecordedPosition().toNanos())
                 .recordingStopTimeoutNanos(budgets.recordingStop().toNanos())
                 .readerStopTimeoutNanos(budgets.readerStop().toNanos())
                 .reconnectTimeoutNanos(budgets.reconnect().toNanos())
+                .retryPolicy(retryPolicy(configured.retryPacing()))
                 .build();
 
         final NodeConfig.ArchivePolicy configuredArchive = configured.archivePolicy();
@@ -226,10 +234,19 @@ record AeronSettings(
                 ? ThreadingMode.DEDICATED : ThreadingMode.SHARED;
         return new AeronSettings(replication, topology, archivePolicy,
                 new Timeouts(budgets.driver().toMillis(), budgets.archiveControl().toNanos(),
-                        budgets.watermarkClose().toNanos()),
+                        budgets.watermarkClose().toNanos(), config.operations().retentionOperationTimeout().toMillis(),
+                        config.operations().writerRecoveryAttempts()),
                 AeronReplicationEnvelope.defaultWireNonce(clusterId), threading,
                 threading == ThreadingMode.DEDICATED ? ArchiveThreadingMode.DEDICATED : ArchiveThreadingMode.SHARED,
                 production);
+    }
+
+    private static AeronRetryPolicy retryPolicy(final NodeConfig.RetryPacing pacing) {
+        final AeronRetryPolicy defaults = AeronRetryPolicy.defaults();
+        return new AeronRetryPolicy(defaults.idleMaxSpins(), defaults.idleMaxYields(), defaults.idleMinParkNanos(),
+                pacing.idleMaxPark().toNanos(), defaults.jitterBaseNanos(), pacing.jitterCap().toNanos(),
+                pacing.archiveProbeDelay().toNanos(), defaults.catalogProbeInitialDelayNanos(),
+                defaults.catalogProbeMaxDelayNanos());
     }
 
     private static UUID requiredId(final UUID value, final NodeConfig.Setting setting) {
@@ -348,7 +365,7 @@ record AeronSettings(
         return endpointMatches(channel, AeronSettings::loopbackHost);
     }
 
-        /// Checks all endpoint-bearing URI options instead of relying on textual
+    /// Checks all endpoint-bearing URI options instead of relying on textual
     /// substrings.  The latter misses case/format variants (for example expanded
     /// IPv6 wildcards) and can match an unrelated option value.
     private static boolean endpointMatches(final String channel,
@@ -392,7 +409,7 @@ record AeronSettings(
         return normalized.startsWith(Path.of("/tmp")) || normalized.startsWith(Path.of("/private/tmp"));
     }
 
-        /// Reject channel-level framing overrides that disagree with the values used
+    /// Reject channel-level framing overrides that disagree with the values used
     /// to configure the MediaDriver and replication envelope. Without this check
     /// the channel silently wins and a writer and reader can use different term or
     /// MTU limits even though they share one replication configuration.

@@ -10,7 +10,7 @@ import org.eclipse.store.storage.types.Storage;
 import org.eclipse.store.storage.types.StorageConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
+import peruncs.cluster.storage.binary.TypeDictionaryOutbox;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -33,7 +33,7 @@ class DistributedStorageTest {
         final CapturingDistributor distributor = new CapturingDistributor();
         final EmbeddedStorageFoundation<?> configured = foundation(this.storagePath.resolve("three"));
         assertSame(configured, DistributedStorage.configureWriting(
-                configured, distributor, new ReplicatingTargetFactory(distributor)));
+                configured, new TypeDictionaryOutbox(), new ReplicatingTargetFactory(distributor)));
     }
 
     /// Verifies configureWriting replaces a dispatcher already installed on the
@@ -52,7 +52,7 @@ class DistributedStorageTest {
             }
         });
 
-        DistributedStorage.configureWriting(configured, distributor, new ReplicatingTargetFactory(distributor));
+        DistributedStorage.configureWriting(configured, new TypeDictionaryOutbox(), new ReplicatingTargetFactory(distributor));
 
         final Root root = new Root();
         try (EmbeddedStorageManager storage = configured.start(root)) {
@@ -65,15 +65,15 @@ class DistributedStorageTest {
                 "the installed configurator must distribute the committed transaction");
     }
 
-        /// Pins the upstream bug that makes chaining impossible.
+    /// Pins the upstream bug that makes chaining impossible.
     ///
     /// `PersistenceFoundation.Default.getInstanceDispatcherLogic()` invokes
     /// itself (`aload_0; invokevirtual` on the same method), so reading the
     /// installed logic is a guaranteed `StackOverflowError`. Until upstream
-        /// fixes the accessor, replacement is the only implementable contract;
+    /// fixes the accessor, replacement is the only implementable contract;
     /// when this assertion starts failing, upstream has fixed it — restore
-        /// chaining in `DistributedStorage.configureWriting` by passing the
-        /// installed logic as the previous link.
+    /// chaining in `DistributedStorage.configureWriting` by passing the
+    /// installed logic as the previous link.
     @Test
     void upstreamDispatcherLogicAccessorRemainsUnusable() {
         final EmbeddedStorageFoundation<?> configured = foundation(this.storagePath.resolve("upstream-accessor"));
@@ -94,7 +94,7 @@ class DistributedStorageTest {
         final CapturingDistributor distributor = new CapturingDistributor();
         final EmbeddedStorageFoundation<?> configured = DistributedStorage.configureWriting(
                 foundation(this.storagePath.resolve("deliveries")),
-                distributor,
+                new TypeDictionaryOutbox(),
                 new ReplicatingTargetFactory(distributor));
         final Root root = new Root();
         try (EmbeddedStorageManager storage = configured.start(root)) {
@@ -144,20 +144,11 @@ class DistributedStorageTest {
         public final List<String> values = new ArrayList<>();
     }
 
-    private static final class CapturingDistributor implements ReplicationPublisher {
+    private static final class CapturingDistributor {
         final AtomicInteger deliveries = new AtomicInteger();
 
-        @Override
-        public void distributeData(final Binary data) {
+        void distributeData(final Binary data) {
             this.deliveries.incrementAndGet();
-        }
-
-        @Override
-        public void distributeTypeDictionary(final String ignored) {
-        }
-
-        @Override
-        public void dispose() {
         }
     }
 }

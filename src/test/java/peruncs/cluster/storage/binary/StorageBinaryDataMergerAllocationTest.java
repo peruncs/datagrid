@@ -54,7 +54,8 @@ class StorageBinaryDataMergerAllocationTest {
             final Root initial = new Root();
             initial.values.add("seed");
             final EmbeddedStorageFoundation<?> writerFoundation = foundation(root);
-            DistributedStorage.configureWriting(writerFoundation, capture, new ReplicatingTargetFactory(capture));
+            final TypeDictionaryOutbox outbox = new TypeDictionaryOutbox();
+            DistributedStorage.configureWriting(writerFoundation, outbox, new ReplicatingTargetFactory(outbox, capture::distributeData));
             final EmbeddedStorageManager storage;
             try {
                 storage = writerFoundation.start(initial);
@@ -158,11 +159,10 @@ class StorageBinaryDataMergerAllocationTest {
     private record BufferSnapshot(int capacity, int position, int limit, byte[] content) {
     }
 
-    private static final class CapturingDistributor implements ReplicationPublisher {
+    private static final class CapturingDistributor {
         final List<List<BufferSnapshot>> transactions = new ArrayList<>();
 
-        @Override
-        public synchronized void distributeData(final Binary data) {
+        synchronized void distributeData(final String dictionary, final Binary data) {
             final List<BufferSnapshot> snapshots = new ArrayList<>();
             data.iterateChannelChunks(chunk ->
             {
@@ -179,13 +179,6 @@ class StorageBinaryDataMergerAllocationTest {
             this.transactions.add(snapshots);
         }
 
-        @Override
-        public synchronized void distributeTypeDictionary(final String ignored) {
-        }
-
-        @Override
-        public void dispose() {
-        }
     }
 
     private record AllocationSnapshot(com.sun.management.ThreadMXBean bean, Map<Long, Long> allocated) {

@@ -12,7 +12,7 @@ import org.junit.jupiter.api.io.TempDir;
 import peruncs.cluster.api.ClusterStorageManager;
 import peruncs.cluster.errors.*;
 import peruncs.cluster.storage.StorageGraphCoordinator;
-import peruncs.cluster.storage.binary.ReplicationPublisher;
+import peruncs.cluster.storage.binary.TypeDictionaryOutbox;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -29,7 +29,7 @@ class GuardingStorageManagerRejectionTest {
         final EmbeddedStorageFoundation<?> foundation = foundation(directory, targetFailure);
         final StorageGraphCoordinator graph = new StorageGraphCoordinator();
         try (EmbeddedStorageManager delegate = foundation.start()) {
-            final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+            final ClusterStorageManager<Object> manager = TestManagers.guarding(
                     delegate, () -> false, openNode(), graph);
 
             targetFailure.set(new WriteRejectedException("capacity"));
@@ -63,7 +63,7 @@ class GuardingStorageManagerRejectionTest {
         final AtomicReference<RuntimeException> targetFailure = new AtomicReference<>();
         final StorageGraphCoordinator graph = new StorageGraphCoordinator();
         try (EmbeddedStorageManager delegate = foundation(directory, targetFailure).start()) {
-            final ClusterStorageManager<Object> manager = ClusterStorageManagers.guarding(
+            final ClusterStorageManager<Object> manager = TestManagers.guarding(
                     delegate, () -> false, openNode(), graph);
             targetFailure.set(new IllegalStateException("Store wrapper", new ReplicationPendingException(1L,
                     new ReplicationUnavailableException("commit offer timed out"))));
@@ -132,7 +132,7 @@ class GuardingStorageManagerRejectionTest {
                 .setChannelCountProvider(Storage.ChannelCountProvider(1))
                 .createConfiguration();
         final EmbeddedStorageFoundation<?> foundation = EmbeddedStorage.Foundation(configuration);
-        DistributedStorage.configureWriting(foundation, ReplicationPublisher.noOp(), delegate -> new PersistenceTarget<>() {
+        DistributedStorage.configureWriting(foundation, new TypeDictionaryOutbox(), delegate -> new PersistenceTarget<>() {
             @Override
             public void write(final Binary data) {
                 final RuntimeException failure = targetFailure.getAndSet(null);

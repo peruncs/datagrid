@@ -101,7 +101,7 @@ final class AeronRetentionOwner {
                 shared().watermarks()::available,
                 settings().topology().directories().archiveDirectory().resolveSibling(
                         "%s.retention".formatted(settings().topology().directories().archiveDirectory().getFileName())),
-                AeronArchiveRetention.DEFAULT_OPERATION_TIMEOUT_MILLIS);
+                settings().timeouts().retentionOperationTimeoutMillis());
     }
 
     /// Reports whether this node can run Archive retention.
@@ -116,7 +116,7 @@ final class AeronRetentionOwner {
     ///
     /// @return retention controller, or `null` before creation
     AeronArchiveRetention liveRetention() {
-        return (AeronArchiveRetention) this.retention;
+        return this.retention instanceof AeronArchiveRetention live ? live : null;
     }
 
     /// Reports whether a retention controller exists.

@@ -16,14 +16,14 @@ class AeronControlWarningTest {
     private static final String AERON_1_53_CONTROL_RESPONSE_DISCONNECTED =
             "ERROR - control response publication is not connected";
 
-        /// Verifies the pinned Aeron control-response text classifies as terminal.
+    /// Verifies the pinned Aeron control-response text classifies as terminal.
     @Test
     void controlResponseDisconnectIsTerminal() {
         assertTrue(AeronArchiveFailures.terminalControlResponseWarning(
                 new ArchiveEvent(AERON_1_53_CONTROL_RESPONSE_DISCONNECTED)));
     }
 
-        /// Verifies unrelated warnings and non-ArchiveEvent failures stay non-terminal.
+    /// Verifies unrelated warnings and non-ArchiveEvent failures stay non-terminal.
     @Test
     void unrelatedFailuresAreNotTerminal() {
         assertFalse(AeronArchiveFailures.terminalControlResponseWarning(

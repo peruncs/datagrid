@@ -37,7 +37,7 @@ class NodeMaintenanceSchedulerTest {
         }
     }
 
-        /// The backup task delegates to the automatic slot when idle.
+    /// The backup task delegates to the automatic slot when idle.
     @Test
     void backupWorkRunsBackupWhenIdle() {
         final BackupFake backups = new BackupFake();
@@ -49,7 +49,7 @@ class NodeMaintenanceSchedulerTest {
         assertFalse(backups.manualSlot.get());
     }
 
-        /// A backup while another one runs is skipped instead of queued.
+    /// A backup while another one runs is skipped instead of queued.
     @Test
     void backupWorkSkipsWhenBusy() {
         final BackupFake backups = new BackupFake();
@@ -61,7 +61,7 @@ class NodeMaintenanceSchedulerTest {
         assertEquals(1, backups.backupRequests.get());
     }
 
-        /// A failed start is treated as a harmless concurrent-start rejection.
+    /// A failed start is treated as a harmless concurrent-start rejection.
     @Test
     void backupWorkSkipsWhenStartIsRejected() {
         final BackupFake backups = new BackupFake();
@@ -72,7 +72,7 @@ class NodeMaintenanceSchedulerTest {
         assertEquals(1, backups.backupRequests.get());
     }
 
-        /// The limit task records measurements in the gate.
+    /// The limit task records measurements in the gate.
     @Test
     void limitCheckWorkUpdatesGate() {
         final AtomicLong usedBytes = new AtomicLong(10_000_000_000L);
@@ -91,7 +91,7 @@ class NodeMaintenanceSchedulerTest {
         assertFalse(gate.limitReached());
     }
 
-        /// Invalid registrations are rejected before anything runs.
+    /// Invalid registrations are rejected before anything runs.
     @Test
     void rejectsInvalidSchedule() {
         try (final NodeMaintenanceScheduler housekeeper = NodeMaintenanceScheduler.create()) {
@@ -127,7 +127,7 @@ class NodeMaintenanceSchedulerTest {
         }
     }
 
-        /// Registration ends once the housekeeper has started.
+    /// Registration ends once the housekeeper has started.
     @Test
     void rejectsScheduleAfterStart() {
         try (final NodeMaintenanceScheduler housekeeper = NodeMaintenanceScheduler.create()) {
@@ -144,7 +144,7 @@ class NodeMaintenanceSchedulerTest {
         }
     }
 
-        /// Tasks fire repeatedly and stop after close.
+    /// Tasks fire repeatedly and stop after close.
     @Test
     void firesPeriodicallyAndStopsOnClose() throws InterruptedException {
         final AtomicInteger runs = new AtomicInteger();
@@ -197,7 +197,7 @@ class NodeMaintenanceSchedulerTest {
         assertTrue(scheduler.isStopped());
     }
 
-        /// A failing task is logged while the remaining tasks keep running.
+    /// A failing task is logged while the remaining tasks keep running.
     @Test
     void failingTaskDoesNotStopOthers() throws InterruptedException {
         final AtomicInteger runs = new AtomicInteger();
@@ -213,7 +213,7 @@ class NodeMaintenanceSchedulerTest {
         }
     }
 
-        /// An Error is recorded for health and does not cancel its fixed-delay task.
+    /// An Error is recorded for health and does not cancel its fixed-delay task.
     @Test
     void fatalTaskFailureDoesNotCancelMaintenanceSchedule() throws InterruptedException {
         final AtomicBoolean first = new AtomicBoolean(true);
@@ -229,7 +229,7 @@ class NodeMaintenanceSchedulerTest {
         }
     }
 
-        /// A task that fails past the degradation threshold degrades health,
+    /// A task that fails past the degradation threshold degrades health,
     /// and the next successful run clears the degradation: a transient flap
     /// must not mark the node degraded for its lifetime.
     @Test
@@ -258,17 +258,34 @@ class NodeMaintenanceSchedulerTest {
     }
 
 
-        /// A slow run postpones its own next run instead of overlapping it.
+    /// A task with its own low threshold degrades health after its first failure, not after the generic count.
+    @Test
+    void perTaskThresholdDegradesHealthAfterTheFirstFailure() throws InterruptedException {
+        final AtomicInteger runs = new AtomicInteger();
+        try (final NodeMaintenanceScheduler housekeeper = NodeMaintenanceScheduler.create()) {
+            housekeeper.schedule("critical", () -> {
+                runs.incrementAndGet();
+                throw new IllegalStateException("retention failed");
+            }, Duration.ofMillis(500), 1);
+            housekeeper.start();
+            awaitCondition(() -> housekeeper.failure() != null, 10_000L,
+                    "one failure of a critical task must degrade health");
+            assertEquals(1, runs.get(), "the generic threshold of 3 would have needed three runs");
+        }
+    }
+
+    /// A slow run postpones its own next run instead of overlapping it.
     @Test
     void slowRunDoesNotOverlapItself() throws InterruptedException {
         final AtomicInteger concurrent = new AtomicInteger();
         final AtomicInteger maxConcurrent = new AtomicInteger();
-        final AtomicBoolean ranOnVirtualThread = new AtomicBoolean();
+        final AtomicBoolean ranOnMaintenanceThread = new AtomicBoolean();
         try (final NodeMaintenanceScheduler housekeeper = NodeMaintenanceScheduler.create()) {
             housekeeper.schedule("slow", () ->
             {
                 final int active = concurrent.incrementAndGet();
-                ranOnVirtualThread.set(Thread.currentThread().isVirtual());
+                ranOnMaintenanceThread.set(!Thread.currentThread().isVirtual()
+                        && Thread.currentThread().getName().startsWith("peruncs-maintenance-"));
                 maxConcurrent.accumulateAndGet(active, Math::max);
                 try {
                     Thread.sleep(150L);
@@ -284,10 +301,10 @@ class NodeMaintenanceSchedulerTest {
         }
 
         assertEquals(1, maxConcurrent.get());
-        assertTrue(ranOnVirtualThread.get());
+        assertTrue(ranOnMaintenanceThread.get(), "tasks run on dedicated platform threads");
     }
 
-        /// Controllable backup executor double.
+    /// Controllable backup executor double.
     private static final class BackupFake implements StorageBackupTaskExecutor {
         private final AtomicInteger backupRequests = new AtomicInteger();
         private final AtomicBoolean manualSlot = new AtomicBoolean(true);

@@ -49,7 +49,7 @@ class StorageTaskExecutorTest {
         assertTrue(latch.await(30L, TimeUnit.SECONDS), what);
     }
 
-        /// Concurrent requests share one check instead of queuing duplicates.
+    /// Concurrent requests share one check instead of queuing duplicates.
     @Test
     void concurrentRunChecksRunsOnce() throws Exception {
         final GatedConnection gated = new GatedConnection();
@@ -83,7 +83,7 @@ class StorageTaskExecutorTest {
         }
     }
 
-        /// Closing while a check runs cancels it and records the failure.
+    /// Closing while a check runs cancels it and records the failure.
     @Test
     void closeDuringRunCancelsTheCheck() throws Exception {
         final GatedConnection gated = new GatedConnection();
@@ -115,7 +115,7 @@ class StorageTaskExecutorTest {
         assertNotNull(executor.failure());
     }
 
-        /// Checks after close fail with closed status, never a raw rejection.
+    /// Checks after close fail with closed status, never a raw rejection.
     @Test
     void runChecksAfterCloseIsRejected() {
         final GatedConnection gated = new GatedConnection();
