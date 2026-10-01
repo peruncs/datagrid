@@ -45,7 +45,7 @@ crash-matrix (`ReplicationMarkCrashMatrixIT`) and retention suites that were re-
 | F-21 | Done | fixed `.storage-previous` name + `recoverInterruptedReplacement` at startup |
 | F-22 | Done | `HeaderEncoder`; `EnvelopeView.set` inlined; watermark codec takes the watermark (`encodeInto(target)`) and `decodeFrame` is split; `AeronHealth` takes three probe records; Archive publisher `create/extend` take a `PublisherSetup` record and the unused remote variants are deleted. `AeronArchiveReader.Configuration`, `AeronReplicationConfiguration` and `NodeConfig` records already have builders (rule 18) |
 | F-23 | Mostly | new settings (retry pacing, retention operation timeout, publication lock timeout, abort wait, index refresh, backup workspace/entries); `Thread.sleep` loops replaced by jittered parks; offerer branch tests. Remaining literal timeouts (merger dispose, watermark retry, gauge refresh) stay constants |
-| F-24 | Done | `VarHandle` + upstream `builderLock` + startup layout check; module path needs `--add-opens` (README) |
+| F-24 | Done | reflection removed entirely: the public `VectorIndex.invalidateGraph()` from PR #832 is used (see the PR #832 section below) |
 | F-25 | Done | vocabulary, `///` indentation (601 lines fixed; the 388 remaining 8-space `///` lines are nested enum members and legitimate), `ponytail`, package-info verbs and `@since` |
 | F-26 | Done | `PreparedTransaction` is its own file; the publisher's six boolean flags became a `Lifecycle` enum (OPEN, CLOSING, CLOSE_INTERRUPTED, CLOSED) and an `Operation` enum (IDLE, PREPARING, TERMINAL), while `failed` stays orthogonal; crash, recovery and IT suites pass |
 | F-27 | Partly | shared `validateStoreRoots` / `scheduleStoreMaintenance`, task renamed; the two start methods still differ in role-specific steps |
@@ -896,8 +896,7 @@ names every leaf; dead `ApplyWorker.lastApplyBlockedMillis` removed.
 the merger, which overrides both methods; the default is GC-reclaimed and safe); removing `TargetCallbacks.committedSequence`
 (the production wiring is a no-op but the coordinator test asserts "not live until COMMIT is offered" through it);
 `WriterSession`/`NodeStartup` merges, assembler monitors, per-transaction `EnvelopeFramer` allocation (no measured cost;
-behaviour-neutral refactors with high churn); `INDEX_REFRESH_BUDGET_MS` stays 600 s because warm-up now runs outside
-the write section.
+behaviour-neutral refactors with high churn); `INDEX_REFRESH_BUDGET_MS` stays 600 s (the rebuild runs inside the write section again, see the PR #832 section; it bounds that blackout).
 
 **Measured:** `StorageBinaryPoolOwnershipIT` (312 s) is fsync-bound, not CPU-bound: JFR/jcmd show ~3.4 s of JVM CPU in 173 s,
 `FileForce` on both Stores per transaction (~12 ms each on macOS), no GC pressure, no lock contention. Default
@@ -941,3 +940,100 @@ transaction count is now 1,000 (`-Dpool.transactions=10000` restores the full ru
 - abstract receiver allocation plus `DirectBufferReceiver` fixture; `AeronRetryPolicy` consuming `RetryPacing` and catalog-probe settings;
 - `NodeLifecycle` role-start step extraction (F-27); list-materialising `BackupArchive` restore; periodic full 10k pool sweep in CI;
 - crash matrix and soak re-run after these edits; new files are untracked (do not commit the index as staged).
+
+**Verification after round 3:** unit gate (839 tests), 27 integration tests and the 17-trial crash matrix are green.
+`AeronWriterReaderSoakIT` fails with `mid-soak index visibility timeout: JVector missed materialized title` on most seeds
+(20 s and 30 s runs). The same failure reproduces on the last commit's tree (extracted with `git archive`, seeds 1 and 2 failed, seed 3 passed,
+seed 1 failed 2 of 3 runs), a wait of 20 s instead of 2 s does not clear it, and neither reverting `StoreIndexReflection` to the HEAD
+version nor disabling the vector warm-up changes the rate, so it is a pre-existing, unresolved JVector-after-restart visibility flake,
+not a round-3 regression. It needs its own investigation (a reader's rebuilt graph misses an entity its Store mark already covers).
+
+## Eclipse Store PR #832 adoption and three-week upstream catch-up
+
+**Source reviewed:** `hrstoyanov/eclipse-store` branch `feature/index-view-invalidation` (merged with upstream `main` on 2026-09-30),
+installed as `5.0.0-SNAPSHOT` in the local Maven repository (the build resolves `gigamap-jvector-5.0.0-SNAPSHOT.jar`, which contains
+`VectorIndex.invalidateGraph()`; the dated snapshots from September 13–30 do not).
+
+**Done**
+- `StoreIndexReflection` and its test are deleted; `ClusterIndexMaintenance` calls the public `VectorIndex.invalidateGraph()`.
+  Production code now contains no Java reflection and no `VarHandle` onto Store fields (`NoReflectionTest` pins it).
+  The `--add-opens ... =peruncs.cluster` requirement and the startup layout check are gone; README updated.
+- The direct `io.github.jbellis:jvector` dependency and `requires transitive jvector` were only needed for the reflection bridge;
+  both are removed (the library still arrives through `gigamap-jvector`), and `ModuleDescriptorConsistencyTest` was updated.
+- `VectorGraphInvalidationTest`: invalidating a cold-loaded, never-searched index is harmless (twice) and the next search rebuilds.
+  Upstream's `invalidateGraph()` throws `IllegalStateException` in incremental on-disk mode; the cluster already rejects on-disk indexes.
+- `ClusterIndexValidation.validateVectorConfiguration` now rejects any `indexLocation()` (absolute or named), not just `indexDirectory()`,
+  with a test.
+
+**Upstream commits of the last three weeks and their effect**
+| Commit | Change | Effect on PerunCS |
+| --- | --- | --- |
+| d64e75f9 | `VectorIndex.invalidateGraph()` (PR #832) | adopted, reflection removed |
+| 7d5f4cf1 (#834) | PQ compression formats, in-memory PQ scoring, jvector 4.0.0-rc.9 | graph stays transient; every node trains its own PQ codebook, so approximate result order can differ between nodes (no correctness effect on the entity graph); `performPqSwitch` does not close the replaced builder, which is compatible with our invalidation |
+| 59a8a454 (#825) | `enablePqCompression` now compresses | none (same as above) |
+| e399af1f (#837) | `IndexLocation` (absolute or named) for on-disk JVector and Lucene MMap files, `IndexLocations.bind`, `changeIndexLocation`; Lucene rebuilds from entities when it opens without files | see opportunities |
+| 3dea6c76 (#839) | a failed `reindex()` leaves the index marked incomplete and rebuilt on next open | benefits the embedded Lucene index: a reader cannot serve a silently half-built index |
+| a293e0a1 (#840) | `MMapDirectoryCreator` made final | none |
+
+**Opportunities evaluated for the cluster's JVector and Lucene indexes**
+1. *Named locations for node-local on-disk indexes* (each node binds `IndexLocations.bind("fulltext", localDir)` at startup).
+   This is the first upstream feature that makes on-disk indexes conceptually clusterable: the Store holds only the name, the files
+   are node-local derived data, and a copied or restored Store no longer points at another node's directory. Not adopted now:
+   a reader's imports bypass the Lucene writer and the vector mutation API, so every replicated batch would need a per-batch
+   reindex of the on-disk files (the embedded `ByteBuffers` Lucene directory avoids this because the index bytes travel inside the
+   replicated Store), and `invalidateGraph()` is unsupported for incremental on-disk JVector. It remains the right route if index size
+   ever exceeds the heap. Prototype plan: on a reader, bind a named MMap location, mark the Lucene index stale per batch
+   (`changeIndexLocation` to the same name needs no rebuild), rebuild lazily on first query (upstream now does this on open), and
+   measure rebuild cost against embedded `ByteBuffers` write amplification before changing the validation rule.
+2. *Lucene rebuild-on-open* is a free safety net for the embedded index (restore, reseed, copied Store) and removes the old risk of
+   serving an empty index; no code change needed.
+3. *Write amplification:* the embedded Lucene directory replicates whole index segments through the Store; a named MMap location
+   would halve the replicated bytes at the cost of reader-side rebuilds. Worth measuring with `AeronFullPathBenchmarkIT` before deciding.
+
+**Soak root cause found (JFR/jcmd investigation) and fixed**
+- Symptom: `AeronWriterReaderSoakIT` failed on most seeds with `JVector missed materialized title` (also reproducible on the last commit).
+- Evidence: on a miss, a top-400 search on the reader returned 0 results (sometimes 75 of 87) while the map held 171 entities; calling
+  `invalidateGraph()` and searching again returned all of them. So the graph was empty or partial yet marked rebuilt, not a recall problem.
+  Soak JFR after the fix: no virtual-thread pinning, one monitor-enter event, longest GC pause 26 ms, no deadlock; crash matrix JFR: no
+  pinning, no monitor contention, 1.2 s of fsync in 111 s.
+- Cause: upstream `VectorIndex.Default.ensureIndexInitialized()` (called by every `search`) creates the in-memory builder without taking
+  any lock when none exists. After our invalidation, two concurrent first searches (application queries plus our own warm-up) each create a
+  builder; the second replaces the graph the first just rebuilt, and `graphRebuilt` stays `true` over an empty or partial graph.
+- Fix: `ApplyWorker` rebuilds invalidated graphs inside the exclusive write section (`warmupVectorSearchGraphs()` right after `afterApply`),
+  so exactly one thread performs the first access. Seeds 1–5 and the default run pass with zero misses. The cost is that a large rebuild
+  blocks reads for its duration again (the earlier "warm up after the section" change caused the race, since it ran concurrently with queries).
+- Upstream report to file (suggested patch): perform the `isIndexPresent()` check and `initializeIndex()` under `synchronized(parentMap)`
+  (or the builder write lock) in `ensureIndexInitialized()`. Once fixed upstream, the warm-up can move back out of the write section.
+
+**Verification:** 839 unit tests, 27 integration tests, 17-trial crash matrix and soak seeds 1–5 plus the default run pass.
+
+## Round 4: open items and larger refactoring
+
+**Done**
+- *Writer recovery through the real Archive* (`AeronStoreIntegrationIT`): transient failures injected at `AFTER_RECOVERY_PUBLISHER_CREATED` are
+  retried and then succeed; `PERUNCS_WRITER_RECOVERY_ATTEMPTS` consecutive failures latch `FAILED` and a latched writer runs no further recovery;
+  two transactions near `maxTransactionBytes` (about 3.6 MiB each against a 4 MiB limit) survive a writer restart and the writer continues at the next
+  sequence (the restart commits one fencing transaction). Finding: right after a failed attempt the Archive still holds the recording active for a moment
+  (`cannot extend active recording`), so a retry loop that spins faster than the Archive stops the recording consumes its budget; production retries
+  are spaced by writes and the maintenance schedule, and the tests wait for the stop position.
+- *`TargetCallbacks.committedSequence`* and the whole `PreparedTransaction.onCommit/invokeCommitAction` chain are deleted (it was a no-op in production);
+  the tests assert through `nextSequence()` and the coordinator's terminal-position callback instead.
+- *`StorageBinaryDataReceiver`* no longer allocates by default: `allocateNativeBuffer` and `releaseNativeBuffer` are abstract, and the tests use the
+  `peruncs.cluster.test.DirectBufferReceiver` fixture, so an untracked allocation policy cannot reach production.
+- *Retry pacing:* `RetryPacing` now carries the jitter base and the catalog-probe start and maximum delays (two new settings with README rows) and
+  cross-validates base <= cap and initial <= maximum (`RetryPacingTest`). `AeronSettings.retryPolicy` no longer hard-wires any default.
+- *`BackupArchive`* no longer materialises a `List<ZipEntry>`: one streaming `scan` validates count, duplicates, names and declared sizes, and the
+  later passes iterate the central directory again (the digest keeps only sorted storage names).
+- *`NodeLifecycle` (F-27):* `recoverStorageRoot`, `openStore` (start, reseed hint, mark check, root initialization, index policy scan) and
+  `enableDistribution` are shared by the backup-reader and storage-node starts; each role now differs only in its role-specific steps.
+- *Full pool sweep:* `mvn verify -Ppoolsweep` runs `StorageBinaryPoolOwnershipIT` with 10,000 transactions (264 s here, green).
+
+**Decided against, with reasons**
+- *Replacing `synchronized` with `LockedExecutor`/`StripeLockedExecutor` in the assembler, publisher and watermark channel:* JFR over the soak and the crash
+  matrix shows zero virtual-thread pinning, at most one monitor-enter event and no deadlock, so there is no measured problem to fix, while a rewrite of
+  ~100 critical sections would put the Aeron write path at risk. Revisit only if a profile shows monitor contention.
+- *Per-transaction `EnvelopeFramer`:* it allocates a few hundred bytes of small objects per transaction next to megabytes of Store data that already travel
+  through shared off-heap buffers; pooling it would add reset-state bugs for no measurable gain.
+- *`WriterSession`, `CursorSnapshot` and `MergerLifecycle` merges:* behaviour-neutral renames across many files with no defect behind them.
+
+**Verification:** 844 unit tests, 30 integration tests, the 17-trial crash matrix and soak seeds 1, 2 and 3 pass.

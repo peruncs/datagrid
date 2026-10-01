@@ -44,7 +44,6 @@ module peruncs.cluster
     // The upstream module name is misspelled; keep the dependency aligned with
     // the published module descriptor.
     requires transitive org.eclipes.store.gigamap.jvector;
-    requires transitive jvector;
     exports peruncs.cluster.api;
     exports peruncs.cluster.errors;
     opens peruncs.cluster.storage.aeron.mark to org.eclipse.serializer.persistence.binary;

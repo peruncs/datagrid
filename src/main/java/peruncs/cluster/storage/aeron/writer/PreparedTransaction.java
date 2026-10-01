@@ -18,9 +18,6 @@ final class PreparedTransaction implements AutoCloseable {
     private boolean abortActionInvoked;
     boolean abortAttempted;
     volatile boolean commitPending;
-    private volatile LongConsumer commitAction;
-    private long commitSequence;
-    private boolean commitActionInvoked;
     private boolean locallyAccepted;
     volatile boolean terminal;
     long abortPosition = Aeron.NULL_VALUE;
@@ -60,23 +57,6 @@ final class PreparedTransaction implements AutoCloseable {
         synchronized (this.owner) {
             this.locallyAccepted = true;
         }
-    }
-
-    void onCommit(final LongConsumer action, final long sequence) {
-        this.commitAction = Objects.requireNonNull(action, "action");
-        this.commitSequence = sequence;
-    }
-
-    void invokeCommitAction() {
-        final LongConsumer action;
-        final long sequence;
-        synchronized (this.owner) {
-            if (this.commitActionInvoked || this.commitAction == null) return;
-            this.commitActionInvoked = true;
-            action = this.commitAction;
-            sequence = this.commitSequence;
-        }
-        action.accept(sequence);
     }
 
     /// Registers a callback for an abort whose publication has been attempted.

@@ -19,21 +19,20 @@ Store's JVector index uses for SIMD acceleration ([configuration guide](https://
 Maven applies these flags to its test and integration-test JVMs.
 
 On the module path, target the export at `org.eclipse.serializer.base`
-instead of `ALL-UNNAMED`, and open the Store's vector package to the cluster module so the
-reader can retire stale JVector graphs:
-`--add-opens org.eclipes.store.gigamap.jvector/org.eclipse.store.gigamap.jvector=peruncs.cluster`
-(the upstream module name really is spelled `eclipes`). A node that cannot do so fails at startup.
+instead of `ALL-UNNAMED`. Retiring stale JVector graphs uses the Store's public
+`VectorIndex.invalidateGraph()` ([PR #832](https://github.com/eclipse-store/store/pull/832)), so no
+`--add-opens` and no reflection are needed.
 
 ```bash
 mvn test                      # default gate
 mvn verify -Pintegration      # embedded Store/Aeron integration
 mvn verify -Pcrashmatrix      # forked crash matrix
 mvn verify -Psoak             # writer/reader soak
+mvn verify -Ppoolsweep        # 10,000-transaction pool ownership sweep (about five minutes)
 ```
 
 The pool-ownership integration test runs 1,000 transactions by default (it is bound by two
-Store fsyncs per transaction). Run the full sweep with
-`mvn verify -Pintegration -Dit.test=StorageBinaryPoolOwnershipIT -Dpool.transactions=10000`.
+Store fsyncs per transaction). Run the full 10,000-transaction sweep nightly or before a release with `mvn verify -Ppoolsweep`.
 
 The build tracks Eclipse Store/Serializer `5.0.0-SNAPSHOT`. Deploy every node
 from the same dated snapshot. This is a pre-release artifact, not published
@@ -234,6 +233,8 @@ value is supplied; paths and channels with derived defaults are described above.
 | `PERUNCS_AERON_RETRY_JITTER_BASE_NANOS` | `1000` |
 | `PERUNCS_AERON_RETRY_JITTER_CAP_NANOS` | `1000000` |
 | `PERUNCS_AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS` | `10000000` |
+| `PERUNCS_AERON_RETRY_CATALOG_PROBE_INITIAL_DELAY_NANOS` | `1000000` |
+| `PERUNCS_AERON_RETRY_CATALOG_PROBE_MAX_DELAY_NANOS` | `100000000` |
 | `PERUNCS_AERON_RETENTION_OPERATION_TIMEOUT_MILLIS` | `60000` |
 | `PERUNCS_AERON_RECORDING_STOP_TIMEOUT_NANOS` | `30000000000` |
 | `PERUNCS_AERON_READER_STOP_TIMEOUT_NANOS` | `30000000000` |

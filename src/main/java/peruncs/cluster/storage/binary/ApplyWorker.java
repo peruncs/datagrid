@@ -165,7 +165,6 @@ final class ApplyWorker {
                     this.materializationBudgetMs,
                     TimeUnit.MILLISECONDS);
             final long writeSectionStartNanos = System.nanoTime();
-            final boolean[] warmupNeeded = {false};
             try {
                 this.graphUpdater.accept(() ->
                         ClusterStoreIndexes.withRegistrationRead(() ->
@@ -236,14 +235,16 @@ final class ApplyWorker {
                      * invalidation share one root-graph traversal: an
                      * unsupported index fails this reader closed. The scan
                      * visits index metadata only, never entity payload. */
-                    warmupNeeded[0] = this.indexMaintenance.afterApply(this.storage, this.maxValidatedIndexObjects);
+                    final boolean invalidated = this.indexMaintenance.afterApply(
+                            this.storage, this.maxValidatedIndexObjects);
+                    /* Rebuild the invalidated graphs here, inside the exclusive section. Upstream's first
+                     * access after an invalidation (`ensureIndexInitialized`) creates the in-memory builder
+                     * without any lock, so two concurrent first searches can replace the builder the other
+                     * just filled and leave an empty graph marked as rebuilt for good. With reads excluded,
+                     * exactly one thread, this one, performs the first access. */
+                    if (invalidated) this.indexMaintenance.warmupVectorSearchGraphs();
                 }));
-                /* The write section ends here: application reads resume. The invalidated graphs
-                 * rebuild lazily on their first search, exactly once under the index's own monitor,
-                 * so warming them up now only moves that cost off the first application query. It
-                 * must not hold the exclusive section: a large rebuild would block every read. */
                 this.noteBlockedTime(writeSectionStartNanos, pending);
-                if (warmupNeeded[0]) this.indexMaintenance.warmupVectorSearchGraphs();
             } catch (final RuntimeException | Error failure) {
                 /* A genuine failure says failed; only an overrun says timed
                  * out. The two are never conflated into one message. */

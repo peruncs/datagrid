@@ -1,5 +1,6 @@
 package peruncs.cluster.storage.aeron.writer;
 
+import peruncs.cluster.test.DirectBufferReceiver;
 import io.aeron.Aeron;
 import io.aeron.ExclusivePublication;
 import io.aeron.Subscription;
@@ -225,7 +226,7 @@ class AeronUdpReplicationIT {
         boolean value();
     }
 
-    private static final class RecordingReceiver implements StorageBinaryDataReceiver {
+    private static final class RecordingReceiver implements DirectBufferReceiver {
         private volatile String dictionary;
         private volatile byte[] data;
         private volatile boolean observedBeforeLocal;

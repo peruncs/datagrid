@@ -16,23 +16,17 @@ import java.nio.ByteOrder;
 public interface StorageBinaryDataReceiver {
     /// Allocates native storage for a transaction being assembled for this receiver.
     ///
-    /// The default allocates untracked direct memory that only the garbage collector reclaims; use it in
-    /// short tests only. A production receiver overrides this together with [#releaseNativeBuffer(ByteBuffer)].
+    /// The receiver owns the allocation policy (pooling, limits, accounting) because it is the one that
+    /// finally releases the buffers; there is deliberately no default.
     ///
     /// @param minimumCapacity required capacity in bytes
     /// @return writable native buffer with at least the requested capacity
-    default ByteBuffer allocateNativeBuffer(final int minimumCapacity) {
-        return ByteBuffer.allocateDirect(minimumCapacity).order(ByteOrder.nativeOrder());
-    }
+    ByteBuffer allocateNativeBuffer(int minimumCapacity);
 
     /// Releases native storage acquired for a transaction for this receiver.
     ///
-    /// The default leaves the buffer to the garbage collector; a receiver that pools or
-    /// scopes its buffers overrides this together with [#allocateNativeBuffer(int)].
-    ///
     /// @param buffer native buffer to release
-    default void releaseNativeBuffer(final ByteBuffer buffer) {
-    }
+    void releaseNativeBuffer(ByteBuffer buffer);
 
     /// Returns a terminal receiver failure, or `null` while healthy.
     ///

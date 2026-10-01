@@ -63,20 +63,15 @@ final class BackupArchive {
     /// @throws NodeException when the upload is missing, ambiguous, partial, or over budget
     static void validateUpload(final Path archive, final BackupArchiveLimits limits) throws NodeException {
         try (ZipFile zip = openArchive(archive)) {
-            final List<ZipEntry> entries = listEntries(zip, limits.maxArchiveEntries());
-            boolean storagePayload = false;
-            for (final ZipEntry entry : entries) {
-                if (!entry.isDirectory() && entry.getSize() != 0L &&
-                    entry.getName().startsWith(StorageBackupBackend.STORAGE_ENTRY + "/")) {
-                    storagePayload = true;
-                }
-            }
+            scan(zip, limits.maxArchiveEntries());
+            final boolean storagePayload = zip.stream().anyMatch(entry -> !entry.isDirectory() &&
+                    entry.getSize() != 0L && entry.getName().startsWith(StorageBackupBackend.STORAGE_ENTRY + "/"));
             if (!storagePayload) {
                 throw new NodeException(
                         "User-uploaded storage archive contains no non-empty storage payload at %s; refusing to install a partial upload"
                                 .formatted(archive));
             }
-            dryRunBudget(zip, entries, limits.maxExtractedBytes());
+            dryRunBudget(zip, limits.maxExtractedBytes());
         } catch (final IOException closeFailure) {
             throw new NodeException(
                     "User-uploaded storage archive cannot be read at %s; refusing to install".formatted(archive),
@@ -94,17 +89,16 @@ final class BackupArchive {
     /// is refused before the caller relies on it.
     ///
     /// @param zip        open upload archive
-    /// @param entries    bounded, de-duplicated entry list
     /// @param maxExtractedBytes total extraction budget
     /// @throws NodeException when the real content exceeds the budget
     private static void dryRunBudget(
             final ZipFile zip,
-            final List<ZipEntry> entries,
             final long maxExtractedBytes
     ) throws NodeException {
         long remaining = maxExtractedBytes;
         final byte[] discard = new byte[64 * 1024];
-        for (final ZipEntry entry : entries) {
+        for (final var entries = zip.entries(); entries.hasMoreElements(); ) {
+            final ZipEntry entry = entries.nextElement();
             if (entry.isDirectory()) continue;
             try (InputStream data = zip.getInputStream(entry)) {
                 if (data == null) {
@@ -409,24 +403,21 @@ final class BackupArchive {
             throws NodeException {
         Objects.requireNonNull(limits, "limits");
         try (ZipFile zip = openArchive(archive)) {
-            final List<ZipEntry> entries = listEntries(zip, limits.maxArchiveEntries());
-            final long declared = declaredTotalBytes(entries);
+            final long declared = scan(zip, limits.maxArchiveEntries()).declaredBytes();
             if (declared < 0L || declared > limits.maxExtractedBytes()) {
                 throw new NodeException("Backup archive is too large");
             }
             final String prefix = StorageBackupBackend.STORAGE_ENTRY + "/";
-            final List<ZipEntry> storageEntries = new ArrayList<>();
-            for (final ZipEntry entry : entries) {
-                if (!entry.isDirectory() && entry.getName().startsWith(prefix)) {
-                    storageEntries.add(entry);
-                }
-            }
+            /* Only the sorted names of the Store files are kept; each entry is looked up again when read. */
+            final List<String> storageNames = zip.stream()
+                    .filter(entry -> !entry.isDirectory() && entry.getName().startsWith(prefix))
+                    .map(entry -> entry.getName().substring(prefix.length()))
+                    .sorted().toList();
             final CRC32C digest = new CRC32C();
             long actualBytes = 0L;
-            storageEntries.sort(Comparator.comparing(entry -> entry.getName().substring(prefix.length())));
             final byte[] buffer = new byte[8192];
-            for (final ZipEntry entry : storageEntries) {
-                final String name = entry.getName().substring(prefix.length());
+            for (final String name : storageNames) {
+                final ZipEntry entry = zip.getEntry(prefix + name);
                 digest.update(name.getBytes(StandardCharsets.UTF_8));
                 try (InputStream data = zip.getInputStream(entry)) {
                     int read;
@@ -554,12 +545,13 @@ final class BackupArchive {
             Files.createDirectories(root);
             AtomicFileWriter.ensureNoSymbolicLinks(root);
             try (ZipFile zip = openArchive(archive)) {
-                final List<ZipEntry> entries = listEntries(zip, limits.maxArchiveEntries());
-                final long budget = extractionBudget(entries, limits.maxExtractedBytes());
+                final long budget = extractionBudget(
+                        scan(zip, limits.maxArchiveEntries()).declaredBytes(), limits.maxExtractedBytes());
                 final byte[] transferBuffer = new byte[8192];
                 long extractedBytes = 0L;
-                for (final ZipEntry entry : entries) {
-                    extractedBytes = extractEntry(zip, root, entry, extractedBytes, budget, transferBuffer);
+                for (final var entries = zip.entries(); entries.hasMoreElements(); ) {
+                    extractedBytes = extractEntry(zip, root, entries.nextElement(), extractedBytes, budget,
+                            transferBuffer);
                 }
             }
             forceExtractedDirectories(root);
@@ -591,14 +583,10 @@ final class BackupArchive {
     static boolean containsStoragePayload(final Path archive, final int maxArchiveEntries)
             throws NodeException {
         try (ZipFile zip = openArchive(archive)) {
-            for (final ZipEntry entry : listEntries(zip, maxArchiveEntries)) {
-                final String name = entry.getName();
-                if (StorageBackupBackend.STORAGE_ENTRY.equals(name) ||
-                    name.startsWith(StorageBackupBackend.STORAGE_ENTRY + "/")) {
-                    return true;
-                }
-            }
-            return false;
+            scan(zip, maxArchiveEntries);
+            return zip.stream().map(ZipEntry::getName).anyMatch(name ->
+                    StorageBackupBackend.STORAGE_ENTRY.equals(name) ||
+                    name.startsWith(StorageBackupBackend.STORAGE_ENTRY + "/"));
         } catch (final IOException failure) {
             throw new NodeException("Failed to inspect backup archive %s".formatted(archive), failure);
         }
@@ -628,44 +616,45 @@ final class BackupArchive {
         return new IncompleteArchiveException(message, cause);
     }
 
-    /// Lists central-directory entries after count, duplicate, and name checks.
+    /// What one validating pass over the central directory found.
     ///
-    /// Reading the central directory inflates nothing, so hostile declared
-    /// sizes are visible before any entry data is decompressed.
-    private static List<ZipEntry> listEntries(final ZipFile zip, final int maxEntries) throws NodeException {
-        final List<ZipEntry> entries = new ArrayList<>();
+    /// @param count         number of entries
+    /// @param declaredBytes sum of declared sizes, or `-1` when any size is unknown
+    private record ArchiveScan(int count, long declaredBytes) {
+    }
+
+    /// Validates the central directory in one streaming pass: entry count, duplicate and unsafe names,
+    /// and the declared size total.
+    ///
+    /// No entry objects are retained, so a hostile archive with the maximum entry count costs only the
+    /// duplicate-name set. Reading the central directory inflates nothing, so hostile declared sizes are
+    /// visible before any entry data is decompressed.
+    private static ArchiveScan scan(final ZipFile zip, final int maxEntries) throws NodeException {
         final Set<String> names = new HashSet<>();
-        for (final var iterator = zip.entries().asIterator(); iterator.hasNext(); ) {
-            final ZipEntry entry = iterator.next();
-            if (entries.size() >= maxEntries || !names.add(entry.getName())) {
+        long total = 0L;
+        boolean unknown = false;
+        for (final var entries = zip.entries(); entries.hasMoreElements(); ) {
+            final ZipEntry entry = entries.nextElement();
+            if (names.size() >= maxEntries || !names.add(entry.getName())) {
                 throw new NodeException("Backup archive contains too many or duplicate entries");
             }
             if (!safeArchiveName(entry.getName())) {
                 throw new NodeException("Backup archive contains an unsafe entry: %s".formatted(entry.getName()));
             }
-            entries.add(entry);
-        }
-        return entries;
-    }
-
-    /// Sums declared entry sizes, or `-1` when any size is unknown.
-    private static long declaredTotalBytes(final List<ZipEntry> entries) throws NodeException {
-        long total = 0L;
-        for (final ZipEntry entry : entries) {
-            if (entry.isDirectory()) continue;
+            if (entry.isDirectory() || unknown) continue;
             final long size = entry.getSize();
-            if (size < 0L) return -1L;
-            if (size > Long.MAX_VALUE - total) {
+            if (size < 0L) {
+                unknown = true;
+            } else if (size > Long.MAX_VALUE - total) {
                 throw new NodeException("Backup archive declares more data than the extraction budget");
+            } else {
+                total += size;
             }
-            total += size;
         }
-        return total;
+        return new ArchiveScan(names.size(), unknown ? -1L : total);
     }
 
-    private static long extractionBudget(final List<ZipEntry> entries, final long maximum)
-            throws NodeException {
-        final long declared = declaredTotalBytes(entries);
+    private static long extractionBudget(final long declared, final long maximum) throws NodeException {
         if (declared > maximum) {
             throw new NodeException("Backup archive declares more data than the extraction budget");
         }

@@ -1,5 +1,6 @@
 package peruncs.cluster.node.aeron;
 
+import peruncs.cluster.test.DirectBufferReceiver;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.eclipse.serializer.persistence.binary.types.ChunksWrapper;
@@ -94,7 +95,7 @@ class AeronReplicationMonitoringTest {
     void writerRoleGetsAnInertReaderClient() {
         try (final ClusterReplicationTransport transport = new AeronTransport(properties("writer"))) {
             final ReplicationMark mark = new ReplicationMark(UUID.randomUUID(), UUID.randomUUID(), 1L, -1L);
-            final ReplicationApplier applier = transport.clientFromMark(new StorageBinaryDataReceiver() {
+            final ReplicationApplier applier = transport.clientFromMark(new DirectBufferReceiver() {
                 @Override
                 public void receiveData(final Binary data) {
                     throw new AssertionError("a writer must not receive data");

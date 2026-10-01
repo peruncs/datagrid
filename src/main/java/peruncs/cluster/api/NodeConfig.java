@@ -105,6 +105,10 @@ public record NodeConfig(
                 "PERUNCS_AERON_RETRY_JITTER_CAP_NANOS", "1000000", NodeConfig::parsePositiveNanos),
         AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS(
                 "PERUNCS_AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS", "10000000", NodeConfig::parsePositiveNanos),
+        AERON_RETRY_CATALOG_PROBE_INITIAL_DELAY_NANOS(
+                "PERUNCS_AERON_RETRY_CATALOG_PROBE_INITIAL_DELAY_NANOS", "1000000", NodeConfig::parsePositiveNanos),
+        AERON_RETRY_CATALOG_PROBE_MAX_DELAY_NANOS(
+                "PERUNCS_AERON_RETRY_CATALOG_PROBE_MAX_DELAY_NANOS", "100000000", NodeConfig::parsePositiveNanos),
         AERON_RETENTION_OPERATION_TIMEOUT_MILLIS(
                 "PERUNCS_AERON_RETENTION_OPERATION_TIMEOUT_MILLIS", "60000", NodeConfig::parsePositiveMillis),
         AERON_RECORDING_STOP_TIMEOUT_NANOS(
@@ -349,11 +353,16 @@ public record NodeConfig(
     /// @param jitterBase        first delay between two offer retries; must not exceed `jitterCap`
     /// @param jitterCap         longest delay between two offer retries
     /// @param archiveProbeDelay spacing of Archive progress probes while waiting for a recorded position
+    /// @param catalogProbeInitialDelay first spacing of Archive catalog probes while waiting for a recording to start
+    /// @param catalogProbeMaxDelay    longest spacing of those probes; the spacing grows from the initial delay to this
     public record RetryPacing(Duration idleMaxPark, Duration jitterBase, Duration jitterCap,
-                              Duration archiveProbeDelay) {
-        /// Documented defaults: 1 ms idle park, 1 µs jitter base, 1 ms jitter cap and 10 ms probe spacing.
+                              Duration archiveProbeDelay, Duration catalogProbeInitialDelay,
+                              Duration catalogProbeMaxDelay) {
+        /// Documented defaults: 1 ms idle park, 1 µs jitter base, 1 ms jitter cap, 10 ms probe spacing and
+        /// catalog probes growing from 1 ms to 100 ms.
         public static final RetryPacing DEFAULT = new RetryPacing(
-                Duration.ofMillis(1), Duration.ofNanos(1_000), Duration.ofMillis(1), Duration.ofMillis(10));
+                Duration.ofMillis(1), Duration.ofNanos(1_000), Duration.ofMillis(1), Duration.ofMillis(10),
+                Duration.ofMillis(1), Duration.ofMillis(100));
 
         public RetryPacing {
             positive(idleMaxPark, "idleMaxPark");
@@ -363,6 +372,11 @@ public record NodeConfig(
                 throw new IllegalArgumentException("jitterBase must not exceed jitterCap");
             }
             positive(archiveProbeDelay, "archiveProbeDelay");
+            positive(catalogProbeInitialDelay, "catalogProbeInitialDelay");
+            positive(catalogProbeMaxDelay, "catalogProbeMaxDelay");
+            if (catalogProbeInitialDelay.compareTo(catalogProbeMaxDelay) > 0) {
+                throw new IllegalArgumentException("catalogProbeInitialDelay must not exceed catalogProbeMaxDelay");
+            }
         }
     }
 
@@ -549,7 +563,9 @@ public record NodeConfig(
                 Duration.ofNanos(value(parsed, Setting.AERON_RETRY_IDLE_MAX_PARK_NANOS)),
                 Duration.ofNanos(value(parsed, Setting.AERON_RETRY_JITTER_BASE_NANOS)),
                 Duration.ofNanos(value(parsed, Setting.AERON_RETRY_JITTER_CAP_NANOS)),
-                Duration.ofNanos(value(parsed, Setting.AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS)));
+                Duration.ofNanos(value(parsed, Setting.AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS)),
+                Duration.ofNanos(value(parsed, Setting.AERON_RETRY_CATALOG_PROBE_INITIAL_DELAY_NANOS)),
+                Duration.ofNanos(value(parsed, Setting.AERON_RETRY_CATALOG_PROBE_MAX_DELAY_NANOS)));
         final AeronConfig aeron = new AeronConfig(
                 clusterId,
                 value(parsed, Setting.AERON_NODE_ID),

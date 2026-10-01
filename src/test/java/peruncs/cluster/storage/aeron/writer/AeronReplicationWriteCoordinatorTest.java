@@ -509,7 +509,6 @@ class AeronReplicationWriteCoordinatorTest {
     void acceptedStoreCommitRetriesAfterOfferTimeoutWithoutLatchingWriter() {
         final AtomicBoolean blockCommit = new AtomicBoolean(true);
         final AtomicInteger acknowledgements = new AtomicInteger();
-        final AtomicLong committedSequence = new AtomicLong(-1L);
         final AeronReplicationConfiguration configuration = AeronReplicationConfiguration.builder()
                 .chunkSize(256).maxTransactionBytes(512)
                 .offerTimeoutNanos(TimeUnit.MILLISECONDS.toNanos(2)).build();
@@ -534,7 +533,7 @@ class AeronReplicationWriteCoordinatorTest {
             @Override public boolean isWritable() { return true; }
         };
         final AeronStorageBinaryReplicationTarget target = WriterTargets.create(
-                local, coordinator, new TypeDictionaryOutbox(), committedSequence::set, () -> true);
+                local, coordinator, new TypeDictionaryOutbox(), () -> true);
         try {
             final ReplicationPendingException pending = assertThrows(ReplicationPendingException.class,
                     () -> target.write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
@@ -543,12 +542,11 @@ class AeronReplicationWriteCoordinatorTest {
             assertSame(pending, coordinator.failure());
             assertThrows(WriteRejectedException.class,
                     () -> coordinator.prepare(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{2}))));
-            assertEquals(-1L, committedSequence.get(), "the sequence is not live until COMMIT is offered");
+            assertEquals(-1L, terminalPosition.get(), "the sequence is not live until COMMIT is offered");
 
             blockCommit.set(false);
             coordinator.retryPendingCommit();
             assertNull(coordinator.failure());
-            assertEquals(0L, committedSequence.get());
             assertTrue(terminalPosition.get() >= 0L);
             assertEquals(1, acknowledgements.get(), "prepare is acknowledged, Store COMMIT is not awaited");
             try (final var next = coordinator.prepare(
@@ -617,8 +615,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        WriterTargets.create(local, coordinator, source, ignored -> {
-        }, () -> true)
+        WriterTargets.create(local, coordinator, source, () -> true)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
         assertEquals(List.of(AeronReplicationEnvelope.Kind.TYPE_DICTIONARY,
                 AeronReplicationEnvelope.Kind.STORE_BINARY, AeronReplicationEnvelope.Kind.COMMIT), kinds);
@@ -649,9 +646,7 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        final var target = WriterTargets.create(local, coordinator, source,
-                ignored -> {
-                }, () -> true);
+        final var target = WriterTargets.create(local, coordinator, source, () -> true);
         final var first = ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}));
         assertThrows(IllegalStateException.class, () -> target.write(first));
         /* After an uncertain local write, the publisher is failed closed; a
@@ -711,37 +706,10 @@ class AeronReplicationWriteCoordinatorTest {
                 return true;
             }
         };
-        WriterTargets.create(local, coordinator, null, ignored -> {
-        }, () -> false)
+        WriterTargets.create(local, coordinator, null, () -> false)
                 .write(ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1})));
         assertEquals(1, localWrites.get());
         assertEquals(0, offers.get());
-        coordinator.dispose();
-    }
-
-    /// Verifies committed sequence callback does not advance on uncertain commit.
-    @Test
-    void committedSequenceCallbackDoesNotAdvanceOnUncertainCommit() {
-        final AtomicInteger offers = new AtomicInteger();
-        final AtomicLong committed = new AtomicLong(-1);
-        final var configuration = AeronReplicationConfiguration.builder().termLength(64 * 1024)
-                .chunkSize(256).maxTransactionBytes(1024).build();
-        final var publisher = PublisherFixtures.forTests(
-                (buffer, offset, length) -> offers.incrementAndGet() == 1 ? length : Publication.CLOSED,
-                configuration.maxMessageLength(), configuration, UUID.randomUUID(), 1, 0);
-        final var coordinator = new AeronReplicationWriteCoordinator(publisher);
-        final PersistenceTarget<Binary> local = new PersistenceTarget<>() {
-            public void write(final Binary ignored) {
-            }
-
-            public boolean isWritable() {
-                return true;
-            }
-        };
-        assertThrows(ReplicationPendingException.class, () -> WriterTargets.create(
-                local, coordinator, null, committed::set, () -> true).write(
-                ChunksWrapper.New(XMemory.toDirectByteBuffer(new byte[]{1}))));
-        assertEquals(-1, committed.get(), "uncertain commit must not advance the local index");
         coordinator.dispose();
     }
 
@@ -985,7 +953,7 @@ class AeronReplicationWriteCoordinatorTest {
             @Override public boolean isWritable() { return true; }
         };
         final AeronStorageBinaryReplicationTarget target = WriterTargets.create(
-                local, coordinator, dictionaries, ignored -> { }, () -> true);
+                local, coordinator, dictionaries, () -> true);
         dictionaries.stageIncremental("first-type");
         final Thread first = Thread.ofVirtual().start(() -> {
             try {

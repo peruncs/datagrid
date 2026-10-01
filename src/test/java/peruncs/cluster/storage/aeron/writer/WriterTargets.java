@@ -6,7 +6,6 @@ import peruncs.cluster.storage.binary.TypeDictionaryOutbox;
 import peruncs.cluster.storage.index.ClusterStoreIndexes;
 
 import java.util.function.BooleanSupplier;
-import java.util.function.LongConsumer;
 import java.util.function.ToIntFunction;
 
 /// Builds replication targets for tests whose Store access is not under test.
@@ -22,18 +21,16 @@ final class WriterTargets {
     /// Creates a target replicating every write without dictionary staging.
     static AeronStorageBinaryReplicationTarget create(final PersistenceTarget<Binary> delegate,
                                                       final AeronReplicationWriteCoordinator coordinator) {
-        return create(delegate, coordinator, null, ignored -> {
-        }, () -> true);
+        return create(delegate, coordinator, null, () -> true);
     }
 
     /// Creates a target with the given callbacks and no writer-side index check.
     static AeronStorageBinaryReplicationTarget create(final PersistenceTarget<Binary> delegate,
                                                       final AeronReplicationWriteCoordinator coordinator,
                                                       final TypeDictionaryOutbox dictionarySource,
-                                                      final LongConsumer committedSequence,
                                                       final BooleanSupplier distributionEnabled) {
         return new AeronStorageBinaryReplicationTarget(delegate, () -> coordinator,
-                new AeronStorageBinaryReplicationTarget.TargetCallbacks(dictionarySource, committedSequence,
+                new AeronStorageBinaryReplicationTarget.TargetCallbacks(dictionarySource,
                         distributionEnabled, null, VALIDATE_EVERYTHING));
     }
 }

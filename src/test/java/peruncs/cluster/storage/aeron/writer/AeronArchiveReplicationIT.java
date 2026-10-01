@@ -1,5 +1,6 @@
 package peruncs.cluster.storage.aeron.writer;
 
+import peruncs.cluster.test.DirectBufferReceiver;
 import io.aeron.Aeron;
 import io.aeron.archive.Archive;
 import io.aeron.archive.ArchiveThreadingMode;
@@ -726,7 +727,7 @@ class AeronArchiveReplicationIT {
     ) {
     }
 
-    private static final class CountingReceiver implements StorageBinaryDataReceiver {
+    private static final class CountingReceiver implements DirectBufferReceiver {
         private final java.util.concurrent.atomic.AtomicInteger applied = new java.util.concurrent.atomic.AtomicInteger();
 
         @Override
@@ -743,7 +744,7 @@ class AeronArchiveReplicationIT {
         }
     }
 
-    private static final class RecordingReceiver implements StorageBinaryDataReceiver {
+    private static final class RecordingReceiver implements DirectBufferReceiver {
         private volatile String dictionary;
         private volatile byte[] data;
 

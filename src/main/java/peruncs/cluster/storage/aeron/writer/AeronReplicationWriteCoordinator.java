@@ -311,7 +311,6 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
         try {
             this.terminalRecorded.accept(position);
-            prepared.invokeCommitAction();
         } catch (final RuntimeException | Error failed) {
             this.publisher.failClosed();
             this.finishCommit(failed instanceof RuntimeException runtime ? runtime : null,
@@ -347,7 +346,6 @@ public final class AeronReplicationWriteCoordinator implements AutoCloseable {
         }
         try {
             this.terminalRecorded.accept(position);
-            prepared.invokeCommitAction();
         } catch (final RuntimeException | Error failed) {
             this.publisher.failClosed();
             this.finishCommit(failed instanceof RuntimeException runtime ? runtime : null,

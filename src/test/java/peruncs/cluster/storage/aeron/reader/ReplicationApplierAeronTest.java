@@ -1,5 +1,6 @@
 package peruncs.cluster.storage.aeron.reader;
 
+import peruncs.cluster.test.DirectBufferReceiver;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
@@ -601,7 +602,7 @@ class ReplicationApplierAeronTest {
                 TransactionAssemblerTestSupport.New(
                         AeronReplicationConfiguration.builder()/* direct-accept fixture: keep the barrier at one transaction */.readerBarrierMaxTransactions(1).termLength(64 * 1024).chunkSize(256)
                                 .maxTransactionBytes(1024).build(), CLUSTER, EPOCH, -1,
-                        new StorageBinaryDataReceiver() {
+                        new DirectBufferReceiver() {
                             public void receiveData(final Binary value) {
                                 throw new IllegalStateException("receiver failed");
                             }
@@ -734,7 +735,7 @@ class ReplicationApplierAeronTest {
         }
     }
 
-    private static class RecordingReceiver implements StorageBinaryDataReceiver {
+    private static class RecordingReceiver implements DirectBufferReceiver {
         private String dictionary;
         private byte[] data;
         private int dataCalls;
@@ -754,7 +755,7 @@ class ReplicationApplierAeronTest {
         }
     }
 
-    private static final class RetainingReceiver implements StorageBinaryDataReceiver {
+    private static final class RetainingReceiver implements DirectBufferReceiver {
         private Binary retained;
 
         @Override

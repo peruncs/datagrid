@@ -105,8 +105,7 @@ class ModuleDescriptorConsistencyTest {
                         "org.eclipse.store.gigamap",
                         "org.eclipse.store.gigamap.lucene",
                         "org.apache.lucene.core",
-                        "org.eclipes.store.gigamap.jvector",
-                        "jvector"), transitive,
+                        "org.eclipes.store.gigamap.jvector"), transitive,
                 "only public API dependencies may be transitive: " + transitive);
     }
 

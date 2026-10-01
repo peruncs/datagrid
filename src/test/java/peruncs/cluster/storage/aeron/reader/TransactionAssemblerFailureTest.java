@@ -1,5 +1,6 @@
 package peruncs.cluster.storage.aeron.reader;
 
+import peruncs.cluster.test.DirectBufferReceiver;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.memory.XMemory;
 import org.eclipse.serializer.persistence.binary.types.Binary;
@@ -47,7 +48,7 @@ class TransactionAssemblerFailureTest {
     }
 
     private static StorageBinaryDataReceiver emptyReceiver() {
-        return new StorageBinaryDataReceiver() {
+        return new DirectBufferReceiver() {
             @Override
             public void receiveData(final Binary value) {
             }
@@ -90,7 +91,7 @@ class TransactionAssemblerFailureTest {
     void failureReturnsPromptlyWhileDeliveryIsInsideAwaitApplied() throws Exception {
         final CountDownLatch importEntered = new CountDownLatch(1);
         final CountDownLatch releaseImport = new CountDownLatch(1);
-        final StorageBinaryDataReceiver receiver = new StorageBinaryDataReceiver() {
+        final StorageBinaryDataReceiver receiver = new DirectBufferReceiver() {
             @Override
             public void receiveData(final Binary value) {
                 // The JSON import itself is not the blocking part under test.
@@ -150,7 +151,7 @@ class TransactionAssemblerFailureTest {
     void disposeReturnsWhileDeliveryIsInsideAwaitApplied() throws Exception {
         final CountDownLatch importEntered = new CountDownLatch(1);
         final CountDownLatch releaseImport = new CountDownLatch(1);
-        final StorageBinaryDataReceiver receiver = new StorageBinaryDataReceiver() {
+        final StorageBinaryDataReceiver receiver = new DirectBufferReceiver() {
             @Override
             public void receiveData(final Binary value) {
             }
@@ -198,7 +199,7 @@ class TransactionAssemblerFailureTest {
     /// Proves the polling thread releases an incomplete transaction after a concurrent failure.
     @Test
     void pollingThreadReleasesIncompleteTransactionAfterFailure() {
-        final TransactionAssembler assembler = assembler(new StorageBinaryDataReceiver() {
+        final TransactionAssembler assembler = assembler(new DirectBufferReceiver() {
             @Override
             public void receiveData(final Binary value) {
             }
@@ -230,7 +231,7 @@ class TransactionAssemblerFailureTest {
     void dictionaryAndDataBuffersUseTheReceiverReleasePath() {
         final AtomicInteger allocations = new AtomicInteger();
         final AtomicInteger releases = new AtomicInteger();
-        final StorageBinaryDataReceiver receiver = new StorageBinaryDataReceiver() {
+        final StorageBinaryDataReceiver receiver = new DirectBufferReceiver() {
             @Override
             public ByteBuffer allocateNativeBuffer(final int minimumCapacity) {
                 allocations.incrementAndGet();
@@ -280,7 +281,7 @@ class TransactionAssemblerFailureTest {
                 .chunkSize(256)
                 .maxTransactionBytes(1024)
                 .build();
-        final StorageBinaryDataReceiver receiver = new StorageBinaryDataReceiver() {
+        final StorageBinaryDataReceiver receiver = new DirectBufferReceiver() {
             @Override
             public void receiveData(final Binary value) {
             }

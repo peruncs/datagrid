@@ -280,10 +280,7 @@ public final class NodeLifecycle implements AutoCloseable, Unpersistable {
         this.assembly.replication.positionProvider.get().init();
 
         final var storageParentPath = this.assembly.storageParentPath();
-        final var storageRootPath = storageParentPath.resolve("storage");
-        /* A crash while a Store replacement was installing must be repaired before anything
-         * decides whether a Store exists. */
-        AtomicFileWriter.recoverInterruptedReplacement(storageRootPath);
+        final var storageRootPath = this.recoverStorageRoot(storageParentPath);
 
         /* A user upload installs a different image, so the node starts from
          * the latest writer position and must publish a starter backup;
@@ -325,17 +322,9 @@ public final class NodeLifecycle implements AutoCloseable, Unpersistable {
                     "backup node has no local Store image at %s, no compatible backup, and no user upload; seed the Store directory with the writer's Store and replication mark before starting"
                             .formatted(storageRootPath));
         }
-        final var embeddedStorageManager = this.prepareEmbeddedStorage(storageRootPath).start();
-        this.assembly.embeddedStorageManager = embeddedStorageManager;
-        if (this.assembly.hasReplicationMark()) this.requireStoredMark(embeddedStorageManager, storageRootPath);
-        this.initializeRoot(embeddedStorageManager, installedUserUpload);
-        /* Same one-time policy scan as storage nodes: a seeded or uploaded
-         * image with an external index registration is rejected before the
-         * backup node serves or publishes anything. */
-        this.validateStoreRoots(embeddedStorageManager, config);
-
-        this.assembly.replication.distributionIgnored.set(false);
-        this.queueWriterDictionary(embeddedStorageManager);
+        final var embeddedStorageManager = this.openStore(
+                this.prepareEmbeddedStorage(storageRootPath), storageRootPath, installedUserUpload);
+        this.enableDistribution(embeddedStorageManager);
 
         final var maintenance = this.assembly.getNodeMaintenanceScheduler();
 
@@ -444,11 +433,7 @@ public final class NodeLifecycle implements AutoCloseable, Unpersistable {
         LOGGER.log(INFO, "Starting storage cluster node");
         final NodeConfig config = this.assembly.getNodeConfig();
 
-        final var storageParentPath = this.assembly.storageParentPath();
-        final var storageRootPath = storageParentPath.resolve("storage");
-        /* A crash while a Store replacement was installing must be repaired before anything
-         * decides whether a Store exists. */
-        AtomicFileWriter.recoverInterruptedReplacement(storageRootPath);
+        final var storageRootPath = this.recoverStorageRoot(this.assembly.storageParentPath());
         final boolean writer = this.assembly.nodeRole.canWrite();
 
         /* The lock protects the Store path, so acquire it before backup
@@ -496,32 +481,13 @@ public final class NodeLifecycle implements AutoCloseable, Unpersistable {
                 )
         );
 
-        final EmbeddedStorageManager embeddedStorageManager;
-        try {
-            embeddedStorageManager = embeddedStorageFoundation.start();
-        } catch (final ReaderWriteRejectedException missingReaderSeed) {
-            if (!this.assembly.nodeRole.isWriter() && this.assembly.hasReplicationMark()) {
-                throw new ReseedRequiredException(
-                        "reader Store has no committed replication mark; restore a compatible backup or seed the Store directory with the writer's Store mark",
-                        missingReaderSeed);
-            }
-            throw missingReaderSeed;
-        }
-        this.assembly.embeddedStorageManager = embeddedStorageManager;
-        if (!this.assembly.nodeRole.isWriter() && this.assembly.hasReplicationMark()) {
-            this.requireStoredMark(embeddedStorageManager, storageRootPath);
-        }
-        this.initializeRoot(embeddedStorageManager, this.assembly.mayCreateRoot());
-        /* One-time policy scan at Store start: a freshly deserialized or
-         * seeded image containing an external index is rejected before
-         * the node serves or publishes anything. */
-        this.validateStoreRoots(embeddedStorageManager, config);
+        final EmbeddedStorageManager embeddedStorageManager = this.openStore(
+                embeddedStorageFoundation, storageRootPath, this.assembly.mayCreateRoot());
 
         final var limitGate = this.assembly.getStorageLimitGate();
         limitGate.updateUsage(this.assembly.getStorageUsageGauge().measureNow());
 
-        this.assembly.replication.distributionIgnored.set(false);
-        this.queueWriterDictionary(embeddedStorageManager);
+        this.enableDistribution(embeddedStorageManager);
 
         final var maintenance = this.assembly.getNodeMaintenanceScheduler();
 
@@ -590,6 +556,56 @@ public final class NodeLifecycle implements AutoCloseable, Unpersistable {
         }
 
         maintenance.start();
+    }
+
+    /// Repairs an interrupted Store replacement and returns the Store directory.
+    ///
+    /// A crash while a replacement was installing must be repaired before anything decides whether a
+    /// Store exists.
+    ///
+    /// @param storageParentPath node storage directory
+    /// @return the directory holding the Store files
+    private Path recoverStorageRoot(final Path storageParentPath) {
+        final Path storageRootPath = storageParentPath.resolve("storage");
+        AtomicFileWriter.recoverInterruptedReplacement(storageRootPath);
+        return storageRootPath;
+    }
+
+    /// Starts the Store and applies the checks every role shares.
+    ///
+    /// A reader without a committed replication mark is told to reseed, the Store's mark must match the
+    /// configured cluster, the root is initialized, and the one-time index policy scan rejects a seeded
+    /// or uploaded image with an external index before the node serves or publishes anything.
+    ///
+    /// @param foundation       prepared Store foundation
+    /// @param storageRootPath  directory holding the Store files
+    /// @param allowCreateRoot  whether this node may create the root object
+    /// @return the started Store, also recorded on the assembly
+    private EmbeddedStorageManager openStore(final EmbeddedStorageFoundation<?> foundation,
+                                             final Path storageRootPath, final boolean allowCreateRoot) {
+        final boolean followsWriter = !this.assembly.nodeRole.isWriter() && this.assembly.hasReplicationMark();
+        final EmbeddedStorageManager store;
+        try {
+            store = foundation.start();
+        } catch (final ReaderWriteRejectedException missingReaderSeed) {
+            if (followsWriter) {
+                throw new ReseedRequiredException(
+                        "reader Store has no committed replication mark; restore a compatible backup or seed the Store directory with the writer's Store mark",
+                        missingReaderSeed);
+            }
+            throw missingReaderSeed;
+        }
+        this.assembly.embeddedStorageManager = store;
+        if (followsWriter) this.requireStoredMark(store, storageRootPath);
+        this.initializeRoot(store, allowCreateRoot);
+        this.validateStoreRoots(store, this.assembly.getNodeConfig());
+        return store;
+    }
+
+    /// Ends the startup window in which Store writes are not replicated and queues the writer's dictionary.
+    private void enableDistribution(final EmbeddedStorageManager store) {
+        this.assembly.replication.distributionIgnored.set(false);
+        this.queueWriterDictionary(store);
     }
 
     /// Queues the complete persisted dictionary for the first post-restart

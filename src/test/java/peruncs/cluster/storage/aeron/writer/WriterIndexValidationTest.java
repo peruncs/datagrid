@@ -65,8 +65,8 @@ class WriterIndexValidationTest {
                     "a rejected transaction must not reach the local target: " + probe.localWrites);
             assertTrue(probe.publications.isEmpty(),
                     "a rejected transaction must not reach publication: " + probe.publications);
-            assertEquals(-1L, probe.committed.get(),
-                    "a rejected transaction must not report a committed sequence");
+            assertEquals(0L, probe.coordinator.nextSequence(),
+                    "a rejected transaction must not consume a sequence");
         }
     }
 
@@ -108,8 +108,8 @@ class WriterIndexValidationTest {
             assertTrue(probe.hookRan.get(), "the commit path must run the validation hook");
             assertEquals(List.of("local"), probe.localWrites,
                     "the accepted transaction must reach the local target");
-            assertEquals(0L, probe.committed.get(),
-                    "the accepted transaction must report its committed sequence");
+            assertEquals(1L, probe.coordinator.nextSequence(),
+                    "the accepted transaction must consume its sequence");
         }
     }
 
@@ -128,8 +128,7 @@ class WriterIndexValidationTest {
         try {
             final List<String> localWrites = new ArrayList<>();
             final AeronStorageBinaryReplicationTarget target = WriterTargets.create(
-                    recordingTarget(localWrites), coordinator, null, ignored -> {
-            }, () -> true);
+                    recordingTarget(localWrites), coordinator, null, () -> true);
             assertDoesNotThrow(target::validateWriterState,
                     "a target without a hook cannot validate: it sees only the Binary, never the Store");
             assertDoesNotThrow(() -> target.write(binary()));
@@ -155,8 +154,7 @@ class WriterIndexValidationTest {
             final List<String> localWrites = new ArrayList<>();
             final AeronStorageBinaryReplicationTarget target = new AeronStorageBinaryReplicationTarget(
                     recordingTarget(localWrites), () -> coordinator,
-                    new AeronStorageBinaryReplicationTarget.TargetCallbacks(null, ignored -> {
-                    }, () -> true, () -> validationRan.set(true),
+                    new AeronStorageBinaryReplicationTarget.TargetCallbacks(null, () -> true, () -> validationRan.set(true),
                             binary -> ClusterStoreIndexes.COMMIT_HAS_REPLICATION_MARK));
 
             assertDoesNotThrow(() -> target.write(binary()));
@@ -188,7 +186,6 @@ class WriterIndexValidationTest {
     private static final class Probe implements AutoCloseable {
         final List<String> localWrites = new ArrayList<>();
         final List<String> publications = new ArrayList<>();
-        final AtomicLong committed = new AtomicLong(-1L);
         final AtomicBoolean hookRan = new AtomicBoolean();
         final AeronReplicationWriteCoordinator coordinator;
         final AeronStorageBinaryReplicationTarget target;
@@ -210,7 +207,7 @@ class WriterIndexValidationTest {
             this.target = new AeronStorageBinaryReplicationTarget(
                     recordingTarget(this.localWrites), () -> this.coordinator,
                     new AeronStorageBinaryReplicationTarget.TargetCallbacks(
-                            null, this.committed::set, () -> true,
+                            null, () -> true,
                             () -> {
                                 this.hookRan.set(true);
                                 ClusterStoreIndexes.validateStorageRoots(

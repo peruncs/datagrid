@@ -230,8 +230,6 @@ final class AeronWriterTransport {
         return delegate -> new AeronStorageBinaryReplicationTarget(delegate, this::ensureCoordinator,
                 new AeronStorageBinaryReplicationTarget.TargetCallbacks(
                         outbox,
-                        sequence -> {
-                        },
                         distributionEnabled,
                         writerIndexValidation,
                         commitScan));

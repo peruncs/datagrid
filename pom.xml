@@ -38,7 +38,6 @@
 		<aeron.version>1.53.1</aeron.version>
 		<lucene.version>9.12.3</lucene.version>
 		<agrona.version>2.6.0</agrona.version>
-		<jvector.version>4.0.0-rc.9</jvector.version>
 		<!-- Optional diagnostics injected into every forked test JVM, for example
 		     -Dtest.jvm.args=-XX:StartFlightRecording=... . Empty in normal builds. -->
 		<test.jvm.args/>
@@ -169,11 +168,6 @@
 			<groupId>org.eclipse.store</groupId>
 			<artifactId>gigamap-jvector</artifactId>
 			<version>${eclipse-store.version}</version>
-		</dependency>
-		<dependency>
-			<groupId>io.github.jbellis</groupId>
-			<artifactId>jvector</artifactId>
-			<version>${jvector.version}</version>
 		</dependency>
 		<dependency>
 			<groupId>org.apache.lucene</groupId>
@@ -723,6 +717,39 @@
 				<soak.retention>true</soak.retention>
 				<soak.jfr.fail>false</soak.jfr.fail>
 			</properties>
+		</profile>
+		<!-- Full 10,000-transaction pool-ownership sweep; fsync-bound (about five minutes), so it
+		     is not in the default gate. Run it nightly or before a release. -->
+		<profile>
+			<id>poolsweep</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-failsafe-plugin</artifactId>
+						<version>3.6.0</version>
+						<configuration>
+							<useModulePath>false</useModulePath>
+							<includes>
+								<include>**/StorageBinaryPoolOwnershipIT.java</include>
+							</includes>
+							<excludes combine.self="override" />
+							<argLine>--enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
+							<systemPropertyVariables>
+								<pool.transactions>10000</pool.transactions>
+							</systemPropertyVariables>
+						</configuration>
+						<executions>
+							<execution>
+								<goals>
+									<goal>integration-test</goal>
+									<goal>verify</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
 		</profile>
 		<profile>
 			<id>deploy</id>

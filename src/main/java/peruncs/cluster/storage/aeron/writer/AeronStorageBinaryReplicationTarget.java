@@ -28,20 +28,17 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     /// Provider callbacks associated with one target.
     ///
     /// @param dictionarySource      outbox of staged type dictionaries, or `null`
-    /// @param committedSequence     callback for committed sequence numbers
     /// @param distributionEnabled   whether this target currently replicates writes
     /// @param writerIndexValidation full writer graph check, or `null` to accept silently
     /// @param commitScan            one pass over the commit returning `ClusterStoreIndexes.COMMIT_*` flags
     public record TargetCallbacks(
             TypeDictionaryOutbox dictionarySource,
-            LongConsumer committedSequence,
             BooleanSupplier distributionEnabled,
             Runnable writerIndexValidation,
             ToIntFunction<Binary> commitScan
     ) {
         /// Validates the required callbacks.
         public TargetCallbacks {
-            committedSequence = notNull(committedSequence);
             distributionEnabled = notNull(distributionEnabled);
             commitScan = notNull(commitScan);
         }
@@ -50,7 +47,6 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
     private final PersistenceTarget<Binary> delegate;
     private final LazyConstant<AeronReplicationWriteCoordinator> coordinator;
     private final TypeDictionaryOutbox dictionarySource;
-    private final LongConsumer committedSequence;
     private final BooleanSupplier distributionEnabled;
     private final Runnable writerIndexValidation;
     private final ToIntFunction<Binary> commitScan;
@@ -68,7 +64,6 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
         this.coordinator = LazyConstant.of(() -> notNull(factory.get()));
         final TargetCallbacks checked = notNull(callbacks);
         this.dictionarySource = checked.dictionarySource();
-        this.committedSequence = checked.committedSequence();
         this.distributionEnabled = checked.distributionEnabled();
         this.writerIndexValidation = checked.writerIndexValidation();
         this.commitScan = checked.commitScan();
@@ -102,7 +97,6 @@ public final class AeronStorageBinaryReplicationTarget implements PersistenceTar
          * Archive recording. On bounded back-pressure, the Store mark and open
         * token remain recovery evidence; close must not emit a contradictory ABORT. */
         try (prepared) {
-            prepared.onCommit(this.committedSequence, prepared.sequence());
             this.coordinator().commitAcceptedStore(prepared);
         }
     }

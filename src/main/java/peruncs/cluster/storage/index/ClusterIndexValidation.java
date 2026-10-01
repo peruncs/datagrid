@@ -378,7 +378,7 @@ final class ClusterIndexValidation {
     ///                                  background graph mode is configured
     static void validateVectorConfiguration(final VectorIndexConfiguration configuration) {
         final VectorIndexConfiguration checked = Objects.requireNonNull(configuration, "configuration");
-        if (checked.onDisk() || checked.indexDirectory() != null) {
+        if (checked.onDisk() || checked.indexLocation() != null) {
             throw new IllegalArgumentException(EXTERNAL_VECTOR_MESSAGE);
         }
         if (checked.eventualIndexing() || checked.backgroundOptimization()) {

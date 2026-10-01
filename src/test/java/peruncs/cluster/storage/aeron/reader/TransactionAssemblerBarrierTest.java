@@ -1,5 +1,6 @@
 package peruncs.cluster.storage.aeron.reader;
 
+import peruncs.cluster.test.DirectBufferReceiver;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
@@ -33,7 +34,7 @@ class TransactionAssemblerBarrierTest {
     }
 
     private static StorageBinaryDataReceiver swallowingReceiver() {
-        return new StorageBinaryDataReceiver() {
+        return new DirectBufferReceiver() {
             @Override
             public void receiveData(final Binary value) {
             }
@@ -146,7 +147,7 @@ class TransactionAssemblerBarrierTest {
     @Test
     void backpressuredDeliveryIsRetriedAfterThePollCallbackReturns() {
         final AtomicInteger dataCalls = new AtomicInteger();
-        final StorageBinaryDataReceiver receiver = new StorageBinaryDataReceiver() {
+        final StorageBinaryDataReceiver receiver = new DirectBufferReceiver() {
             @Override
             public boolean canAcceptOwnedData(final long payloadBytes) {
                 return false;

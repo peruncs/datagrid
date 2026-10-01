@@ -40,8 +40,6 @@ public final class ClusterIndexMaintenance {
     ///
     /// @param typeHandlers manager owning the Store's runtime type handlers
     public ClusterIndexMaintenance(final PersistenceTypeHandlerManager<Binary> typeHandlers) {
-        /* Fail node startup, not the first replicated batch, on an unsupported Store layout. */
-        StoreIndexReflection.verifyLayout();
         this.scratch = new ClusterIndexValidation.ValidationScratch(typeHandlers);
     }
 
@@ -359,7 +357,7 @@ public final class ClusterIndexMaintenance {
     /// @param index index whose search graph to reset
     /// @throws IllegalStateException if the upstream field layout changed
     private static void resetVectorSearchGraph(final VectorIndex<?> index) {
-        StoreIndexReflection.invalidateVectorGraph(index);
+        index.invalidateGraph();
     }
 
     /// Rebuilds changed vector search graphs before application reads resume.

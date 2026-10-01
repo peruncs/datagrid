@@ -1,5 +1,6 @@
 package peruncs.cluster.storage.aeron.reader;
 
+import peruncs.cluster.test.DirectBufferReceiver;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import peruncs.cluster.storage.aeron.config.AeronReplicationConfiguration;
@@ -110,7 +111,7 @@ public final class AeronEndToEndBenchmark {
         }
     }
 
-    private static final class BenchmarkReceiver implements StorageBinaryDataReceiver {
+    private static final class BenchmarkReceiver implements DirectBufferReceiver {
         private long assembledBytes;
 
         @Override

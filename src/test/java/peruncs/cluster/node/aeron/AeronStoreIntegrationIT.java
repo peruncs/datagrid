@@ -1,5 +1,6 @@
 package peruncs.cluster.node.aeron;
 
+import peruncs.cluster.test.DirectBufferReceiver;
 import java.util.Arrays;
 import java.util.Comparator;
 
@@ -23,6 +24,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import peruncs.cluster.api.ClusterIndexes;
 import peruncs.cluster.api.NodeConfig;
+import peruncs.cluster.api.ReplicationState;
+import peruncs.cluster.errors.ReplicationUnavailableException;
 import peruncs.cluster.errors.ReseedRequiredException;
 import peruncs.cluster.errors.WriteRejectedException;
 import peruncs.cluster.node.replication.*;
@@ -493,6 +496,25 @@ class AeronStoreIntegrationIT {
             final String watermarkChannelOverride,
             final int watermarkStreamIdOverride
     ) {
+        return properties(root, clusterId, nodeId, generation, role, recordingId, controlPort, livePort,
+                watermarkPort, retentionReaders, watermarkChannelOverride, watermarkStreamIdOverride, Map.of());
+    }
+
+    static NodeConfig properties(
+            final Path root,
+            final UUID clusterId,
+            final UUID nodeId,
+            final UUID generation,
+            final String role,
+            final long recordingId,
+            final int controlPort,
+            final int livePort,
+            final int watermarkPort,
+            final Set<UUID> retentionReaders,
+            final String watermarkChannelOverride,
+            final int watermarkStreamIdOverride,
+            final Map<String, String> extraSettings
+    ) {
         final Map<String, String> values = new HashMap<>();
         values.put(NodeConfig.Setting.AERON_CLUSTER_ID.key(), clusterId.toString());
         values.put(NodeConfig.Setting.AERON_NODE_ID.key(), nodeId.toString());
@@ -517,6 +539,7 @@ class AeronStoreIntegrationIT {
         }
         values.put(NodeConfig.Setting.AERON_RETENTION_READERS.key(), retentionReaders.stream()
                 .sorted().map(UUID::toString).collect(java.util.stream.Collectors.joining(",")));
+        values.putAll(extraSettings);
         return TestNodeConfig.aeron(root, role, false, values);
     }
 
@@ -1299,6 +1322,145 @@ class AeronStoreIntegrationIT {
         }
     }
 
+    /// Production retries arrive later than a test loop: the Archive needs a moment to stop the recording of
+    /// a closed failed attempt before the next attempt may extend it, so wait until it reports a stop position.
+    private static void pauseForArchiveToStopRecording(final AeronTransport transport) {
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        while (System.nanoTime() < deadline) {
+            try {
+                if (transport.runtimeOwner().getStopPosition(0L) >= 0L) return;
+            } catch (final RuntimeException notYet) {
+                /* The recording may not exist yet; keep polling. */
+            }
+            try {
+                Thread.sleep(50L);
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+        }
+    }
+
+    /// Writer recovery retries transient Archive failures and succeeds once they clear, through the real
+    /// Archive and the real recovery path. The injected outage fails the first two attempts; the budget is
+    /// generous so an attempt that meets the Archive still stopping the previous recording cannot latch.
+    @Test
+    void writerRecoveryRetriesTransientFailuresThenSucceeds() throws Exception {
+        final Path root = Files.createTempDirectory("dg-aeron-recovery-retry-");
+        final NodeConfig config = properties(root, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                "writer", -1L, 40124, 40123, 40125, Set.of(), null, -1,
+                Map.of(NodeConfig.Setting.WRITER_RECOVERY_ATTEMPTS.key(), "20"));
+        try (AeronTransport transport = new AeronTransport(config)) {
+            final AtomicInteger injected = new AtomicInteger();
+            final AtomicInteger failures = new AtomicInteger();
+            FaultInjection.runWithHook((name, sequence, path) -> {
+                if (name == FaultInjection.Point.AFTER_RECOVERY_PUBLISHER_CREATED &&
+                    injected.incrementAndGet() <= 2) {
+                    throw new ReplicationUnavailableException("injected Archive outage");
+                }
+            }, () -> {
+                final ReplicationPositionProvider provider = transport.positionProvider();
+                final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+                while (true) {
+                    try {
+                        provider.init();
+                        break;
+                    } catch (final ReplicationUnavailableException transientFailure) {
+                        failures.incrementAndGet();
+                        assertEquals(ReplicationState.STARTING, transport.writerTransport().writerState(),
+                                "a transient outage is retried, not latched");
+                        assertTrue(System.nanoTime() < deadline, "recovery never succeeded");
+                        pauseForArchiveToStopRecording(transport);
+                    }
+                }
+            });
+            assertTrue(failures.get() >= 2, "both injected outages must have failed an attempt");
+            assertNull(transport.writerTransport().writerState(), "the writer recovered");
+            assertTrue(transport.writerTransport().hasWriter());
+        } finally {
+            delete(root);
+        }
+    }
+
+    /// The configured number of consecutive transient recovery failures latches `FAILED`, after which
+    /// recovery is no longer attempted.
+    @Test
+    void writerRecoveryLatchesFailedAfterTheConfiguredConsecutiveFailures() throws Exception {
+        final Path root = Files.createTempDirectory("dg-aeron-recovery-latch-");
+        try (AeronTransport transport = new AeronTransport(
+                properties(root, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID()))) {
+            final AtomicInteger attempts = new AtomicInteger();
+            FaultInjection.runWithHook((name, sequence, path) -> {
+                if (name == FaultInjection.Point.AFTER_RECOVERY_PUBLISHER_CREATED) {
+                    attempts.incrementAndGet();
+                    throw new ReplicationUnavailableException("injected persistent Archive outage");
+                }
+            }, () -> {
+                final ReplicationPositionProvider provider = transport.positionProvider();
+                for (int attempt = 1; attempt <= 3; attempt++) {
+                    assertThrows(ReplicationUnavailableException.class, provider::init);
+                    pauseForArchiveToStopRecording(transport);
+                }
+                assertEquals(ReplicationState.FAILED, transport.writerTransport().writerState());
+                final int attemptsAtLatch = attempts.get();
+                assertThrows(ReplicationUnavailableException.class, provider::init);
+                assertEquals(attemptsAtLatch, attempts.get(), "a latched writer must not run recovery again");
+            });
+            /* An attempt may fail before the injection point (the Archive can still hold the previous
+             * attempt's recording active); it counts as a transient failure all the same. */
+            assertTrue(attempts.get() >= 1 && attempts.get() <= 3, "attempts: " + attempts.get());
+        } finally {
+            delete(root);
+        }
+    }
+
+    /// Two transactions close to the configured maximum size survive a writer restart: tail recovery scans
+    /// frames that cross term boundaries and the restarted writer continues at the next sequence.
+    @Test
+    void writerRestartRecoversTwoNearMaximumSizeTransactions() throws Exception {
+        final Path root = Files.createTempDirectory("dg-aeron-large-tail-");
+        final Path storePath = root.resolve("store");
+        final int payloadBytes = 1_800_000; // UTF-16 characters, about 3.6 MiB in the Store
+        final NodeConfig config = properties(root, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                "writer", -1L, 40124, 40123, 40125, Set.of(), null, -1,
+                Map.of(NodeConfig.Setting.AERON_MAX_TRANSACTION_BYTES.key(), Integer.toString(4 * 1024 * 1024)));
+        try {
+            final Root value = new Root();
+            long lastSequence;
+            try (ClusterReplicationTransport transport = new AeronTransport(config)) {
+                final Distribution distributor = new Distribution();
+                final EmbeddedStorageManager manager = start(storePath, value, distributor, transport);
+                try {
+                    for (int tx = 0; tx < 2; tx++) {
+                        value.values.add("x".repeat(payloadBytes - 1) + tx);
+                        store(transport, manager, value.values);
+                    }
+                } finally {
+                    manager.shutdown();
+                }
+                lastSequence = latestSequence(transport);
+                assertTrue(lastSequence >= 1, "two large transactions must have been published");
+            }
+            try (ClusterReplicationTransport transport = new AeronTransport(config)) {
+                final Distribution distributor = new Distribution();
+                final EmbeddedStorageManager manager = startExisting(storePath, distributor, transport);
+                try {
+                    final Root resumed = manager.root();
+                    assertEquals(2, resumed.values.size());
+                    resumed.values.add("after-restart");
+                    store(transport, manager, resumed.values);
+                } finally {
+                    manager.shutdown();
+                }
+                /* The restart commits one fencing transaction for its new writer token, then the test's own. */
+                assertEquals(lastSequence + 2, latestSequence(transport),
+                        "the restarted writer must continue after the recovered tail without a gap or a repeat");
+            }
+        } finally {
+            delete(root);
+        }
+    }
+
     /// Verifies a locally rejected Store write republishes its type dictionary on retry.
     @Test
     void realStoreRetryRepublishesDictionaryAfterLocalRejection() throws Exception {
@@ -1501,7 +1663,7 @@ class AeronStoreIntegrationIT {
         }
 
         private StorageBinaryDataReceiver instrumentImportStart(final StorageBinaryDataReceiver delegate) {
-            return new StorageBinaryDataReceiver() {
+            return new DirectBufferReceiver() {
                 private void starting() {
                     ReaderNode.this.importStartListener.accept(ReaderNode.this.appliedSequence() + 1L);
                 }

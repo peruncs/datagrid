@@ -1,5 +1,6 @@
 package peruncs.cluster.storage.aeron.reader;
 
+import peruncs.cluster.test.DirectBufferReceiver;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.eclipse.serializer.persistence.binary.types.Binary;
 import org.junit.jupiter.api.Test;
@@ -153,7 +154,7 @@ class TransactionAssemblerFencingTest {
         }
     }
 
-    private static final class CountingReceiver implements StorageBinaryDataReceiver {
+    private static final class CountingReceiver implements DirectBufferReceiver {
         private int dataCalls;
 
         @Override

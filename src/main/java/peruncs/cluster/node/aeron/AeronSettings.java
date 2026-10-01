@@ -245,8 +245,8 @@ record AeronSettings(
         final AeronRetryPolicy defaults = AeronRetryPolicy.defaults();
         return new AeronRetryPolicy(defaults.idleMaxSpins(), defaults.idleMaxYields(), defaults.idleMinParkNanos(),
                 pacing.idleMaxPark().toNanos(), pacing.jitterBase().toNanos(), pacing.jitterCap().toNanos(),
-                pacing.archiveProbeDelay().toNanos(), defaults.catalogProbeInitialDelayNanos(),
-                defaults.catalogProbeMaxDelayNanos());
+                pacing.archiveProbeDelay().toNanos(), pacing.catalogProbeInitialDelay().toNanos(),
+                pacing.catalogProbeMaxDelay().toNanos());
     }
 
     private static UUID requiredId(final UUID value, final NodeConfig.Setting setting) {
