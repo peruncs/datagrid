@@ -275,7 +275,10 @@ class AeronStoreIntegrationIT {
             final StorageGraphCoordinator graphCoordinator = new StorageGraphCoordinator();
             final StorageBinaryDataReceiver receiver = StorageBinaryDataMerger.create(new StorageBinaryDataMerger.Configuration(
                     readerFoundation.getConnectionFoundation(), reader.createConnection(),
-                    graphCoordinator::write,
+                    batch -> graphCoordinator.write(() -> {
+                        batch.run();
+                        transport.batchApplied();
+                    }),
                     0L, 1L, 1L << 30,
                     NodeConfig.Limits.DEFAULT_BUFFER_POOL_RETAINED_BYTES,
                     60_000L, 30_000L, 5_000L, 4096, graphCoordinator));
@@ -1425,7 +1428,10 @@ class AeronStoreIntegrationIT {
         private StorageBinaryDataReceiver newReceiver() {
             return StorageBinaryDataMerger.create(new StorageBinaryDataMerger.Configuration(
                     this.foundation.getConnectionFoundation(), this.storage.createConnection(),
-                    this.coordinator::write,
+                    batch -> this.coordinator.write(() -> {
+                        batch.run();
+                        this.transport.batchApplied();
+                    }),
                     0L, 1L, 1L << 30,
                     NodeConfig.Limits.DEFAULT_BUFFER_POOL_RETAINED_BYTES,
                     60_000L, 30_000L, 5_000L, 4096, this.coordinator));

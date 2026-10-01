@@ -34,6 +34,8 @@ public interface ClusterReplicationTransport extends AutoCloseable {
     /// Records the Store mark as the durable restart boundary after a replicated batch was applied.
     ///
     /// Called inside the graph write section, where the mark cannot change.
+    /// The receiver passed to `clientFromMark` must run every apply batch in a graph write section that
+    /// calls this at its end; the reader reports no progress otherwise.
     default void batchApplied() {
     }
 
