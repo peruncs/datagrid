@@ -1037,3 +1037,14 @@ installed as `5.0.0-SNAPSHOT` in the local Maven repository (the build resolves 
 - *`WriterSession`, `CursorSnapshot` and `MergerLifecycle` merges:* behaviour-neutral renames across many files with no defect behind them.
 
 **Verification:** 844 unit tests, 30 integration tests, the 17-trial crash matrix and soak seeds 1, 2 and 3 pass.
+
+
+## Round 5: upstream JVector race fixed, blackout removed
+
+- Patched the fork (`hrstoyanov/eclipse-store`, local commit `d98884d3`, installed to the local Maven repository): `VectorIndex.Default.ensureIndexInitialized()`
+  now creates the builder under the parent monitor, double-checked like `ensureGraphRebuilt()`. A new upstream test
+  (`VectorIndexInvalidateGraphTest.concurrentFirstSearchesAfterInvalidationAllSeeTheFullGraph`) reproduces the bug without the patch (round 17: all 16 searchers saw
+  a partial graph) and passes with it. To be offered upstream as a pull request.
+- With the fix installed, `ApplyWorker` warms the invalidated graphs up *after* the write section again, so a large rebuild no longer blocks reads.
+  Soak seeds 1-4 pass. The "Round 4" note that reads are blocked during rebuild is superseded.
+- Requires the patched `gigamap-jvector` snapshot; with an unpatched upstream jar, move `warmupVectorSearchGraphs()` back inside the write section.

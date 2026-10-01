@@ -165,6 +165,7 @@ final class ApplyWorker {
                     this.materializationBudgetMs,
                     TimeUnit.MILLISECONDS);
             final long writeSectionStartNanos = System.nanoTime();
+            final boolean[] warmupNeeded = {false};
             try {
                 this.graphUpdater.accept(() ->
                         ClusterStoreIndexes.withRegistrationRead(() ->
@@ -235,16 +236,15 @@ final class ApplyWorker {
                      * invalidation share one root-graph traversal: an
                      * unsupported index fails this reader closed. The scan
                      * visits index metadata only, never entity payload. */
-                    final boolean invalidated = this.indexMaintenance.afterApply(
-                            this.storage, this.maxValidatedIndexObjects);
-                    /* Rebuild the invalidated graphs here, inside the exclusive section. Upstream's first
-                     * access after an invalidation (`ensureIndexInitialized`) creates the in-memory builder
-                     * without any lock, so two concurrent first searches can replace the builder the other
-                     * just filled and leave an empty graph marked as rebuilt for good. With reads excluded,
-                     * exactly one thread, this one, performs the first access. */
-                    if (invalidated) this.indexMaintenance.warmupVectorSearchGraphs();
+                    warmupNeeded[0] = this.indexMaintenance.afterApply(this.storage, this.maxValidatedIndexObjects);
                 }));
                 this.noteBlockedTime(writeSectionStartNanos, pending);
+                /* The write section has ended: application reads resume. The invalidated graphs rebuild
+                 * lazily on their first search, so warming them up now only moves that cost off the first
+                 * application query, and it must not hold the exclusive section: a large rebuild would
+                 * block every read. Upstream initializes the builder under the parent monitor (the first
+                 * access after an invalidation used to race), so concurrent first searches are safe. */
+                if (warmupNeeded[0]) this.indexMaintenance.warmupVectorSearchGraphs();
             } catch (final RuntimeException | Error failure) {
                 /* A genuine failure says failed; only an overrun says timed
                  * out. The two are never conflated into one message. */
