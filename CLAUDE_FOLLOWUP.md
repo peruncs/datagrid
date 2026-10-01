@@ -1083,3 +1083,17 @@ installed as `5.0.0-SNAPSHOT` in the local Maven repository (the build resolves 
   and `dispose`-during-staged-delivery tests are the first things to add then.
 - *Framer pooling:* unmeasured below 4 KiB payloads at high transaction rates; reopen on a small-payload allocation profile.
 - `ArchitectureTest` still has no 8-space `///` or vocabulary guard: the 388 remaining 8-space lines are legitimate nested enum members, so a count guard would only freeze a number.
+
+## Upstream catch-up of 2026-10-01 (fork `hrstoyanov/store`, merge `2f94deed`)
+
+New since the previous review: upstream #841 "vector index registration builds the index before registering it" (the only functional change in the last days; the
+other commits were already covered). It back-fills a new `VectorIndex.Default` while it is still unregistered, discards it if the vectorizer throws (nothing registered, nothing
+persisted, the name stays free), and defers starting background managers to an explicit activation step.
+
+Effect on PerunCS: none requiring code changes.
+- Our facade registers through `VectorIndices.add/ensure`, so a failing vectorizer on the writer now leaves the group untouched instead of half registered (strictly safer).
+- Reader-side imports never go through the constructor or the back-fill; `invalidateGraph()` and the patched `ensureIndexInitialized()` are unchanged by the merge.
+- Background managers (eventual indexing, background optimization, background persistence) are still rejected by `ClusterIndexValidation`, so the new activation path is never used.
+- Embedded Lucene is untouched (`LuceneBackfillFailureTest` is test-only).
+Verified with the merged jar installed locally: 845 unit tests, 30 integration tests, the crash matrix and soak seeds 1-3 pass.
+A candidate follow-up, not required: a test that a throwing vectorizer during `registerVector` leaves the map registrable again, to pin the upstream guarantee we now rely on.
