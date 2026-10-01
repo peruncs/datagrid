@@ -1322,35 +1322,22 @@ class AeronStoreIntegrationIT {
         }
     }
 
-    /// Production retries arrive later than a test loop: the Archive needs a moment to stop the recording of
-    /// a closed failed attempt before the next attempt may extend it, so wait until it reports a stop position.
-    private static void pauseForArchiveToStopRecording(final AeronTransport transport) {
-        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
-        while (System.nanoTime() < deadline) {
-            try {
-                if (transport.runtimeOwner().getStopPosition(0L) >= 0L) return;
-            } catch (final RuntimeException notYet) {
-                /* The recording may not exist yet; keep polling. */
-            }
-            try {
-                Thread.sleep(50L);
-            } catch (final InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException(interrupted);
-            }
+    private static String describe(final Throwable failure) {
+        final StringBuilder text = new StringBuilder();
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            text.append(current).append(" <- ");
         }
+        return text.toString();
     }
 
     /// Writer recovery retries transient Archive failures and succeeds once they clear, through the real
-    /// Archive and the real recovery path. The injected outage fails the first two attempts; the budget is
-    /// generous so an attempt that meets the Archive still stopping the previous recording cannot latch.
+    /// Archive and the real recovery path, with no pause between attempts: the Archive's stop latency after a
+    /// failed attempt is waited out inside recovery and must not consume the attempts budget.
     @Test
     void writerRecoveryRetriesTransientFailuresThenSucceeds() throws Exception {
         final Path root = Files.createTempDirectory("dg-aeron-recovery-retry-");
-        final NodeConfig config = properties(root, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
-                "writer", -1L, 40124, 40123, 40125, Set.of(), null, -1,
-                Map.of(NodeConfig.Setting.WRITER_RECOVERY_ATTEMPTS.key(), "20"));
-        try (AeronTransport transport = new AeronTransport(config)) {
+        try (AeronTransport transport = new AeronTransport(
+                properties(root, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID()))) {
             final AtomicInteger injected = new AtomicInteger();
             final AtomicInteger failures = new AtomicInteger();
             FaultInjection.runWithHook((name, sequence, path) -> {
@@ -1360,21 +1347,19 @@ class AeronStoreIntegrationIT {
                 }
             }, () -> {
                 final ReplicationPositionProvider provider = transport.positionProvider();
-                final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
                 while (true) {
                     try {
                         provider.init();
                         break;
                     } catch (final ReplicationUnavailableException transientFailure) {
-                        failures.incrementAndGet();
+                        assertTrue(failures.incrementAndGet() <= 2,
+                                "only the injected outages may fail an attempt: " + describe(transientFailure));
                         assertEquals(ReplicationState.STARTING, transport.writerTransport().writerState(),
                                 "a transient outage is retried, not latched");
-                        assertTrue(System.nanoTime() < deadline, "recovery never succeeded");
-                        pauseForArchiveToStopRecording(transport);
                     }
                 }
             });
-            assertTrue(failures.get() >= 2, "both injected outages must have failed an attempt");
+            assertEquals(2, failures.get());
             assertNull(transport.writerTransport().writerState(), "the writer recovered");
             assertTrue(transport.writerTransport().hasWriter());
         } finally {
@@ -1387,8 +1372,9 @@ class AeronStoreIntegrationIT {
     @Test
     void writerRecoveryLatchesFailedAfterTheConfiguredConsecutiveFailures() throws Exception {
         final Path root = Files.createTempDirectory("dg-aeron-recovery-latch-");
-        try (AeronTransport transport = new AeronTransport(
-                properties(root, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID()))) {
+        final NodeConfig config = properties(root, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
+        final int budget = config.operations().writerRecoveryAttempts();
+        try (AeronTransport transport = new AeronTransport(config)) {
             final AtomicInteger attempts = new AtomicInteger();
             FaultInjection.runWithHook((name, sequence, path) -> {
                 if (name == FaultInjection.Point.AFTER_RECOVERY_PUBLISHER_CREATED) {
@@ -1397,18 +1383,13 @@ class AeronStoreIntegrationIT {
                 }
             }, () -> {
                 final ReplicationPositionProvider provider = transport.positionProvider();
-                for (int attempt = 1; attempt <= 3; attempt++) {
+                for (int attempt = 1; attempt <= budget; attempt++) {
                     assertThrows(ReplicationUnavailableException.class, provider::init);
-                    pauseForArchiveToStopRecording(transport);
                 }
                 assertEquals(ReplicationState.FAILED, transport.writerTransport().writerState());
-                final int attemptsAtLatch = attempts.get();
                 assertThrows(ReplicationUnavailableException.class, provider::init);
-                assertEquals(attemptsAtLatch, attempts.get(), "a latched writer must not run recovery again");
             });
-            /* An attempt may fail before the injection point (the Archive can still hold the previous
-             * attempt's recording active); it counts as a transient failure all the same. */
-            assertTrue(attempts.get() >= 1 && attempts.get() <= 3, "attempts: " + attempts.get());
+            assertEquals(budget, attempts.get(), "every budgeted attempt runs recovery; a latched writer runs none");
         } finally {
             delete(root);
         }

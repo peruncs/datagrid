@@ -233,7 +233,7 @@ public final class AeronTransport implements ClusterReplicationTransport {
                                 this.writerTransport::writerState),
                         new AeronHealth.Positions(
                                 this.shared.capacity()::usableSpaceBytes,
-                                () -> this.writerTransport.writerBoundary().position(),
+                                () -> this.writerTransport.writerBoundary().terminalPosition(),
                                 () -> this.writerTransport.writerBoundary().sequence(),
                                 this.readerTransport::appliedSequence));
             }

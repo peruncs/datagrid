@@ -730,11 +730,11 @@
 						<version>3.6.0</version>
 						<configuration>
 							<useModulePath>false</useModulePath>
-							<includes>
+							<includes combine.self="override">
 								<include>**/StorageBinaryPoolOwnershipIT.java</include>
 							</includes>
 							<excludes combine.self="override" />
-							<argLine>--enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
+							<argLine>${test.jvm.args} --enable-preview --add-modules jdk.incubator.vector --add-exports java.base/jdk.internal.misc=ALL-UNNAMED</argLine>
 							<systemPropertyVariables>
 								<pool.transactions>10000</pool.transactions>
 							</systemPropertyVariables>

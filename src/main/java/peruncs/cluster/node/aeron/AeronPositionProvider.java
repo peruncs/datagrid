@@ -73,13 +73,13 @@ final class AeronPositionProvider implements ReplicationPositionProvider {
                     "Aeron writer Store mark is not available; no writer position can be established");
         }
         final AeronWriterRecoveryBoundary boundary = this.writerBoundary.get();
-        if (boundary.recordingId() < 0 || boundary.position() < 0) {
+        if (boundary.recordingId() < 0 || boundary.terminalPosition() < 0) {
             throw new ReplicationPositionUnavailableException(
                     "Aeron writer has no resolved Archive position to report");
         }
         final UUID generation = this.storeGeneration.get();
         return new ReplicationPosition(this.clusterId.get(), generation, this.epoch.getAsLong(),
-                boundary.recordingId(), boundary.sequence(), boundary.position(), fencingToken, this.nodeId.get());
+                boundary.recordingId(), boundary.sequence(), boundary.terminalPosition(), fencingToken, this.nodeId.get());
     }
 
     /// Releases nothing: the provider reads the transport's published

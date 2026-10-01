@@ -13,6 +13,7 @@ import java.util.Arrays;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /// Runs the merger's single coalescing worker loop.
@@ -165,7 +166,7 @@ final class ApplyWorker {
                     this.materializationBudgetMs,
                     TimeUnit.MILLISECONDS);
             final long writeSectionStartNanos = System.nanoTime();
-            final boolean[] warmupNeeded = {false};
+            final AtomicBoolean warmupNeeded = new AtomicBoolean();
             try {
                 this.graphUpdater.accept(() ->
                         ClusterStoreIndexes.withRegistrationRead(() ->
@@ -218,8 +219,9 @@ final class ApplyWorker {
                         transactionOffset += transactionLength;
                     }
                     /* Materialization ends here: its batch-proportional budget
-                     * is spent, and index validation plus exclusive graph
-                     * warmup gets a separately bounded phase so a large rebuild is never charged
+                     * is spent, and index validation plus graph invalidation
+                     * get a separately bounded phase (the index refresh budget, which also covers the
+                     * warm-up that follows the write section) so a large rebuild is never charged
                      * against the materialization budget. Stamp and cancel
                      * under the budget lock so a concurrent expiry loses the
                      * race deterministically instead of latching a completed
@@ -236,7 +238,7 @@ final class ApplyWorker {
                      * invalidation share one root-graph traversal: an
                      * unsupported index fails this reader closed. The scan
                      * visits index metadata only, never entity payload. */
-                    warmupNeeded[0] = this.indexMaintenance.afterApply(this.storage, this.maxValidatedIndexObjects);
+                    warmupNeeded.set(this.indexMaintenance.afterApply(this.storage, this.maxValidatedIndexObjects));
                 }));
                 this.noteBlockedTime(writeSectionStartNanos, pending);
                 /* The write section has ended: application reads resume. The invalidated graphs rebuild
@@ -244,7 +246,7 @@ final class ApplyWorker {
                  * application query, and it must not hold the exclusive section: a large rebuild would
                  * block every read. Upstream initializes the builder under the parent monitor (the first
                  * access after an invalidation used to race), so concurrent first searches are safe. */
-                if (warmupNeeded[0]) this.indexMaintenance.warmupVectorSearchGraphs();
+                if (warmupNeeded.get()) this.indexMaintenance.warmupVectorSearchGraphs();
             } catch (final RuntimeException | Error failure) {
                 /* A genuine failure says failed; only an overrun says timed
                  * out. The two are never conflated into one message. */

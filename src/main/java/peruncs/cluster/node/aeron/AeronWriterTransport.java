@@ -27,6 +27,7 @@ import peruncs.cluster.storage.io.FaultInjection;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 import java.util.function.BooleanSupplier;
@@ -148,7 +149,8 @@ final class AeronWriterTransport {
     }
 
     /// Recognises the one illegal state that is a transient outage: the Archive has not yet stopped the
-    /// recording of a crashed writer. Other illegal states are caller defects.
+    /// recording of a crashed writer. Other illegal states are caller defects. The message text is Aeron
+    /// 1.53.1's and is pinned by `AeronArchiveFailureClassificationTest`.
     private static boolean isRecordingStillActive(final IllegalStateException failure) {
         return failure.getMessage() != null && failure.getMessage().contains("recording is still active");
     }
@@ -435,7 +437,7 @@ final class AeronWriterTransport {
         if ((mark.sequence() != boundary.sequence() && !resolvedAbortAfterMark) ||
             mark.recordingId() != this.writerRecordingId.get() ||
             mark.fencingToken() <= 0L || mark.fencingToken() > this.heldWriterFencingToken() ||
-            mark.prepareStartPosition() < 0L || mark.prepareStartPosition() > boundary.position()) {
+            mark.prepareStartPosition() < 0L || mark.prepareStartPosition() > boundary.terminalPosition()) {
             throw reseedRequired("replication mark does not match the recovered writer boundary", null);
         }
     }
@@ -490,21 +492,29 @@ final class AeronWriterTransport {
                 recordingId = AeronArchiveReplicationPublisher.latestRecordingId(
                         this.runtime().archive(), settings().topology().streamId());
             }
+            if (recordingId >= 0L) this.awaitRecordingStopped(recordingId);
             final AeronWriterTailRecovery.Result recovery = recordingId >= 0L
                     ? this.inspectWriterTail(mark, recordingId) : null;
             final long initialSequence = recovery == null ? Math.max(0L, mark.sequence() + 1L)
                     : recovery.nextSequence();
             if (recordingId >= 0L) {
-                try {
-                    candidate = AeronArchiveReplicationPublisher.extend(this.runtime().archive(), recordingId, settings().topology().streamId(), new AeronArchiveReplicationPublisher.PublisherSetup(settings().replication(), settings().topology().clusterId(), settings().topology().epoch(), settings().wireNonce()), initialSequence);
-                } catch (final IllegalArgumentException mismatch) {
-                    /* The recording is not the stream or framing this writer was configured for. */
-                    throw reseedRequired(
-                            "Archive recording %s does not match the configured stream or framing".formatted(recordingId),
-                            mismatch);
-                } catch (final RuntimeException failure) {
-                    throw classifyArchiveFailure(
-                            "cannot extend Archive recording %s after writer recovery".formatted(recordingId), failure);
+                final long extendDeadline = System.nanoTime() + settings().replication().recordingStopTimeoutNanos();
+                while (candidate == null) {
+                    try {
+                        candidate = AeronArchiveReplicationPublisher.extend(this.runtime().archive(), recordingId, settings().topology().streamId(), new AeronArchiveReplicationPublisher.PublisherSetup(settings().replication(), settings().topology().clusterId(), settings().topology().epoch(), settings().wireNonce()), initialSequence);
+                    } catch (final IllegalArgumentException mismatch) {
+                        /* The recording is not the stream or framing this writer was configured for. */
+                        throw reseedRequired(
+                                "Archive recording %s does not match the configured stream or framing"
+                                        .formatted(recordingId), mismatch);
+                    } catch (final RuntimeException failure) {
+                        if (!isRecordingStillStopping(failure) || System.nanoTime() >= extendDeadline) {
+                            throw classifyArchiveFailure(
+                                    "cannot extend Archive recording %s after writer recovery".formatted(recordingId),
+                                    failure);
+                        }
+                        this.parkForArchive();
+                    }
                 }
             } else {
                 if (mark.sequence() >= 0L) {
@@ -601,6 +611,43 @@ final class AeronWriterTransport {
         } finally {
             this.writerRecoveryInProgress = false;
         }
+    }
+
+    /// Waits, bounded by the recording-stop timeout, until the Archive has stopped the recording.
+    ///
+    /// A crashed writer's recording, or the recording of a failed earlier attempt in this process, is stopped
+    /// by the Archive a moment later. That latency is not an outage, so it is waited out here instead of
+    /// consuming one of the consecutive-failure attempts; if the deadline passes, the inspection that
+    /// follows reports it as a transient failure.
+    private void awaitRecordingStopped(final long recordingId) {
+        final long deadline = System.nanoTime() + settings().replication().recordingStopTimeoutNanos();
+        while (System.nanoTime() < deadline) {
+            try {
+                if (this.runtime().getStopPosition(recordingId) >= 0L) return;
+            } catch (final RuntimeException unavailable) {
+                return;
+            }
+            this.parkForArchive();
+        }
+    }
+
+    private void parkForArchive() {
+        LockSupport.parkNanos(
+                settings().replication().retryPolicy().catalogProbeInitialDelayNanos());
+        if (Thread.interrupted()) {
+            Thread.currentThread().interrupt();
+            throw new ReplicationUnavailableException("interrupted while waiting for the Archive");
+        }
+    }
+
+    /// Recognises the Archive still finishing the previous recording: the catalog shows no stop position,
+    /// or the Archive rejects the extension because the recording session of the previous attempt is still
+    /// open ("cannot extend active recording" or "recording exists for streamId", Aeron 1.53.1 messages).
+    private static boolean isRecordingStillStopping(final RuntimeException failure) {
+        if (failure instanceof IllegalStateException state) return isRecordingStillActive(state);
+        return failure instanceof ArchiveException archive && archive.getMessage() != null &&
+               (archive.getMessage().contains("cannot extend active recording") ||
+                archive.getMessage().contains("recording exists for streamId"));
     }
 
     private AeronWriterTailRecovery.Result inspectWriterTail(

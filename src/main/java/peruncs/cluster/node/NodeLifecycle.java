@@ -573,9 +573,9 @@ public final class NodeLifecycle implements AutoCloseable, Unpersistable {
 
     /// Starts the Store and applies the checks every role shares.
     ///
-    /// A reader without a committed replication mark is told to reseed, the Store's mark must match the
-    /// configured cluster, the root is initialized, and the one-time index policy scan rejects a seeded
-    /// or uploaded image with an external index before the node serves or publishes anything.
+    /// A reader without a committed replication mark is told to reseed, a reader's stored mark is checked
+    /// for presence and validity, the root is initialized, and the one-time index policy scan rejects a
+    /// seeded or uploaded image with an external index before the node serves or publishes anything.
     ///
     /// @param foundation       prepared Store foundation
     /// @param storageRootPath  directory holding the Store files
@@ -603,6 +603,10 @@ public final class NodeLifecycle implements AutoCloseable, Unpersistable {
     }
 
     /// Ends the startup window in which Store writes are not replicated and queues the writer's dictionary.
+    ///
+    /// Queuing the dictionary is a no-op for every role except the writer (see `queueWriterDictionary`).
+    ///
+    /// @param store the started Store
     private void enableDistribution(final EmbeddedStorageManager store) {
         this.assembly.replication.distributionIgnored.set(false);
         this.queueWriterDictionary(store);

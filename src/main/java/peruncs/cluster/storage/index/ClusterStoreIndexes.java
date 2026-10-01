@@ -37,10 +37,10 @@ import java.util.function.ToIntFunction;
 ///
 /// The facade only assembles index configurations and routes enforcement
 /// calls. The validation policy lives in [ClusterIndexValidation], the reader
-/// refresh/rebuild lifecycle in [ClusterIndexMaintenance], and the temporary
-/// JVector invalidation bridge in [StoreIndexReflection]; those types are
-/// package-private because they are implementation seams, not application
-/// API.
+/// refresh/rebuild lifecycle (including the retirement of stale JVector graphs
+/// through the Store's public `VectorIndex.invalidateGraph()`) in
+/// [ClusterIndexMaintenance]; those types are package-private because they are
+/// implementation seams, not application API.
 ///
 /// # Validation entry points
 ///

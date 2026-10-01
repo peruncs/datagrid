@@ -291,7 +291,11 @@ public final class ClusterIndexMaintenance {
                 final Long before = scratch.vectorModCounts.get(index);
                 if (!(index instanceof VectorIndex.Default<?> known) || before == null ||
                     before != known.getStructuralModCount()) {
-                    resetVectorSearchGraph(index);
+                    /* Retire the transient graph so the next search rebuilds it lazily from the current vector
+                     * store, as after a restart. Sound only for synchronously indexed graphs: background graph
+                     * workers are rejected at registration (ClusterIndexValidation#validateVectorConfiguration),
+                     * and on-disk configurations are rejected too, so the incremental-mode refusal cannot apply. */
+                    index.invalidateGraph();
                     scratch.dirtyVectorIndexes.add(index);
                 }
             }
@@ -328,36 +332,6 @@ public final class ClusterIndexMaintenance {
             scratch.seen.clear();
             scratch.queue.clear();
         }
-    }
-
-    /// Resets one changed vector search graph to its just-loaded state.
-    ///
-    /// The transient HNSW builder and graph are closed and dropped and the
-    /// one-shot rebuild guard is cleared, so the next search or mutation
-    /// re-initializes and rebuilds from the already-current vector store —
-    /// the same lazy rebuild every restart performs, and the same shape the
-    /// upstream close leaves behind. Deferred builder operations are dropped
-    /// with the builder they were computed against; the rebuild recomputes
-    /// graph state from the store. No entity is vectorized and no graph node
-    /// is surgically mutated, so import batches converge without depending on
-    /// writer-side graph invariants. The production import caller holds the
-    /// coordinator write side; standalone callers must keep the graph quiescent.
-    ///
-    /// This retire-and-rebuild is sound only for synchronously indexed
-    /// graphs: background graph workers are rejected at registration and
-    /// root validation (see [ClusterIndexValidation#validateVectorConfiguration]),
-    /// because no public upstream lifecycle stops an in-flight worker before
-    /// its builder is retired here.
-    ///
-    /// A layout this code no longer recognizes fails closed. Our own
-    /// validation already rejects on-disk vector configurations, so the
-    /// skipped-in-incremental-mode rebuild path cannot apply here: the rebuild
-    /// always runs.
-    ///
-    /// @param index index whose search graph to reset
-    /// @throws IllegalStateException if the upstream field layout changed
-    private static void resetVectorSearchGraph(final VectorIndex<?> index) {
-        index.invalidateGraph();
     }
 
     /// Rebuilds changed vector search graphs before application reads resume.

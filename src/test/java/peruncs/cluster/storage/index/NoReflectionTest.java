@@ -17,7 +17,8 @@ class NoReflectionTest {
         final List<String> markers = List.of("java.lang.reflect", ".getDeclared", ".getField(", ".getFields(",
                 ".getMethod(", ".getMethods(", ".getConstructor(", ".getConstructors(", ".getRecordComponents(",
                 ".getAnnotations(", ".getAnnotation(", ".setAccessible(", ".trySetAccessible(", "Class.forName(",
-                "privateLookupIn(", "unreflect");
+                "privateLookupIn(", "unreflect", "findVarHandle(", "findStaticVarHandle(", "sun.misc.Unsafe",
+                "jdk.internal.misc.Unsafe", "MethodHandles.lookup().find");
         try (var paths = Files.walk(Path.of("src/main/java"))) {
             final List<Path> reflective = paths.filter(file -> file.toString().endsWith(".java"))
                     .filter(file -> {

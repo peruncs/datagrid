@@ -45,7 +45,7 @@ crash-matrix (`ReplicationMarkCrashMatrixIT`) and retention suites that were re-
 | F-21 | Done | fixed `.storage-previous` name + `recoverInterruptedReplacement` at startup |
 | F-22 | Done | `HeaderEncoder`; `EnvelopeView.set` inlined; watermark codec takes the watermark (`encodeInto(target)`) and `decodeFrame` is split; `AeronHealth` takes three probe records; Archive publisher `create/extend` take a `PublisherSetup` record and the unused remote variants are deleted. `AeronArchiveReader.Configuration`, `AeronReplicationConfiguration` and `NodeConfig` records already have builders (rule 18) |
 | F-23 | Mostly | new settings (retry pacing, retention operation timeout, publication lock timeout, abort wait, index refresh, backup workspace/entries); `Thread.sleep` loops replaced by jittered parks; offerer branch tests. Remaining literal timeouts (merger dispose, watermark retry, gauge refresh) stay constants |
-| F-24 | Done | reflection removed entirely: the public `VectorIndex.invalidateGraph()` from PR #832 is used (see the PR #832 section below) |
+| F-24 | Done | (superseded: warm-up is outside the write section again, see Round 5) reflection removed entirely: the public `VectorIndex.invalidateGraph()` from PR #832 is used (see the PR #832 section below) |
 | F-25 | Done | vocabulary, `///` indentation (601 lines fixed; the 388 remaining 8-space `///` lines are nested enum members and legitimate), `ponytail`, package-info verbs and `@since` |
 | F-26 | Done | `PreparedTransaction` is its own file; the publisher's six boolean flags became a `Lifecycle` enum (OPEN, CLOSING, CLOSE_INTERRUPTED, CLOSED) and an `Operation` enum (IDLE, PREPARING, TERMINAL), while `failed` stays orthogonal; crash, recovery and IT suites pass |
 | F-27 | Partly | shared `validateStoreRoots` / `scheduleStoreMaintenance`, task renamed; the two start methods still differ in role-specific steps |
@@ -1048,3 +1048,38 @@ installed as `5.0.0-SNAPSHOT` in the local Maven repository (the build resolves 
 - With the fix installed, `ApplyWorker` warms the invalidated graphs up *after* the write section again, so a large rebuild no longer blocks reads.
   Soak seeds 1-4 pass. The "Round 4" note that reads are blocked during rebuild is superseded.
 - Requires the patched `gigamap-jvector` snapshot; with an unpatched upstream jar, move `warmupVectorSearchGraphs()` back inside the write section.
+
+
+## Round 6: external review round, disposition
+
+**Fixed**
+- *Production retry budget no longer burns on Archive stop latency:* recovery now waits, bounded by the recording-stop timeout and paced by the catalog-probe
+  delay, until the Archive reports a stop position (`awaitRecordingStopped`), and retries the extension while the Archive still holds the previous attempt's
+  recording session open ("recording is still active", "cannot extend active recording", "recording exists for streamId"). None of these consume an attempt, and
+  because the wait is inside `ensureWriterLocked`, the crash-restart startup path (`ensureWriterMark`, `init`) gets it too without a separate retry. Real-Archive
+  ITs run without pauses between attempts and assert that only injected outages fail an attempt; the budget the latch test uses is read from the configuration.
+  Thirty consecutive runs pass; an earlier flake exposed the third message variant above.
+- Retired stale references: `ClusterStoreIndexes` Javadoc, the `resetVectorSearchGraph` wrapper (inlined with its rationale), `AtomicBoolean` instead of a one-element array
+  in `ApplyWorker`, the warm-up/refresh-watchdog comment, missing `@Override` on `receiveTypeDictionary`/`receiveData`.
+- `NoReflectionTest` also pins `findVarHandle`, `findStaticVarHandle`, `sun.misc.Unsafe` and `jdk.internal.misc.Unsafe`; the concurrent-first-search race test now lives in
+  `VectorGraphInvalidationTest`, so a Store without the lock fix fails the default gate.
+- `BackupArchive`: `scan` returns the declared total (the unused count is gone), "more than N entries", "duplicate entry" and "declared sizes overflow" are separate messages,
+  the digest path documents its bound (sorted storage names, at most the entry cap) and `validateUpload` documents the second inflation and the declared-size heuristic.
+- `NodeLifecycle.openStore` no longer claims the stored mark is matched against the cluster (it checks presence and validity); `enableDistribution` is documented.
+- `RetryPacing.DEFAULT` is deleted (the `Setting` defaults are the single source; `RetryPacingTest` pins them against the documented values).
+- `poolsweep` profile overrides `includes` (it really runs only the sweep) and keeps `${test.jvm.args}`.
+- `AeronWriterRecoveryBoundary.position` is `terminalPosition`; `CursorSnapshot` documents its two meanings (commit end vs restart boundary) and `batchApplied()` documents its
+  thread contract.
+- The "Aeron 1.53.1 message text" dependency is named in `isRecordingStillActive`, `isRecordingStillStopping` and the classification test.
+
+**Rejected or already handled**
+- "Incompatible recordings latch `FAILED`, nothing wraps them as reseed": the extend call site already catches the `IllegalArgumentException` of the three mismatch checks
+  ("unknown recording", stream, framing) and throws `ReseedRequiredException`; `classifyArchiveFailure` rightly leaves any other `IllegalArgumentException` a defect.
+- The fork pin, push, README prerequisites and a build-time patch probe are out of scope by decision (local custom Eclipse Store build).
+- *F-27 remainder:* the restore/reseed block and the maintenance scheduling stay role-specific on purpose: the backup reader handles a user upload and publishes a starter
+  backup, the storage nodes handle the writer lock and the limit gate; sharing them would need a role strategy object that is larger than the duplication.
+- *`synchronized` rewrite:* evidence scope is explicit: the JFR runs are steady-state soak and crash-matrix traffic. Reopen the assembler/publisher monitors if a
+  profile of a reader replaying a large backlog, or of a stuck Archive during `prepare`/`dispose`, shows `JavaMonitorEnter` contention; the missing `dispose`-during-stuck-`prepare`
+  and `dispose`-during-staged-delivery tests are the first things to add then.
+- *Framer pooling:* unmeasured below 4 KiB payloads at high transaction rates; reopen on a small-payload allocation profile.
+- `ArchitectureTest` still has no 8-space `///` or vocabulary guard: the 388 remaining 8-space lines are legitimate nested enum members, so a count guard would only freeze a number.

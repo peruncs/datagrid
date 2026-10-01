@@ -10,6 +10,9 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 /// Verifies that only proof of an unusable recording requires a reseed.
+///
+/// The "recording is still active" state is recognised by Aeron 1.53.1's message text, like the patterns in
+/// `AeronArchiveFailures`; re-check it when Aeron is upgraded.
 class AeronArchiveFailureClassificationTest {
     @Test
     void aTimeoutOrUnreachableArchiveIsUnavailableNotReseed() {

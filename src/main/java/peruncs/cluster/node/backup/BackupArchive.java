@@ -52,11 +52,13 @@ final class BackupArchive {
     /// Validates a user-uploaded storage archive before it may replace local state.
     ///
     /// User uploads skip generated-backup metadata checks, so this pre-check
-    /// requires a non-empty Store payload under `storage/`. Declared sizes
-    /// are not trusted: every entry is decompressed through a dry run bounded by
+    /// requires a non-empty Store payload under `storage/`; "non-empty" is judged by the declared size,
+    /// which only decides acceptance of an archive that the dry run then verifies. Declared sizes
+    /// are not trusted for the budget: every entry is decompressed through a dry run bounded by
     /// the extraction budget, so a bomb that under-declares its content is
     /// refused here — before any caller destroys local storage — instead of at
-    /// extraction time.
+    /// extraction time. The archive is therefore inflated twice (dry run, then extraction), which is
+    /// acceptable for a one-time bootstrap upload.
     ///
     /// @param archive upload archive path
     /// @param limits  operator-configured extraction budgets
@@ -403,12 +405,13 @@ final class BackupArchive {
             throws NodeException {
         Objects.requireNonNull(limits, "limits");
         try (ZipFile zip = openArchive(archive)) {
-            final long declared = scan(zip, limits.maxArchiveEntries()).declaredBytes();
+            final long declared = scan(zip, limits.maxArchiveEntries());
             if (declared < 0L || declared > limits.maxExtractedBytes()) {
                 throw new NodeException("Backup archive is too large");
             }
             final String prefix = StorageBackupBackend.STORAGE_ENTRY + "/";
-            /* Only the sorted names of the Store files are kept; each entry is looked up again when read. */
+            /* Only the names of the Store files are kept (at most the entry cap, sorted because the digest must
+             * match the directory digest); each entry is looked up again when it is read. */
             final List<String> storageNames = zip.stream()
                     .filter(entry -> !entry.isDirectory() && entry.getName().startsWith(prefix))
                     .map(entry -> entry.getName().substring(prefix.length()))
@@ -546,7 +549,7 @@ final class BackupArchive {
             AtomicFileWriter.ensureNoSymbolicLinks(root);
             try (ZipFile zip = openArchive(archive)) {
                 final long budget = extractionBudget(
-                        scan(zip, limits.maxArchiveEntries()).declaredBytes(), limits.maxExtractedBytes());
+                        scan(zip, limits.maxArchiveEntries()), limits.maxExtractedBytes());
                 final byte[] transferBuffer = new byte[8192];
                 long extractedBytes = 0L;
                 for (final var entries = zip.entries(); entries.hasMoreElements(); ) {
@@ -616,27 +619,26 @@ final class BackupArchive {
         return new IncompleteArchiveException(message, cause);
     }
 
-    /// What one validating pass over the central directory found.
-    ///
-    /// @param count         number of entries
-    /// @param declaredBytes sum of declared sizes, or `-1` when any size is unknown
-    private record ArchiveScan(int count, long declaredBytes) {
-    }
-
     /// Validates the central directory in one streaming pass: entry count, duplicate and unsafe names,
     /// and the declared size total.
     ///
     /// No entry objects are retained, so a hostile archive with the maximum entry count costs only the
-    /// duplicate-name set. Reading the central directory inflates nothing, so hostile declared sizes are
-    /// visible before any entry data is decompressed.
-    private static ArchiveScan scan(final ZipFile zip, final int maxEntries) throws NodeException {
+    /// set of unique names (at most `maxEntries` of them: a duplicate or an extra entry throws first).
+    /// Reading the central directory inflates nothing, so hostile declared sizes are visible before any
+    /// entry data is decompressed.
+    ///
+    /// @return the sum of declared sizes, or `-1` when any size is unknown
+    private static long scan(final ZipFile zip, final int maxEntries) throws NodeException {
         final Set<String> names = new HashSet<>();
         long total = 0L;
         boolean unknown = false;
         for (final var entries = zip.entries(); entries.hasMoreElements(); ) {
             final ZipEntry entry = entries.nextElement();
-            if (names.size() >= maxEntries || !names.add(entry.getName())) {
-                throw new NodeException("Backup archive contains too many or duplicate entries");
+            if (names.size() >= maxEntries) {
+                throw new NodeException("Backup archive contains more than %s entries".formatted(maxEntries));
+            }
+            if (!names.add(entry.getName())) {
+                throw new NodeException("Backup archive contains a duplicate entry: %s".formatted(entry.getName()));
             }
             if (!safeArchiveName(entry.getName())) {
                 throw new NodeException("Backup archive contains an unsafe entry: %s".formatted(entry.getName()));
@@ -646,12 +648,12 @@ final class BackupArchive {
             if (size < 0L) {
                 unknown = true;
             } else if (size > Long.MAX_VALUE - total) {
-                throw new NodeException("Backup archive declares more data than the extraction budget");
+                throw new NodeException("Backup archive declared sizes overflow the size counter");
             } else {
                 total += size;
             }
         }
-        return new ArchiveScan(names.size(), unknown ? -1L : total);
+        return unknown ? -1L : total;
     }
 
     private static long extractionBudget(final long declared, final long maximum) throws NodeException {

@@ -358,12 +358,6 @@ public record NodeConfig(
     public record RetryPacing(Duration idleMaxPark, Duration jitterBase, Duration jitterCap,
                               Duration archiveProbeDelay, Duration catalogProbeInitialDelay,
                               Duration catalogProbeMaxDelay) {
-        /// Documented defaults: 1 ms idle park, 1 µs jitter base, 1 ms jitter cap, 10 ms probe spacing and
-        /// catalog probes growing from 1 ms to 100 ms.
-        public static final RetryPacing DEFAULT = new RetryPacing(
-                Duration.ofMillis(1), Duration.ofNanos(1_000), Duration.ofMillis(1), Duration.ofMillis(10),
-                Duration.ofMillis(1), Duration.ofMillis(100));
-
         public RetryPacing {
             positive(idleMaxPark, "idleMaxPark");
             positive(jitterBase, "jitterBase");

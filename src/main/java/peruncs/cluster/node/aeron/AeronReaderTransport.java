@@ -274,10 +274,12 @@ final class AeronReaderTransport {
             this.receiver().releaseNativeBuffer(buffer);
         }
 
+        @Override
         public void receiveTypeDictionary(final String value) {
             this.shared().runInDeliveryCallback(() -> this.receiver().receiveTypeDictionary(value));
         }
 
+        @Override
         public void receiveData(final Binary value) {
             this.shared().runInDeliveryCallback(() -> {
                 this.receiver().receiveData(value);

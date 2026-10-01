@@ -241,7 +241,7 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
             final AeronReaderWatermark quorumWatermark = this.quorum.aggregate();
             if (quorumWatermark.recordingId() != activeRecordingId)
                 throw new IllegalArgumentException("retention watermark recording does not match the active writer");
-            final long targetPosition = Math.min(quorumWatermark.position(), requested.position());
+            final long targetPosition = Math.min(quorumWatermark.position(), requested.terminalPosition());
             final long targetSequence = Math.min(quorumWatermark.sequence(), requested.sequence());
             this.requireWithinDurableBoundary(targetSequence, targetPosition);
             final long start = this.recordingPositions.startPosition().applyAsLong(activeRecordingId);
@@ -502,16 +502,16 @@ final class AeronArchiveRetention implements ReplicationLogRetention {
     /// fails closed.
     private void requireWithinDurableBoundary(final long sequence, final long position) {
         final AeronWriterRecoveryBoundary terminal = this.writerBoundary.get();
-        if (terminal == null || terminal.sequence() < 0 || terminal.position() < 0 ||
+        if (terminal == null || terminal.sequence() < 0 || terminal.terminalPosition() < 0 ||
             sequence < terminal.sequence() ||
-            sequence == terminal.sequence() && position <= terminal.position()) {
+            sequence == terminal.sequence() && position <= terminal.terminalPosition()) {
             return;
         }
         /* Past the terminal marker. The recording question below runs only
          * in this slow path, so a watermark accepted at or below the boundary
          * never pays for an Archive control round-trip. */
         final long recorded = this.recordedDurablePosition(this.recordingId.getAsLong());
-        if (position <= terminal.position() || recorded < 0 || position > recorded) {
+        if (position <= terminal.terminalPosition() || recorded < 0 || position > recorded) {
             throw new IllegalStateException("reader watermark is ahead of the durable writer boundary");
         }
     }
