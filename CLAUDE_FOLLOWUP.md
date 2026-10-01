@@ -24,7 +24,7 @@ crash-matrix (`ReplicationMarkCrashMatrixIT`) and retention suites that were re-
 |----|--------|------------------------|
 | F-01 | Done | lock stage waits for transport + Store close; `NodeLifecycleTest.failedStoreShutdownKeepsTheWriterLockUntilTheRetrySucceeds` |
 | F-02 | Done | retention close throws instead of reporting success, never interrupts the agent; owner keeps runtime open; `liveRetention()` uses `instanceof` |
-| F-03 | Done | `classifyArchiveFailure`; transient failures are `ReplicationUnavailableException`, not latched; reader reconnect budget → `FAILED` (not reseed) |
+| F-03 | Done | `classifyArchiveFailure`; transient failures are `ReplicationUnavailableException`, retried up to `PERUNCS_WRITER_RECOVERY_ATTEMPTS` consecutive times (default 3) and then latched `FAILED`; an unclean close of the failed candidate latches at once; reader reconnect budget → `FAILED` (not reseed) |
 | F-04 | Done | `AeronWriterTailRecovery.Framing` bounds with MTU/term padding |
 | F-05 | Done | provisional-negative caching with outermost-resolution commit (the external "treat back-edge as relevant" fix was rejected) |
 | F-06 | Done | unknown measurement fails closed (`markUnknown`) and surfaces to the maintenance scheduler |
@@ -46,7 +46,7 @@ crash-matrix (`ReplicationMarkCrashMatrixIT`) and retention suites that were re-
 | F-22 | Done | `HeaderEncoder`; `EnvelopeView.set` inlined; watermark codec takes the watermark (`encodeInto(target)`) and `decodeFrame` is split; `AeronHealth` takes three probe records; Archive publisher `create/extend` take a `PublisherSetup` record and the unused remote variants are deleted. `AeronArchiveReader.Configuration`, `AeronReplicationConfiguration` and `NodeConfig` records already have builders (rule 18) |
 | F-23 | Mostly | new settings (retry pacing, retention operation timeout, publication lock timeout, abort wait, index refresh, backup workspace/entries); `Thread.sleep` loops replaced by jittered parks; offerer branch tests. Remaining literal timeouts (merger dispose, watermark retry, gauge refresh) stay constants |
 | F-24 | Done | `VarHandle` + upstream `builderLock` + startup layout check; module path needs `--add-opens` (README) |
-| F-25 | Done | vocabulary, `///` indentation (601 lines in 91 files), `ponytail`, package-info verbs and `@since` |
+| F-25 | Done | vocabulary, `///` indentation (601 lines fixed; the 388 remaining 8-space `///` lines are nested enum members and legitimate), `ponytail`, package-info verbs and `@since` |
 | F-26 | Done | `PreparedTransaction` is its own file; the publisher's six boolean flags became a `Lifecycle` enum (OPEN, CLOSING, CLOSE_INTERRUPTED, CLOSED) and an `Operation` enum (IDLE, PREPARING, TERMINAL), while `failed` stays orthogonal; crash, recovery and IT suites pass |
 | F-27 | Partly | shared `validateStoreRoots` / `scheduleStoreMaintenance`, task renamed; the two start methods still differ in role-specific steps |
 | F-28 | Done | one bounded cause-chain walker; five inner classes extracted into package-private files |
@@ -875,7 +875,7 @@ Replace generic `IllegalStateException` for Archive/coordinator/close failures w
 README: footnote that `PERUNCS_AERON_DIRECTORY` and `…ARCHIVE_DIRECTORY` print `unset` in the generated table although derived defaults exist (or make `settingsMarkdown()` print the derivation; `NodeConfigSettingsTest:140-147` checks containment only). `NodeAssembly:796` widened a private member to package scope for `NodeLifecycle`; expose it through a method on the assembly interface instead *(ext.)*. `package-info` first sentences must be verb-first (list in F-25.6) including `peruncs/package-info`, `cluster/package-info` (leading blank line), `api/package-info`, `NodeConfig:10`, `FaultInjection:6`.
 
 ### N-J — Extra tests requested by the reviews
-10k-batch FIFO/backpressure test for `ApplyQueue`; starter-layout overlap / absolute-path / tmpfs rejection test; `AeronOfferRetryer` branches `NOT_CONNECTED`, `ADMIN_ACTION`, `CLOSED`; assembler corrupt-data test with `maxTx` at the production default and a tail of `2*maxTx` (all current assembler tests pin `maxTx=1024`); never-recording Archive → single timeout and non-blocking `dispose`; `>10k`-vector rebuild time + recall bound; observable blackout (`lastApplyBlockedMillis` + WARN, F-09).
+10k-batch FIFO/backpressure test for `ApplyQueue`; starter-layout overlap / absolute-path / tmpfs rejection test; `AeronOfferRetryer` branches `NOT_CONNECTED`, `ADMIN_ACTION`, `CLOSED`; assembler corrupt-data test with `maxTx` at the production default and a tail of `2*maxTx` (all current assembler tests pin `maxTx=1024`); never-recording Archive → single timeout and non-blocking `dispose`; `>10k`-vector rebuild time + recall bound; observable blackout (now only the WARN in `ApplyWorker.noteBlockedTime`; the unread `lastApplyBlockedMillis` field was removed).
 
 ### Still outstanding
 Rule 27 (Aeron cookbook; Eclipse Store/Serializer tests) is not done; both the reviewers and I only checked `ExclusivePublication.offer(DirectBufferVector[])` copy semantics.
@@ -885,7 +885,7 @@ Rule 27 (Aeron cookbook; Eclipse Store/Serializer tests) is not done; both the r
 
 **Fixed:** writer-recovery classification (unexpected failures latch `FAILED`, never "reseed"; unstopped recording is
 transient; explicit clean-close flag; consecutive-transient budget `PERUNCS_WRITER_RECOVERY_ATTEMPTS`, default 3; blanket
-reseed catch in the tail scan removed); reader `position()` reports -1/-1 before the first applied transaction;
+reseed catch in the tail scan removed); reader `position()` reports the restart boundary (the Store mark's sequence and prepare-start position) captured as one immutable pair at the end of each apply batch inside the graph write section, `-1/-1` only while the Store holds no mark, and it lags the applied cursor by the batching window (conservative for retention);
 `StoreIndexReflection` no-ops when no graph was ever built; backup copy fallback uses a heap buffer; `NodeException.outcome()`
 names every leaf; dead `ApplyWorker.lastApplyBlockedMillis` removed.
 
@@ -912,3 +912,32 @@ transaction count is now 1,000 (`-Dpool.transactions=10000` restores the full ru
 - F-24 wording: the startup failure applies to reader roles only;
 - `BackupArchive.listEntries()` still materialises a `List<ZipEntry>` for very large entry counts;
 - verification: crash matrix and soak not re-run after the round-2 edits (unit gate 825 and the earlier 27 integration tests are green).
+
+
+## External review round 3: disposition
+
+**Fixed:**
+- *Torn reader boundary (highest):* the watermark and `position()` no longer read the live, in-place-written `ReplicationMark`.
+  `ReplicationCollaborators.updateGraph` runs each apply batch in the graph write section and calls
+  `ClusterReplicationTransport.batchApplied()` at its end; `AeronReaderTransport` stores one immutable `CursorSnapshot`
+  in a volatile (`AeronReaderBoundaryTest`). The backup log no longer prints the lagging position next to the live one.
+- *One classifier:* `writerRecoveryFailure` deleted; every recovery failure goes through `classifyArchiveFailure`.
+  `IllegalArgumentException` and unrelated `IllegalStateException` are now defects (`FAILED`); only the "recording is still
+  active" state is transient; the one proven incompatibility (extend) wraps `IllegalArgumentException` into reseed at its site.
+- *Testable budget:* `AeronWriterTransport.recoveryOutcome(...)` is a pure decision (retry / latch FAILED / latch RESEED) with
+  boundary tests; the counter increments independent of the short-circuit; every latch and retry is logged once through a static logger.
+- `StoreIndexReflection`: the lock-null no-op now also requires empty deferred work and no rebuild; Javadoc corrected
+  (a loaded index creates `builderLock` lazily, so null genuinely means "never built"); `Default`-only layout check documented.
+  A unit test for the null-lock branch is not possible without instantiating `VectorIndex.Default` (package-private constructor).
+- `AERON_RETRY_JITTER_BASE_NANOS` added (validated against the cap, README row); `GuardingStorageManager.CauseScan` classifies
+  the chain once; `NodeException.outcome()` redundant case removed and `ReplicationException` asserted; `ArchitectureTest`
+  gained storage-below-node, api-facade and a production FQN guard (and its own FQN fixed); `EnvelopeFramerTest` gained 1/3/8-source
+  shapes and the mid-gather length-changed failure, "staged" renamed "flattened"; README documents the recovery budget, the
+  second-writer hint and the full pool sweep; Javadoc on the receiver defaults, `PreparedTransaction.close()` and the merger watchdog.
+
+**Still open:**
+- retry-budget test through `ensureWriterLocked` and an end-to-end two-transaction tail recovery against a real Archive (needs the Archive IT harness);
+- `TargetCallbacks.committedSequence` removal (re-express the coordinator test through its own state first);
+- abstract receiver allocation plus `DirectBufferReceiver` fixture; `AeronRetryPolicy` consuming `RetryPacing` and catalog-probe settings;
+- `NodeLifecycle` role-start step extraction (F-27); list-materialising `BackupArchive` restore; periodic full 10k pool sweep in CI;
+- crash matrix and soak re-run after these edits; new files are untracked (do not commit the index as staged).

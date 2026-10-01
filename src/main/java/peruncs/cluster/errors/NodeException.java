@@ -62,7 +62,6 @@ public sealed class NodeException extends RuntimeException permits BackupBusyExc
             case ReplicationPositionUnavailableException _ -> Outcome.TRANSIENT;
             case GraphInvalidatedException _, CorruptReplicationDataException _, ReaderWriteRejectedException _,
                  IncompleteArchiveException _, WrongRoleException _ -> Outcome.FAILED;
-            case ReplicationException _ -> Outcome.FAILED;
             case NodeException _ -> Outcome.FAILED;
         };
     }

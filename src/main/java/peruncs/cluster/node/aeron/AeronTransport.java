@@ -188,6 +188,11 @@ public final class AeronTransport implements ClusterReplicationTransport {
     }
 
     @Override
+    public void batchApplied() {
+        if (this.replicationMark != null) this.readerTransport.captureBoundary(this.replicationMark);
+    }
+
+    @Override
     public ReplicationApplier clientFromMark(
             final StorageBinaryDataReceiver receiver,
             final ReplicationMark startingMark) {

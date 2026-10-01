@@ -22,11 +22,17 @@ class AeronArchiveFailureClassificationTest {
     }
 
     @Test
-    void aMissingOrIncompatibleRecordingRequiresReseed() {
+    void aMissingRecordingRequiresReseed() {
         assertInstanceOf(ReseedRequiredException.class, AeronWriterTransport.classifyArchiveFailure(
                 "inspect", new ArchiveException("gone", ArchiveException.UNKNOWN_RECORDING)));
-        assertInstanceOf(ReseedRequiredException.class, AeronWriterTransport.classifyArchiveFailure(
-                "extend", new IllegalArgumentException("Aeron recording framing does not match")));
+    }
+
+    @Test
+    void illegalArgumentAndUnrelatedIllegalStateAreDefectsNotEvidenceAboutTheRecording() {
+        final IllegalArgumentException invalid = new IllegalArgumentException("invalid writer recovery bounds");
+        assertSame(invalid, AeronWriterTransport.classifyArchiveFailure("scan", invalid));
+        final IllegalStateException state = new IllegalStateException("writer fencing token is unavailable");
+        assertSame(state, AeronWriterTransport.classifyArchiveFailure("scan", state));
     }
 
     @Test

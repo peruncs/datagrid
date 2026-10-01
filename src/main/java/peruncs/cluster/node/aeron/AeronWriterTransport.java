@@ -63,12 +63,12 @@ final class AeronWriterTransport {
     private volatile boolean writerRecoveryInProgress;
     /* Consecutive transient recovery failures; guarded by the transport monitor. */
     private int consecutiveTransientFailures;
-    private volatile ReplicationState writerRecoveryState;
-    /* The classified failure behind writerRecoveryState. A later ensureWriter
+    private volatile ReplicationState latchedRecoveryState;
+    /* The classified failure behind latchedRecoveryState. A later ensureWriter
      * rethrows it instead of retrying recovery: a RESEED_REQUIRED or terminal
      * FAILED outcome is sticky by contract, and the operator restart is the
      * only retry. */
-    private volatile RuntimeException writerRecoveryFailure;
+    private volatile RuntimeException latchedRecoveryFailure;
     private ReplicationPositionProvider positionProvider;
 
     AeronWriterTransport(final AeronTransport facade, final int indexValidationMaxObjects) {
@@ -89,27 +89,44 @@ final class AeronWriterTransport {
         return this.facade.runtimeOwner();
     }
 
-    /// Maps a writer recovery failure onto the typed transport failure taxonomy.
+    private static final System.Logger LOGGER = System.getLogger(AeronWriterTransport.class.getName());
+
+    /// What to do after one failed writer recovery attempt.
+    enum RecoveryOutcome {
+        /// Leave the writer unset; the next write recovers from scratch.
+        RETRY,
+        /// Latch `FAILED` until the operator restarts the node.
+        LATCH_FAILED,
+        /// Latch `RESEED_REQUIRED` until the readers are reseeded.
+        LATCH_RESEED
+    }
+
+    /// Decides whether a failed recovery attempt is retried or latched.
     ///
-    /// @param failure failure thrown while recovering the writer
-    /// @return typed replication failure, or the original runtime failure
-    static RuntimeException writerRecoveryFailure(final RuntimeException failure) {
-        if (failure instanceof ArchiveException archive) {
-            return new ReplicationUnavailableException("Aeron Archive writer recovery failed", archive);
-        }
-        if (failure instanceof AeronException) {
-            return new ReplicationUnavailableException("Aeron writer recovery failed", failure);
-        }
-        return failure;
+    /// A reseed always latches. A transient outage is retried until `attempts` consecutive failures have
+    /// happened, and never when closing the failed candidate also failed, because the recording may then
+    /// still be active. Anything else is a defect and latches `FAILED`.
+    ///
+    /// @param classified          the classified failure
+    /// @param cleanClose          whether the failed candidate was closed cleanly
+    /// @param consecutiveFailures consecutive transient failures including this one
+    /// @param attempts            consecutive transient failures allowed before latching
+    /// @return the action to take
+    static RecoveryOutcome recoveryOutcome(final RuntimeException classified, final boolean cleanClose,
+                                           final int consecutiveFailures, final int attempts) {
+        if (classified instanceof ReseedRequiredException) return RecoveryOutcome.LATCH_RESEED;
+        return classified instanceof ReplicationUnavailableException && cleanClose && consecutiveFailures < attempts
+                ? RecoveryOutcome.RETRY : RecoveryOutcome.LATCH_FAILED;
     }
 
     /// Separates a transient Archive outage from proof that the recording cannot serve this Store.
     ///
     /// Only a missing recording, an incompatible recording or corrupt history requires a reseed;
     /// a timeout or an unreachable Archive leaves the recording and the Store mark intact, so the
-    /// failure is reported as unavailable and the next attempt may recover. Any other failure is a
-    /// defect, not evidence about the recording: it is returned unchanged and latches `FAILED`
-    /// instead of sending operators to reseed an intact recording.
+    /// failure is reported as unavailable and the next attempt may recover. Any other failure, including an
+    /// `IllegalArgumentException`, is a defect, not evidence about the recording: it is returned unchanged and
+    /// latches `FAILED` instead of sending operators to reseed an intact recording. Call sites that can prove
+    /// an incompatible recording wrap it in [ReseedRequiredException] themselves.
     ///
     /// @param context what the writer was doing
     /// @param failure the failure thrown by the Archive or the recovery scan
@@ -123,14 +140,17 @@ final class AeronWriterTransport {
                     ? reseedRequired(context + ": the recording is missing", archive)
                     : new ReplicationUnavailableException(context, archive);
         }
-        if (failure instanceof IllegalArgumentException) {
-            /* The recording does not match the configured stream or framing: proof it is unusable. */
-            return reseedRequired(context, failure);
-        }
-        if (failure instanceof AeronException || failure instanceof IllegalStateException) {
+        if (failure instanceof AeronException ||
+            (failure instanceof IllegalStateException active && isRecordingStillActive(active))) {
             return new ReplicationUnavailableException(context, failure);
         }
         return failure;
+    }
+
+    /// Recognises the one illegal state that is a transient outage: the Archive has not yet stopped the
+    /// recording of a crashed writer. Other illegal states are caller defects.
+    private static boolean isRecordingStillActive(final IllegalStateException failure) {
+        return failure.getMessage() != null && failure.getMessage().contains("recording is still active");
     }
 
     /// Clears a failed writer candidate, reporting close noise as suppressed.
@@ -245,7 +265,7 @@ final class AeronWriterTransport {
     boolean writerReady() {
         final AeronReplicationWriteCoordinator current = this.coordinator;
         return settings().topology().role().isWriter() && !this.writerRecoveryInProgress &&
-               this.writerRecoveryState == null && this.writer != null && !this.writer.isFailed() &&
+               this.latchedRecoveryState == null && this.writer != null && !this.writer.isFailed() &&
                (current == null || current.failure() == null) && this.runtime().driverFailure() == null;
     }
 
@@ -276,7 +296,7 @@ final class AeronWriterTransport {
         /* Preserve a failed startup result even though the writer object was never
          * installed. Returning STARTING for a null writer would hide a permanent
          * RESEED_REQUIRED/FAILED state from health probes. */
-        if (this.writerRecoveryState != null) return this.writerRecoveryState;
+        if (this.latchedRecoveryState != null) return this.latchedRecoveryState;
         /* Capture once: the close stages can discard the writer between the
          * null check and the dereference, which would surface as a probe NPE. */
         final AeronArchiveReplicationPublisher current = this.writer;
@@ -446,17 +466,17 @@ final class AeronWriterTransport {
             throw new IllegalStateException("Aeron writer cannot start while transport is closing");
         }
         if (this.writer != null) {
-            if (this.writerRecoveryState != null) {
+            if (this.latchedRecoveryState != null) {
                 throw new IllegalStateException("Aeron writer recovery did not complete");
             }
             return this.writer;
         }
-        if (this.writerRecoveryState != null) {
+        if (this.latchedRecoveryState != null) {
             /* A previous recovery attempt failed terminally. Never retry from
              * scratch and never return a partially recovered writer: the same
              * typed failure is rethrown so health probes and callers keep
              * reporting the original cause. */
-            throw this.writerRecoveryFailure;
+            throw this.latchedRecoveryFailure;
         }
         this.writerRecoveryInProgress = true;
         AeronArchiveReplicationPublisher candidate = null;
@@ -479,6 +499,11 @@ final class AeronWriterTransport {
             if (recordingId >= 0L) {
                 try {
                     candidate = AeronArchiveReplicationPublisher.extend(this.runtime().archive(), recordingId, settings().topology().streamId(), new AeronArchiveReplicationPublisher.PublisherSetup(settings().replication(), settings().topology().clusterId(), settings().topology().epoch(), settings().wireNonce()), initialSequence);
+                } catch (final IllegalArgumentException mismatch) {
+                    /* The recording is not the stream or framing this writer was configured for. */
+                    throw reseedRequired(
+                            "Archive recording %s does not match the configured stream or framing".formatted(recordingId),
+                            mismatch);
                 } catch (final RuntimeException failure) {
                     throw classifyArchiveFailure(
                             "cannot extend Archive recording %s after writer recovery".formatted(recordingId), failure);
@@ -539,38 +564,40 @@ final class AeronWriterTransport {
                     recovery.boundarySequence() == mark.sequence() + 1L ? recovery.boundarySequence() : -1L;
             this.writer = candidate;
             candidate = null;
-            this.writerRecoveryState = null;
-            this.writerRecoveryFailure = null;
+            this.latchedRecoveryState = null;
+            this.latchedRecoveryFailure = null;
             this.consecutiveTransientFailures = 0;
             /* Publish the recovered boundary before the outer method drains
              * deferred reader watermarks. */
             this.writerRecoveryInProgress = false;
             return this.writer;
         } catch (final RuntimeException failure) {
-            final RuntimeException classified = writerRecoveryFailure(failure);
+            final RuntimeException classified = classifyArchiveFailure("writer recovery", failure);
             final boolean cleanClose = closeFailedWriter(candidate, classified);
             /* A transient outage is not latched: the next call recovers from scratch, which is
              * safe because the tail scan is read-only and a recovery marker is only appended
              * after the scan. It is retried only a configured number of consecutive times, so a
-             * failure that is not really transient cannot rescan on every write forever. A failed
-             * close may leave the recording active, so it latches at once. */
-            final boolean transientOutage = classified instanceof ReplicationUnavailableException && cleanClose &&
-                    ++this.consecutiveTransientFailures < settings().timeouts().writerRecoveryAttempts();
-            if (!transientOutage) {
-                if (classified instanceof ReplicationUnavailableException) {
-                    System.getLogger(AeronWriterTransport.class.getName()).log(System.Logger.Level.WARNING,
-                            "Writer recovery failed %d consecutive time(s); latching FAILED"
-                                    .formatted(this.consecutiveTransientFailures), classified);
-                }
-                this.writerRecoveryState = classified instanceof ReseedRequiredException
+             * failure that is not really transient cannot rescan on every write forever. */
+            if (classified instanceof ReplicationUnavailableException) this.consecutiveTransientFailures++;
+            final RecoveryOutcome outcome = recoveryOutcome(classified, cleanClose,
+                    this.consecutiveTransientFailures, settings().timeouts().writerRecoveryAttempts());
+            if (outcome == RecoveryOutcome.RETRY) {
+                LOGGER.log(System.Logger.Level.WARNING, "Writer recovery failed (%d of %d allowed); will retry"
+                        .formatted(this.consecutiveTransientFailures,
+                                settings().timeouts().writerRecoveryAttempts()), classified);
+            } else {
+                this.latchedRecoveryState = outcome == RecoveryOutcome.LATCH_RESEED
                         ? ReplicationState.RESEED_REQUIRED : ReplicationState.FAILED;
-                this.writerRecoveryFailure = classified;
+                this.latchedRecoveryFailure = classified;
+                LOGGER.log(System.Logger.Level.ERROR, "Writer recovery latched %s after %d consecutive transient failure(s)%s"
+                        .formatted(this.latchedRecoveryState, this.consecutiveTransientFailures,
+                                cleanClose ? "" : "; closing the failed candidate also failed"), classified);
             }
             throw classified;
         } catch (final Error failure) {
             closeFailedWriter(candidate, failure);
-            this.writerRecoveryState = ReplicationState.FAILED;
-            this.writerRecoveryFailure =
+            this.latchedRecoveryState = ReplicationState.FAILED;
+            this.latchedRecoveryFailure =
                     new IllegalStateException("Aeron writer recovery failed", failure);
             throw failure;
         } finally {

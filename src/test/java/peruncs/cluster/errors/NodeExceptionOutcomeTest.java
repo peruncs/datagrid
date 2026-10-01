@@ -24,6 +24,7 @@ class NodeExceptionOutcomeTest {
         assertEquals(NodeException.Outcome.FAILED, new GraphInvalidatedException("latched", null).outcome());
         assertEquals(NodeException.Outcome.FAILED, new WrongRoleException("role").outcome());
         assertEquals(NodeException.Outcome.FAILED, new IncompleteArchiveException("truncated").outcome());
+        assertEquals(NodeException.Outcome.FAILED, new ReplicationException("generic replication").outcome());
         assertEquals(NodeException.Outcome.FAILED, new NodeException("generic").outcome());
     }
 }

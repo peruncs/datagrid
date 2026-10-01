@@ -53,6 +53,15 @@ final class ReplicationCollaborators {
         };
     }
 
+    /// Runs an apply batch in the graph write section and captures the durable boundary at its end,
+    /// while the Store mark cannot change.
+    private void updateGraph(final Runnable batch) {
+        this.owner.graphCoordinator.write(() -> {
+            batch.run();
+            this.transport.get().batchApplied();
+        });
+    }
+
     private StorageBinaryDataMerger createMerger() {
         final StorageConnection replicationStorage = this.owner.embeddedStorageManager != null
                 ? this.owner.embeddedStorageManager
@@ -65,7 +74,7 @@ final class ReplicationCollaborators {
         final var graph = this.owner.graphCoordinator;
         final var defaults = StorageBinaryDataMerger.Configuration.create(
                 this.owner.getEmbeddedStorageFoundation().getConnectionFoundation(),
-                replicationStorage, graph::write, graph);
+                replicationStorage, this::updateGraph, graph);
         return StorageBinaryDataMerger.create(new StorageBinaryDataMerger.Configuration(
                 defaults.foundation(),
                 defaults.storage(),

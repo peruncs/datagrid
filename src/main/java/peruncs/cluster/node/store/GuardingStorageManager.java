@@ -373,29 +373,52 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
         return chain;
     }
 
+    /// What one walk of a failure's cause chain proves about the write that failed.
+    ///
+    /// @param cleanRejection `true` only when the chain proves rejection before local persistence, so retry is safe
+    /// @param pendingCommit  `true` when the chain reports a locally accepted commit awaiting its marker
+    record CauseScan(boolean cleanRejection, boolean pendingCommit) {
+        /// The result for a chain that cannot be classified.
+        private static final CauseScan UNCLASSIFIED = new CauseScan(false, false);
+
+        /// Walks the chain once and classifies it for both questions.
+        ///
+        /// @param failure delegated failure
+        /// @return what the chain proves
+        static CauseScan of(final Throwable failure) {
+            final List<Throwable> chain = boundedChain(failure);
+            if (chain == null) return UNCLASSIFIED;
+            boolean rejected = false;
+            boolean rejectedRecordedAbort = false;
+            boolean sawAbortCause = false;
+            boolean cleanChain = true;
+            boolean pending = false;
+            boolean pendingChain = true;
+            for (final Throwable current : chain) {
+                if (current instanceof WriteRejectedException rejection) {
+                    rejected = true;
+                    rejectedRecordedAbort |= rejection.hasRecordedAbort();
+                    pendingChain = false;
+                } else if (current instanceof ReplicationPendingException) {
+                    pending = true;
+                    cleanChain = false;
+                } else if (current instanceof ReplicationException) {
+                    final boolean unavailable = current instanceof ReplicationUnavailableException;
+                    if (!(rejected && rejectedRecordedAbort && unavailable && !sawAbortCause)) cleanChain = false;
+                    if (!(pending && unavailable)) pendingChain = false;
+                    sawAbortCause = true;
+                }
+            }
+            return new CauseScan(cleanChain && rejected, pendingChain && pending);
+        }
+    }
+
     /// Returns whether this cause chain proves rejection before local persistence.
     ///
     /// @param failure delegated failure
     /// @return `true` only when retry is safe
     static boolean isCleanRejection(final Throwable failure) {
-        final List<Throwable> chain = boundedChain(failure);
-        if (chain == null) return false;
-        boolean rejected = false;
-        boolean rejectedRecordedAbort = false;
-        boolean sawAbortCause = false;
-        for (final Throwable current : chain) {
-            if (current instanceof WriteRejectedException rejection) {
-                rejected = true;
-                rejectedRecordedAbort |= rejection.hasRecordedAbort();
-            } else if (current instanceof ReplicationException) {
-                if (!(rejected && rejectedRecordedAbort &&
-                      current instanceof ReplicationUnavailableException && !sawAbortCause)) {
-                    return false;
-                }
-                sawAbortCause = true;
-            }
-        }
-        return rejected;
+        return CauseScan.of(failure).cleanRejection();
     }
 
     /// Returns whether this cause chain identifies a locally accepted commit awaiting its marker.
@@ -403,18 +426,7 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     /// @param failure delegated failure
     /// @return `true` when the chain reports a locally accepted pending commit
     static boolean isPendingCommit(final Throwable failure) {
-        final List<Throwable> chain = boundedChain(failure);
-        if (chain == null) return false;
-        boolean pending = false;
-        for (final Throwable current : chain) {
-            if (current instanceof ReplicationPendingException) {
-                pending = true;
-            } else if (current instanceof ReplicationException &&
-                       !(pending && current instanceof ReplicationUnavailableException)) {
-                return false;
-            }
-        }
-        return pending;
+        return CauseScan.of(failure).pendingCommit();
     }
 
     /// Runs one persistence step under the shared exclusive section:
@@ -470,7 +482,8 @@ class GuardingStorageManager<T> implements ClusterStorageManager<T> {
     }
 
     private void latchPersistenceFailure(final Throwable failure, final boolean enabled) {
-        if (enabled && !isPendingCommit(failure) && !isCleanRejection(failure)) {
+        final CauseScan scan = CauseScan.of(failure);
+        if (enabled && !scan.pendingCommit() && !scan.cleanRejection()) {
             this.reportPersistenceFailure(failure);
         }
     }

@@ -99,6 +99,8 @@ public record NodeConfig(
                 "PERUNCS_AERON_ABORT_RECORDED_POSITION_TIMEOUT_NANOS", "5000000000", NodeConfig::parsePositiveNanos),
         AERON_RETRY_IDLE_MAX_PARK_NANOS(
                 "PERUNCS_AERON_RETRY_IDLE_MAX_PARK_NANOS", "1000000", NodeConfig::parsePositiveNanos),
+        AERON_RETRY_JITTER_BASE_NANOS(
+                "PERUNCS_AERON_RETRY_JITTER_BASE_NANOS", "1000", NodeConfig::parsePositiveNanos),
         AERON_RETRY_JITTER_CAP_NANOS(
                 "PERUNCS_AERON_RETRY_JITTER_CAP_NANOS", "1000000", NodeConfig::parsePositiveNanos),
         AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS(
@@ -344,16 +346,22 @@ public record NodeConfig(
     /// How fast the writer's bounded retry loops spin: trades CPU against reaction time on slow Archives.
     ///
     /// @param idleMaxPark       longest park of one idle step while waiting for Aeron
+    /// @param jitterBase        first delay between two offer retries; must not exceed `jitterCap`
     /// @param jitterCap         longest delay between two offer retries
     /// @param archiveProbeDelay spacing of Archive progress probes while waiting for a recorded position
-    public record RetryPacing(Duration idleMaxPark, Duration jitterCap, Duration archiveProbeDelay) {
-        /// Documented defaults: 1 ms, 1 ms and 10 ms.
+    public record RetryPacing(Duration idleMaxPark, Duration jitterBase, Duration jitterCap,
+                              Duration archiveProbeDelay) {
+        /// Documented defaults: 1 ms idle park, 1 µs jitter base, 1 ms jitter cap and 10 ms probe spacing.
         public static final RetryPacing DEFAULT = new RetryPacing(
-                Duration.ofMillis(1), Duration.ofMillis(1), Duration.ofMillis(10));
+                Duration.ofMillis(1), Duration.ofNanos(1_000), Duration.ofMillis(1), Duration.ofMillis(10));
 
         public RetryPacing {
             positive(idleMaxPark, "idleMaxPark");
+            positive(jitterBase, "jitterBase");
             positive(jitterCap, "jitterCap");
+            if (jitterBase.compareTo(jitterCap) > 0) {
+                throw new IllegalArgumentException("jitterBase must not exceed jitterCap");
+            }
             positive(archiveProbeDelay, "archiveProbeDelay");
         }
     }
@@ -539,6 +547,7 @@ public record NodeConfig(
                 value(parsed, Setting.WRITER_RECOVERY_ATTEMPTS));
         final RetryPacing retryPacing = new RetryPacing(
                 Duration.ofNanos(value(parsed, Setting.AERON_RETRY_IDLE_MAX_PARK_NANOS)),
+                Duration.ofNanos(value(parsed, Setting.AERON_RETRY_JITTER_BASE_NANOS)),
                 Duration.ofNanos(value(parsed, Setting.AERON_RETRY_JITTER_CAP_NANOS)),
                 Duration.ofNanos(value(parsed, Setting.AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS)));
         final AeronConfig aeron = new AeronConfig(

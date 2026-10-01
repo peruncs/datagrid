@@ -728,7 +728,10 @@ private StorageBinaryDataMerger(final Configuration configuration) {
         } finally {
             /* Terminate the watchdog only when the worker is actually gone:
              * on a failed (retryable) dispose the still-live worker's
-             * later batches must keep their watchdog protection. */
+             * later batches must keep their watchdog protection. A worker that never
+             * terminates (a Store callback that ignores interruption) therefore also
+             * keeps this one daemon scheduler thread; both are bounded by the node's
+             * lifetime and the failed dispose is reported to the caller. */
             if (this.executor.isTerminated()) {
                 this.watchdog.shutdownNow();
                 try {

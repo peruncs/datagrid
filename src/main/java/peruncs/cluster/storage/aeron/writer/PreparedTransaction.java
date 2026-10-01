@@ -128,6 +128,11 @@ final class PreparedTransaction implements AutoCloseable {
 
     /// Aborts an abandoned transaction so its sequence is terminated in the log.
     /// Closing after commit or abort has no effect.
+    ///
+    /// A token the Store already accepted never aborts: the log keeps the open transaction as restart
+    /// evidence and the publisher fails closed. A token handed to a coordinator that does not own it is a
+    /// caller error and is rejected there without failing the publisher; do not turn that into a
+    /// `failClosed()`, because the owning writer is healthy.
     @Override
     public void close() {
         synchronized (this.owner) {

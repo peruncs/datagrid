@@ -244,7 +244,7 @@ record AeronSettings(
     private static AeronRetryPolicy retryPolicy(final NodeConfig.RetryPacing pacing) {
         final AeronRetryPolicy defaults = AeronRetryPolicy.defaults();
         return new AeronRetryPolicy(defaults.idleMaxSpins(), defaults.idleMaxYields(), defaults.idleMinParkNanos(),
-                pacing.idleMaxPark().toNanos(), defaults.jitterBaseNanos(), pacing.jitterCap().toNanos(),
+                pacing.idleMaxPark().toNanos(), pacing.jitterBase().toNanos(), pacing.jitterCap().toNanos(),
                 pacing.archiveProbeDelay().toNanos(), defaults.catalogProbeInitialDelayNanos(),
                 defaults.catalogProbeMaxDelayNanos());
     }

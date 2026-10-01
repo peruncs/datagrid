@@ -31,6 +31,12 @@ public interface ClusterReplicationTransport extends AutoCloseable {
     default void registerPersistentRoots(final EmbeddedStorageFoundation<?> foundation) {
     }
 
+    /// Records the Store mark as the durable restart boundary after a replicated batch was applied.
+    ///
+    /// Called inside the graph write section, where the mark cannot change.
+    default void batchApplied() {
+    }
+
     /// Returns the stable Store mark registered by this transport.
     ///
     /// @return transport-owned replication mark, or `null` for standalone nodes

@@ -44,6 +44,11 @@ final class StoreIndexReflection {
 
     /// Checks that this Store version has the expected vector index layout and that it is accessible.
     ///
+    /// Only `VectorIndex.Default` is checked, the one implementation this Store version ships. A different
+    /// implementation fails closed with the same exception when its first batch invalidates it; a
+    /// `VarHandle` is resolved from the declared field, so a layout change cannot silently read the wrong
+    /// memory.
+    ///
     /// @throws IllegalStateException when a field is missing, ambiguous or not accessible
     static void verifyLayout() {
         ACCESS.get(VectorIndex.Default.class);
@@ -51,7 +56,9 @@ final class StoreIndexReflection {
 
     /// Discards the transient vector graph before replicated imports become visible.
     ///
-    /// The caller holds the graph write boundary.
+    /// The caller holds the application graph write section; this method takes the index's own
+    /// `builderLock` write lock around the reset, as the index does for its cleanup. An index loaded from
+    /// the Store creates that lock lazily, so a missing lock means no graph was ever built.
     ///
     /// @param index index whose search graph to reset
     /// @throws IllegalStateException if the upstream field layout is not recognized
@@ -60,10 +67,13 @@ final class StoreIndexReflection {
         final VectorGraphAccess access = ACCESS.get(target.getClass());
         final ReentrantReadWriteLock lock = (ReentrantReadWriteLock) access.lock().getVolatile(target);
         if (lock == null) {
-            /* The index never built a graph: nothing to reset. A graph without its lock is a layout surprise. */
-            if (access.builder().getVolatile(target) != null || access.graph().getVolatile(target) != null) {
+            /* A loaded index creates its lock lazily, so no lock means no graph, no deferred work and no
+             * rebuild yet. Anything else is a layout surprise and must not be skipped silently. */
+            if (access.builder().getVolatile(target) != null || access.graph().getVolatile(target) != null ||
+                (access.deferred().getVolatile(target) instanceof ConcurrentLinkedQueue<?> queued && !queued.isEmpty()) ||
+                (boolean) access.rebuilt().getVolatile(target)) {
                 throw new IllegalStateException(
-                        "vector index %s has a graph but no builder lock".formatted(target.getClass().getName()));
+                        "vector index %s has graph state but no builder lock".formatted(target.getClass().getName()));
             }
             return;
         }

@@ -14,6 +14,7 @@ import peruncs.cluster.storage.binary.StorageBinaryDataReceiver;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
+import java.util.function.Supplier;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -39,6 +40,14 @@ final class AeronReaderTransport {
     private final CurrentReader<AeronArchiveReader> readers = new CurrentReader<>();
     /* One Archive stream keeps its recording identity across reader restarts. */
     private volatile long discoveredRecordingId = Aeron.NULL_VALUE;
+
+    /* The unknown boundary reported before any Store mark exists. */
+    private static final CursorSnapshot UNKNOWN = new CursorSnapshot(-1L, -1L);
+    /* The durable restart boundary as one immutable pair. The Store mark is a live graph object that the
+     * apply thread rewrites in place, so reading its two fields from another thread can pair one commit's
+     * sequence with the next commit's position, and retention would then purge a segment a restart still
+     * needs. The pair is captured inside the graph write section, where the mark cannot change. */
+    private volatile CursorSnapshot appliedBoundary = UNKNOWN;
 
     AeronReaderTransport(final AeronTransport facade) {
         this.facade = facade;
@@ -94,6 +103,7 @@ final class AeronReaderTransport {
         final long recordingId = settings().topology().recordingId() >= 0
                 ? settings().topology().recordingId() : this.discoverReaderRecordingId();
         validateStartingMark(startingMark, recordingId);
+        this.captureBoundary(startingMark);
         final long initialSequence = startingMark.sequence();
         final long cursorPosition = startingMark.prepareStartPosition();
         final AtomicReference<AeronArchiveReader> readerRef = new AtomicReference<>();
@@ -134,11 +144,8 @@ final class AeronReaderTransport {
                              * retention never purges the segment a restart still needs. An
                              * ABORT-only barrier leaves the mark unchanged, so the watermark
                              * simply repeats. */
-                            final long durableSequence = startingMark.sequence();
-                            if (durableSequence >= 0L) {
-                                this.publishReaderWatermark(new CursorSnapshot(durableSequence,
-                                        startingMark.prepareStartPosition()), recordingId);
-                            }
+                            final CursorSnapshot durable = this.appliedBoundary;
+                            if (durable.sequence() >= 0L) this.publishReaderWatermark(durable, recordingId);
                         }
                     })
                     .build());
@@ -152,8 +159,26 @@ final class AeronReaderTransport {
         if (initialSequence >= 0) {
             this.publishReaderWatermark(new CursorSnapshot(initialSequence, cursorPosition), recordingId);
         }
-        return new ClientAdapter(replacement, startingMark, recordingId, settings().topology().clusterId(),
+        return new ClientAdapter(replacement, () -> this.appliedBoundary, recordingId, settings().topology().clusterId(),
                 settings().topology().identity().nodeId(), settings().topology().identity().storeGeneration(), settings().topology().epoch());
+    }
+
+    /// Captures the Store mark as the durable boundary.
+    ///
+    /// Call it only while the mark cannot change: before the reader starts, or at the end of an apply
+    /// batch inside the graph write section.
+    ///
+    /// @param mark the Store-resident mark of this reader
+    void captureBoundary(final ReplicationMark mark) {
+        this.appliedBoundary = mark.sequence() >= 0L
+                ? new CursorSnapshot(mark.sequence(), mark.prepareStartPosition()) : UNKNOWN;
+    }
+
+    /// Returns the durable restart boundary last captured from the Store mark.
+    ///
+    /// @return one consistent sequence and position pair, or `-1`/`-1` while the Store holds no mark
+    CursorSnapshot appliedBoundary() {
+        return this.appliedBoundary;
     }
 
     /// Rejects a Store mark that belongs to another replication history.
@@ -284,7 +309,7 @@ final class AeronReaderTransport {
     /// Adds the neutral message-position view to the Aeron client.
     private record ClientAdapter(
             AeronArchiveReader delegate,
-            ReplicationMark mark,
+            Supplier<CursorSnapshot> boundary,
             long recordingId,
             UUID clusterId,
             UUID nodeId,
@@ -299,12 +324,11 @@ final class AeronReaderTransport {
         }
 
         public ReplicationPosition position() {
-            /* The boundary a Store image can be restarted from: its mark, not the end of the last
-             * commit frame the assembler resolved. Before the first applied transaction the mark is
-             * empty and the position is reported as unknown (-1), never the assembler's cursor. */
-            final CursorSnapshot snapshot = this.mark().sequence() >= 0L
-                    ? new CursorSnapshot(this.mark().sequence(), this.mark().prepareStartPosition())
-                    : new CursorSnapshot(-1L, -1L);
+            /* The boundary a Store image can be restarted from: the mark captured after the last applied
+             * batch, not the end of the last commit frame the assembler resolved. It lags the applied
+             * cursor by the batching window, which is conservative for retention. A reader whose Store
+             * holds no mark yet reports it as unknown (-1), never the assembler's cursor. */
+            final CursorSnapshot snapshot = this.boundary().get();
             return new ReplicationPosition(this.clusterId(), this.storeGeneration(), this.epoch(),
                     this.recordingId(), snapshot.sequence(), snapshot.position(),
                     this.delegate().fencingToken(), this.nodeId());

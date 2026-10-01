@@ -31,6 +31,10 @@ mvn verify -Pcrashmatrix      # forked crash matrix
 mvn verify -Psoak             # writer/reader soak
 ```
 
+The pool-ownership integration test runs 1,000 transactions by default (it is bound by two
+Store fsyncs per transaction). Run the full sweep with
+`mvn verify -Pintegration -Dit.test=StorageBinaryPoolOwnershipIT -Dpool.transactions=10000`.
+
 The build tracks Eclipse Store/Serializer `5.0.0-SNAPSHOT`. Deploy every node
 from the same dated snapshot. This is a pre-release artifact, not published
 to Maven Central.
@@ -227,6 +231,7 @@ value is supplied; paths and channels with derived defaults are described above.
 | `PERUNCS_AERON_RECORDED_POSITION_TIMEOUT_NANOS` | `30000000000` |
 | `PERUNCS_AERON_ABORT_RECORDED_POSITION_TIMEOUT_NANOS` | `5000000000` |
 | `PERUNCS_AERON_RETRY_IDLE_MAX_PARK_NANOS` | `1000000` |
+| `PERUNCS_AERON_RETRY_JITTER_BASE_NANOS` | `1000` |
 | `PERUNCS_AERON_RETRY_JITTER_CAP_NANOS` | `1000000` |
 | `PERUNCS_AERON_RETRY_ARCHIVE_PROBE_DELAY_NANOS` | `10000000` |
 | `PERUNCS_AERON_RETENTION_OPERATION_TIMEOUT_MILLIS` | `60000` |
@@ -281,7 +286,9 @@ A node reporting `RESEED_REQUIRED` needs the same procedure.
   - standalone nodes report `ReplicationState.NOT_CONFIGURED`;
   - `FAILED`: stop serving and inspect; a node whose Archive stayed unreachable past
     the reconnect budget also reports `FAILED` and resumes from the same Store mark
-    after a restart;
+    after a restart. A writer whose recovery failed `PERUNCS_WRITER_RECOVERY_ATTEMPTS`
+    (default 3) consecutive times also latches `FAILED`; if the log says the Archive
+    recording is not stopped, check that no second writer process still holds it;
   - `DEGRADED`: may serve, but fix the dependency;
   - `RESEED_REQUIRED`: stop and reseed (the recording no longer covers the Store mark).
 - `startStorageChecks()`: periodic Store checks (writer and reader).

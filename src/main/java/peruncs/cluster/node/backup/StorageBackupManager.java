@@ -452,8 +452,8 @@ public interface StorageBackupManager {
                 }
                 if (ReplicationRetry.expired(deadline)) {
                     throw new NodeException(
-                            "Timed out waiting for replication reader boundary at %s (last resolved sequence=%s, position=%s)"
-                                    .formatted(this.dataClient.position(), result.sequence(), result.position()));
+                            "Timed out waiting for the replication reader boundary (last resolved sequence=%s, position=%s)"
+                                    .formatted(result.sequence(), result.position()));
                 }
                 this.awaitNextPoll();
             }

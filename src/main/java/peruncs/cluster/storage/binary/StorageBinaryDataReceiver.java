@@ -16,6 +16,9 @@ import java.nio.ByteOrder;
 public interface StorageBinaryDataReceiver {
     /// Allocates native storage for a transaction being assembled for this receiver.
     ///
+    /// The default allocates untracked direct memory that only the garbage collector reclaims; use it in
+    /// short tests only. A production receiver overrides this together with [#releaseNativeBuffer(ByteBuffer)].
+    ///
     /// @param minimumCapacity required capacity in bytes
     /// @return writable native buffer with at least the requested capacity
     default ByteBuffer allocateNativeBuffer(final int minimumCapacity) {
